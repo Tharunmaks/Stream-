@@ -47,10 +47,11 @@ file size      multiple of 4096
 
 ## Quant types
 
-`ES_QT_Q2_K` is a placeholder that reserves the size: 256-weight blocks of
-84 bytes (2.625 bits per weight). The exact layout inside a block gets
-fixed in the kernel step, after we check which dot-product instructions
-your CPU has.
+`ES_QT_Q2_K` is llama.cpp's `block_q2_K` (GGUF tensor type 10), byte for
+byte: 256-weight blocks of 84 bytes (2.625 bits per weight), laid out as
+`scales[16]`, `qs[64]`, `d` (fp16), `dmin` (fp16). See `src/es_q2k.h`.
+Matching GGUF means a converter only has to slice the expert tensors out of
+an existing GGUF file. Nothing gets re-quantized on the phone.
 
 ## Sizes this implies (Q2_K, 3 matrices)
 

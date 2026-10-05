@@ -4,15 +4,24 @@ CPU-only inference for very large Mixture-of-Experts models on an Android
 phone (Termux, aarch64, no root, no GPU). The expert weights are streamed
 from flash instead of being held in RAM.
 
-Status: **Step 1, expert file format + parallel loader + bandwidth benchmark.**
+Status:
+- **Step 1 (done):** expert file format, parallel loader, flash benchmark.
+  Measured: 1.75 GB/s cold with 4–6 readers (real O_DIRECT, 0% cached),
+  28 ms per 8-expert layer, 5.5 ms for a single 5.9 MiB expert.
+- **Step 2 (current):** CPU topology, a Q2_K x Q8_K NEON SDOT kernel, and a
+  compute benchmark.
 
 ## Layout
 
 ```
 src/es_format.h       on-disk expert format (header, tensor descriptors, hash)
 src/es_io.{h,c}       parallel chunked loader (pthreads, O_DIRECT, fallback)
+src/es_cpu.{h,c}      core types, max clocks, pinning, dotprod detection
+src/es_q2k.{h,c}      GGUF-compatible Q2_K weights, Q8_K activations, scalar ref
+src/es_q2k_neon.c     NEON + SDOT dot product (armv8.2-a dotprod)
 tools/es_gen.c        writes synthetic expert files in the real format
 tools/es_bench.c      cold-read bandwidth/latency benchmark with cache checks
+tools/es_kbench.c     kernel correctness + compute throughput per core type
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
 docs/expert_format.md format spec and design notes
 ```
@@ -48,6 +57,24 @@ that, es_bench evicts every file before each run and checks residency
 afterwards with `mincore()`.
 
 Clean up afterwards with `rm -rf ~/es_bench ~/es_bench_big`.
+
+## Step 2: kernel benchmark (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+grep -E 'processor|CPU part' /proc/cpuinfo | paste - - | awk '{print $3, $NF}'
+cat /proc/self/status | grep Cpus_allowed_list
+./es_kbench                 # topology, correctness, single-core + scaling
+./es_kbench -S -m 128       # same with the scalar kernel, for comparison
+```
+
+Keep the screen on and Termux in the foreground. Android moves background
+apps onto the little cores, which would make the numbers look worse than
+they are.
+
+`es_q2k` uses exactly the llama.cpp `block_q2_K` layout. It was checked
+bit for bit against ggml's `dequantize_row_q2_K`, so expert files can be
+cut from existing GGUF Q2_K models.
 
 ## What the numbers mean (back-of-envelope, I/O only)
 
