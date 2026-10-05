@@ -38,6 +38,10 @@ typedef struct es_req {
 
 /* want_direct: 1 = try O_DIRECT (falls back to buffered if the FS refuses). */
 es_pool *es_pool_create(int nthreads, size_t chunk_bytes, int want_direct);
+/* Same, with reader threads pinned round-robin to cpus[0..ncpus-1]
+ * (e.g. the little cores, keeping the big ones free for matmul). */
+es_pool *es_pool_create_on(int nthreads, size_t chunk_bytes, int want_direct,
+                           const int *cpus, int ncpus);
 void     es_pool_destroy(es_pool *p);
 int      es_pool_is_direct(const es_pool *p);
 
@@ -46,6 +50,8 @@ int      es_pool_is_direct(const es_pool *p);
 int es_submit(es_pool *p, es_req *r, const char *path);
 /* Blocks until every chunk of r has finished. Returns r->err. */
 int es_wait(es_pool *p, es_req *r);
+/* Non-blocking: 1 if r has finished (or was never queued). */
+int es_done(es_pool *p, es_req *r);
 
 /* Helpers */
 void    *es_alloc(size_t bytes);  /* 4096-aligned, free() to release */

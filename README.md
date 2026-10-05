@@ -8,8 +8,13 @@ Status:
 - **Step 1 (done):** expert file format, parallel loader, flash benchmark.
   Measured: 1.75 GB/s cold with 4–6 readers (real O_DIRECT, 0% cached),
   28 ms per 8-expert layer, 5.5 ms for a single 5.9 MiB expert.
-- **Step 2 (current):** CPU topology, a Q2_K x Q8_K NEON SDOT kernel, and a
-  compute benchmark.
+- **Step 2 (done):** GGUF-compatible Q2_K NEON SDOT kernel. Measured on
+  4x Cortex-A78: 9.8 GB/s of weights (memory read tops out at 13.8 GB/s),
+  so about 0.72 s/token of compute for the Qwen3-235B shape. Adding the
+  A55 cores makes it slower, so compute uses only the big cores.
+- **Step 3 (current):** `es_run`, an end-to-end decode loop: hot-expert
+  cache, router-ahead prefetch, readers on the little cores, compute on the
+  big cores. Weights are synthetic and routing is simulated.
 
 ## Layout
 
@@ -19,9 +24,12 @@ src/es_io.{h,c}       parallel chunked loader (pthreads, O_DIRECT, fallback)
 src/es_cpu.{h,c}      core types, max clocks, pinning, dotprod detection
 src/es_q2k.{h,c}      GGUF-compatible Q2_K weights, Q8_K activations, scalar ref
 src/es_q2k_neon.c     NEON + SDOT dot product (armv8.2-a dotprod)
+src/es_compute.{h,c}  pinned compute pool (spin, then sleep)
+src/es_cache.{h,c}    hot-expert RAM cache, frequency + recency eviction
 tools/es_gen.c        writes synthetic expert files in the real format
 tools/es_bench.c      cold-read bandwidth/latency benchmark with cache checks
 tools/es_kbench.c     kernel correctness + compute throughput per core type
+tools/es_run.c        end-to-end decode loop (cache + prefetch + kernels)
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
 docs/expert_format.md format spec and design notes
 ```
@@ -75,6 +83,24 @@ they are.
 `es_q2k` uses exactly the llama.cpp `block_q2_K` layout. It was checked
 bit for bit against ggml's `dequantize_row_q2_K`, so expert files can be
 cut from existing GGUF Q2_K models.
+
+## Step 3: run the engine (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+rm -rf ~/es_bench && ./es_gen -d ~/es_bench -L 8 -E 128   # 6.3 GB, 128 experts like Qwen3
+./es_run -d ~/es_bench                           # defaults
+./es_run -d ~/es_bench -q -p 0 -r 0              # worst case: no prefetch, no locality
+./es_run -d ~/es_bench -q -r 0.5 -p 0.8 -C 1536  # optimistic routing, bigger cache
+./es_run -d ~/es_bench -q -a 0                   # without the attention cost
+```
+
+The model has 94 layers but the dataset only 8. Model layer `l` reads file
+layer `l % 8`, but the cache key is the model layer, and reads are O_DIRECT,
+so reusing files can't produce fake cache hits.
+
+`-r`, `-z` and `-p` are **assumptions**, not measurements. Real values need
+real routing traces (later step).
 
 ## What the numbers mean (back-of-envelope, I/O only)
 

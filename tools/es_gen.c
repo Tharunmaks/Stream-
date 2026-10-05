@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
             h->n_tensors = 3;
             h->layer = l;
             h->expert = e;
-            h->flags = ES_FLAG_SYNTHETIC;
+            h->flags = ES_FLAG_SYNTHETIC | ES_FLAG_SANE_SCALES;
             h->file_bytes = file_bytes;
             h->model_id = es_hash64("synthetic", 9);
             uint64_t off = ES_HEADER_BYTES;
@@ -101,6 +101,13 @@ int main(int argc, char **argv) {
                 t->nbytes = q2k_bytes(t->rows, t->cols);
                 uint64_t *w = (uint64_t *)(buf + off);
                 for (uint64_t k = 0; k < t->nbytes / 8; k++) w[k] = es_rng_next(&s);
+                /* random bytes in the fp16 d/dmin fields would give NaN/Inf;
+                 * give every 84-byte Q2_K block finite scales instead */
+                for (uint64_t blk = 0; blk + 84 <= t->nbytes; blk += 84) {
+                    uint8_t *bp = buf + off + blk;
+                    bp[80] = 0x1F; bp[81] = 0x21; /* d    = 0.01  (fp16 0x211F) */
+                    bp[82] = 0x1F; bp[83] = 0x1D; /* dmin = 0.005 (fp16 0x1D1F) */
+                }
                 t->hash = es_hash64(buf + off, t->nbytes);
                 off += es_round_up(t->nbytes, ES_ALIGN);
             }

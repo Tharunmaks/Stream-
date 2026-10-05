@@ -44,7 +44,9 @@ enum es_role {
 };
 
 enum es_flags {
-    ES_FLAG_SYNTHETIC = 1u << 0, /* random bytes, for benchmarking only */
+    ES_FLAG_SYNTHETIC   = 1u << 0, /* random bytes, for benchmarking only */
+    ES_FLAG_SANE_SCALES = 1u << 1, /* synthetic Q2_K blocks have finite fp16
+                                      d/dmin, so the kernels can run on them */
 };
 
 typedef struct {

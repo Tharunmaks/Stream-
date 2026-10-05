@@ -12,6 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "es_cpu.h"
 #include "es_format.h"
 
 #define QUEUE_CAP 4096 /* chunks; 4096 x 1 MiB = 4 GiB in flight, plenty */
@@ -35,6 +36,10 @@ struct es_pool {
     chunk q[QUEUE_CAP];
     size_t head, count;
     int stop;
+
+    int cpus[64];       /* optional pinning targets */
+    int ncpus;
+    atomic_int next_cpu;
 };
 
 uint64_t es_now_ns(void) {
@@ -62,6 +67,10 @@ static void finish_req(es_pool *p, es_req *r) {
 
 static void *worker(void *arg) {
     es_pool *p = (es_pool *)arg;
+    if (p->ncpus > 0) {
+        int i = atomic_fetch_add(&p->next_cpu, 1) % p->ncpus;
+        es_pin_self(p->cpus[i]);
+    }
     for (;;) {
         pthread_mutex_lock(&p->mu);
         while (p->count == 0 && !p->stop) pthread_cond_wait(&p->cv_work, &p->mu);
@@ -93,9 +102,17 @@ static void *worker(void *arg) {
 }
 
 es_pool *es_pool_create(int nthreads, size_t chunk_bytes, int want_direct) {
+    return es_pool_create_on(nthreads, chunk_bytes, want_direct, NULL, 0);
+}
+
+es_pool *es_pool_create_on(int nthreads, size_t chunk_bytes, int want_direct,
+                           const int *cpus, int ncpus) {
     if (nthreads < 1 || chunk_bytes == 0 || chunk_bytes % ES_ALIGN) return NULL;
     es_pool *p = calloc(1, sizeof(*p));
     if (!p) return NULL;
+    if (ncpus > 64) ncpus = 64;
+    for (int i = 0; i < ncpus; i++) p->cpus[i] = cpus[i];
+    p->ncpus = cpus ? ncpus : 0;
     p->nthreads = nthreads;
     p->chunk_bytes = chunk_bytes;
     p->direct = want_direct;
@@ -192,6 +209,13 @@ int es_wait(es_pool *p, es_req *r) {
     while (!r->done) pthread_cond_wait(&p->cv_done, &p->mu);
     pthread_mutex_unlock(&p->mu);
     return atomic_load(&r->err);
+}
+
+int es_done(es_pool *p, es_req *r) {
+    pthread_mutex_lock(&p->mu);
+    int d = r->done;
+    pthread_mutex_unlock(&p->mu);
+    return d;
 }
 
 int es_probe_direct(const char *path) {
