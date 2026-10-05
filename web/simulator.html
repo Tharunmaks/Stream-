@@ -1,0 +1,601 @@
+<title>ExpertStream Simulator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an instrument panel. Controls on the left, the live expert map and timing on the right; stacks on phones. */
+:root {
+  --bg: #f3f5f7;
+  --panel: #fcfcfb;
+  --ink: #17202b;
+  --ink-2: #4a5563;
+  --ink-3: #7a8594;
+  --line: #dde2e8;
+  --accent: #2a78d6;
+  --s-exp: #2a78d6;    /* expert compute / cache hit */
+  --s-flash: #eb6834;  /* waiting on flash / demand load */
+  --s-attn: #1baf7a;   /* attention / prefetch */
+  --cell-empty: #e6eaef;
+  --cell-cached: #9aa9bb;
+  --code-bg: #eef1f4;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12171d; --panel: #1a2028; --ink: #eef2f6; --ink-2: #b4bec9; --ink-3: #85909c;
+    --line: #2c3540; --accent: #3987e5; --s-exp: #3987e5; --s-flash: #d95926; --s-attn: #199e70;
+    --cell-empty: #222a33; --cell-cached: #56657a; --code-bg: #222a33; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12171d; --panel: #1a2028; --ink: #eef2f6; --ink-2: #b4bec9; --ink-3: #85909c;
+  --line: #2c3540; --accent: #3987e5; --s-exp: #3987e5; --s-flash: #d95926; --s-attn: #199e70;
+  --cell-empty: #222a33; --cell-cached: #56657a; --code-bg: #222a33; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 20px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; letter-spacing: 0.005em; }
+h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; line-height: 1.1; }
+h2 { font-size: 20px; font-weight: 600; }
+h3 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-2); }
+p { margin: 0; max-width: 68ch; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-2); }
+header { display: grid; gap: 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font-family: var(--f-mono); font-size: 12.5px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--ink-2); }
+.chip b { color: var(--ink); font-weight: 500; }
+.sim-tag { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.sim-tag::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--s-flash); }
+
+.grid { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.panel > * { min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 14px; min-width: 0; }
+
+.presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+button { font: inherit; font-size: 13.5px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.ctl { display: grid; gap: 4px; }
+.ctl label { display: flex; justify-content: space-between; gap: 8px; font-size: 13.5px; }
+.ctl label span:last-child { font-family: var(--f-mono); color: var(--ink); }
+.ctl small { color: var(--ink-3); font-size: 12px; line-height: 1.35; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13.5px; }
+.transport { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile { display: grid; gap: 2px; padding: 12px; border-radius: 8px; background: var(--bg); min-width: 0; }
+.tile .v { font-family: var(--f-display); font-size: 28px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.tile .k { font-size: 12.5px; color: var(--ink-2); }
+
+.split { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 640px) { .split { grid-template-columns: minmax(0, 1fr); } }
+.bar-row { display: grid; gap: 4px; }
+.bar-row .lbl { display: flex; justify-content: space-between; font-size: 13px; }
+.bar { height: 8px; border-radius: 4px; background: var(--cell-empty); overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 4px; }
+
+.map-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12.5px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.canvas-box { overflow-x: auto; }
+canvas { display: block; max-width: 100%; }
+#map { width: 100%; height: auto; image-rendering: pixelated; border-radius: 6px; }
+.axis-note { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); font-family: var(--f-mono); }
+
+.chart-box { position: relative; }
+#chart { width: 100%; height: 220px; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 4px 14px rgba(0,0,0,.12); display: grid; gap: 2px; min-width: 170px; }
+.tip .r { display: flex; justify-content: space-between; gap: 12px; }
+.tip .r i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+
+.note { border-left: 3px solid var(--s-flash); padding: 10px 14px; background: var(--bg); border-radius: 0 8px 8px 0; display: grid; gap: 6px; }
+.note.ok { border-left-color: var(--s-attn); }
+
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; color: var(--ink-2); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+td.n { font-family: var(--f-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.table-box { overflow-x: auto; }
+pre { margin: 0; background: var(--code-bg); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-family: var(--f-mono); font-size: 13px; line-height: 1.6; }
+.cmd { display: grid; gap: 8px; }
+.cmd-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+@media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } }
+details summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>ExpertStream Simulator</h1>
+    <p class="muted">An MoE model too big for RAM, streamed expert by expert from flash on your phone. This page re-runs the <span class="mono">es_run</span> decode loop in the browser, timed with the numbers your phone measured in Steps 1 and 2. Change the cache and routing settings and watch where each token's time goes.</p>
+    <div class="chips">
+      <span class="chip">flash <b>1.75 GB/s</b> cold, 4 readers</span>
+      <span class="chip">kernel <b>9.81 GB/s</b> on 4× Cortex-A78</span>
+      <span class="chip">RAM free <b>2.9 GB</b></span>
+      <span class="chip">model <b>Qwen3-235B shape</b> · 94 layers × 128 experts · top-8</span>
+      <span class="chip">expert <b>5.91 MiB</b> Q2_K</span>
+    </div>
+    <span class="sim-tag">Weights are random and the router is synthetic. Flash and kernel speeds are your measurements.</span>
+  </header>
+
+  <div class="grid">
+    <aside class="panel" aria-label="Settings">
+      <h3>Presets</h3>
+      <div class="presets">
+        <button type="button" data-preset="default" id="p-default">Defaults</button>
+        <button type="button" data-preset="worst" id="p-worst">Worst case</button>
+        <button type="button" data-preset="optimistic" id="p-opt">Optimistic</button>
+        <button type="button" data-preset="skewed" id="p-skew">Skewed routing</button>
+      </div>
+
+      <h3>Memory</h3>
+      <div class="ctl">
+        <label for="cache"><span>Expert cache</span><span id="cache-v"></span></label>
+        <input type="range" id="cache" min="256" max="2560" step="128" value="1024">
+        <small id="cache-note"></small>
+      </div>
+      <div class="ctl">
+        <label for="freq"><span>Eviction: weight of past uses</span><span id="freq-v"></span></label>
+        <input type="range" id="freq" min="0" max="8" step="0.5" value="1">
+        <small>0 = plain least-recently-used. Higher keeps frequently used experts longer.</small>
+      </div>
+
+      <h3>Routing (simulated)</h3>
+      <div class="ctl">
+        <label for="pred"><span>Prefetch predictor accuracy</span><span id="pred-v"></span></label>
+        <input type="range" id="pred" min="0" max="1" step="0.05" value="0.6">
+        <small>Share of the next layer's experts guessed right. 0 turns prefetch off.</small>
+      </div>
+      <div class="ctl">
+        <label for="reuse"><span>Repeat from previous token</span><span id="reuse-v"></span></label>
+        <input type="range" id="reuse" min="0" max="0.9" step="0.05" value="0.3">
+        <small>Chance an expert slot reuses one the previous token used in that layer.</small>
+      </div>
+      <div class="ctl">
+        <label for="zipf"><span>Popularity skew (zipf)</span><span id="zipf-v"></span></label>
+        <input type="range" id="zipf" min="0" max="1.5" step="0.05" value="0">
+        <small>0 = every expert equally likely, as load-balanced routers aim for.</small>
+      </div>
+      <label class="check" for="attn"><input type="checkbox" id="attn" checked> Include attention compute (23 MB per layer)</label>
+
+      <h3>Playback</h3>
+      <div class="transport">
+        <button type="button" class="primary" id="play" aria-pressed="true">Pause</button>
+        <button type="button" id="step">Next token</button>
+        <button type="button" id="reset">Restart</button>
+      </div>
+      <div class="ctl">
+        <label for="speed"><span>Speed</span><span id="speed-v"></span></label>
+        <input type="range" id="speed" min="1" max="94" step="1" value="24">
+      </div>
+    </aside>
+
+    <main class="panel" aria-label="Simulation">
+      <div class="map-head">
+        <h2>Steady state</h2>
+        <span class="muted mono" id="tok-count"></span>
+      </div>
+      <div class="tiles">
+        <div class="tile"><span class="v" id="t-spt">–</span><span class="k">seconds per token</span></div>
+        <div class="tile"><span class="v" id="t-tps">–</span><span class="k">tokens per second</span></div>
+        <div class="tile"><span class="v" id="t-wait">–</span><span class="k">of the time waiting on flash</span></div>
+        <div class="tile"><span class="v" id="t-gb">–</span><span class="k">GB read from flash per token</span></div>
+      </div>
+      <div class="split">
+        <div class="bar-row"><div class="lbl"><span>Already in cache</span><span class="mono" id="r-hit">–</span></div><div class="bar"><i id="b-hit" style="background:var(--s-exp);width:0"></i></div></div>
+        <div class="bar-row"><div class="lbl"><span>Arrived by prefetch</span><span class="mono" id="r-pf">–</span></div><div class="bar"><i id="b-pf" style="background:var(--s-attn);width:0"></i></div></div>
+        <div class="bar-row"><div class="lbl"><span>Loaded on demand</span><span class="mono" id="r-miss">–</span></div><div class="bar"><i id="b-miss" style="background:var(--s-flash);width:0"></i></div></div>
+      </div>
+
+      <div class="map-head">
+        <h2>Expert map</h2>
+        <div class="legend" aria-label="Expert map legend">
+          <span><i style="background:var(--cell-cached)"></i>in RAM cache</span>
+          <span><i style="background:var(--s-exp)"></i>used, was cached</span>
+          <span><i style="background:var(--s-attn)"></i>used, prefetched</span>
+          <span><i style="background:var(--s-flash)"></i>used, demand-loaded</span>
+        </div>
+      </div>
+      <p class="muted" style="font-size:13.5px">Every cell is one expert file: 128 per row, one row per layer, 12,032 in all. Colored cells show what the current token has used so far. The outlined row is the layer being computed.</p>
+      <div class="canvas-box"><canvas id="map" width="896" height="658" role="img" aria-label="Grid of 94 layers by 128 experts showing cache state"></canvas></div>
+      <div class="axis-note"><span>expert 0</span><span>layer 0 at top, layer 93 at bottom</span><span>expert 127</span></div>
+
+      <div class="map-head">
+        <h2>Time per token</h2>
+        <div class="legend" aria-label="Timing legend">
+          <span><i style="background:var(--s-flash)"></i>waiting on flash</span>
+          <span><i style="background:var(--s-attn)"></i>attention</span>
+          <span><i style="background:var(--s-exp)"></i>expert compute</span>
+        </div>
+      </div>
+      <div class="chart-box">
+        <canvas id="chart" aria-label="Stacked bars of milliseconds per token"></canvas>
+        <div class="tip" id="tip" hidden></div>
+      </div>
+      <details>
+        <summary>Show the last tokens as a table</summary>
+        <div class="table-box"><table id="tok-table"><thead><tr><th>Token</th><th>Total ms</th><th>Flash wait</th><th>Attention</th><th>Experts</th><th>Cached</th><th>Prefetched</th><th>Demand</th></tr></thead><tbody></tbody></table></div>
+      </details>
+      <div class="note" id="insight"></div>
+    </main>
+  </div>
+
+  <div class="two">
+    <section class="panel">
+      <h2>Measured on your phone</h2>
+      <div class="table-box"><table>
+        <thead><tr><th>Test</th><th style="text-align:right">Result</th></tr></thead>
+        <tbody>
+          <tr><td>Flash, 4 readers, O_DIRECT, 0% cached</td><td class="n">1.71 GB/s</td></tr>
+          <tr><td>Flash, best (6 readers)</td><td class="n">1.75 GB/s</td></tr>
+          <tr><td>8 experts from one layer (p50)</td><td class="n">28.9 ms</td></tr>
+          <tr><td>One expert (p50)</td><td class="n">5.5 ms</td></tr>
+          <tr><td>Q2_K kernel, 1× A78</td><td class="n">3.45 GB/s</td></tr>
+          <tr><td>Q2_K kernel, 4× A78</td><td class="n">9.81 GB/s</td></tr>
+          <tr><td>Q2_K kernel, 4× A78 + 4× A55</td><td class="n">2.86 GB/s</td></tr>
+          <tr><td>Memory read, 4× A78</td><td class="n">13.8 GB/s</td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted" style="font-size:13.5px">The simulator assumes flash and compute don't slow each other down. On the phone they share memory bandwidth, so real runs will be somewhat slower.</p>
+    </section>
+    <section class="panel cmd">
+      <h2>Run the real engine</h2>
+      <p class="muted">This page models the engine. To run the actual C code on your phone, paste this into Termux. Results are saved to <span class="mono">step3_results.txt</span>.</p>
+      <div class="cmd-row"><pre id="cmd" style="flex:1;min-width:0">cd ~/Stream- &amp;&amp; git pull &amp;&amp; bash scripts/step3.sh</pre><button type="button" id="copy">Copy</button></div>
+      <p class="muted" style="font-size:13.5px">Keep the screen on with Termux in front. The first run writes a 6.3 GB test dataset, which takes about 15 seconds.</p>
+      <h3>How a layer runs</h3>
+      <pre>attention matvec (big cores)
+look up 8 experts in the RAM cache
+  miss → read the file from flash (little-core readers)
+start reading predicted experts for the next layer
+wait for this layer's 8 experts
+gate · up → SiLU → down on the big cores</pre>
+    </section>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---- measured constants ----
+  const L = 94, E = 128, K = 8;
+  const FLASH_BW = 1.75e9, KERNEL_BW = 9.81e9;
+  const EXPERT_BYTES = 6197248;           // 4 KiB header + 3 x 2,064,384 B Q2_K tensors
+  const ATTN_BYTES = 23e6;
+  const WARMUP = 8, HISTORY = 40;
+
+  const $ = id => document.getElementById(id);
+  const ctl = { cache: $('cache'), freq: $('freq'), pred: $('pred'), reuse: $('reuse'), zipf: $('zipf'), attn: $('attn'), speed: $('speed') };
+  const presets = {
+    default:    { cache: 1024, freq: 1, pred: 0.6, reuse: 0.3, zipf: 0, attn: true },
+    worst:      { cache: 1024, freq: 1, pred: 0,   reuse: 0,   zipf: 0, attn: true },
+    optimistic: { cache: 1536, freq: 1, pred: 0.8, reuse: 0.5, zipf: 0, attn: true },
+    skewed:     { cache: 2048, freq: 4, pred: 0.7, reuse: 0.4, zipf: 1.1, attn: true },
+  };
+
+  // ---- rng ----
+  let seed = 1;
+  const rnd = () => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; };
+
+  let S; // simulation state
+  function params() {
+    return { cacheMB: +ctl.cache.value, freq: +ctl.freq.value, pred: +ctl.pred.value, reuse: +ctl.reuse.value, zipf: +ctl.zipf.value, attn: ctl.attn.checked };
+  }
+
+  function init() {
+    seed = 12345;
+    const P = params();
+    const nslots = Math.floor(P.cacheMB * 1048576 / EXPERT_BYTES);
+    const perm = [];
+    for (let l = 0; l < L; l++) {
+      const p = Array.from({ length: E }, (_, i) => i);
+      for (let i = E - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+      perm.push(p);
+    }
+    const cdf = new Float64Array(E); let sum = 0, acc = 0;
+    for (let i = 0; i < E; i++) sum += 1 / Math.pow(i + 1, P.zipf);
+    for (let i = 0; i < E; i++) { acc += 1 / Math.pow(i + 1, P.zipf) / sum; cdf[i] = acc; }
+    S = {
+      P, nslots, perm, cdf,
+      key: new Int32Array(nslots).fill(-1), readyAt: new Float64Array(nslots), lastUse: new Float64Array(nslots),
+      uses: new Uint32Array(nslots), protect: new Float64Array(nslots), pf: new Uint8Array(nslots),
+      map: new Int32Array(L * E).fill(-1), used: new Uint8Array(L * E), // 0 none, 1 hit, 2 prefetch, 3 demand
+      t: 0, flashFree: 0, step: 0,
+      route: null, prev: null, pred: null,
+      token: 0, layer: 0, tok: null, history: [], steady: { n: 0, ms: 0, wait: 0, attn: 0, exp: 0, hit: 0, pf: 0, miss: 0, bytes: 0 },
+    };
+    newToken();
+    drawAll();
+  }
+
+  function zipfRank() {
+    const u = rnd(); let lo = 0, hi = E - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (S.cdf[m] < u) lo = m + 1; else hi = m; }
+    return lo;
+  }
+
+  function newToken() {
+    const P = S.P;
+    S.prev = S.route;
+    S.route = []; S.pred = [];
+    for (let l = 0; l < L; l++) {
+      const r = [];
+      for (let j = 0; j < K; j++) {
+        let e, tries = 0;
+        do {
+          e = (S.prev && rnd() < P.reuse) ? S.prev[l][Math.floor(rnd() * K)] : S.perm[l][zipfRank()];
+        } while (r.includes(e) && ++tries < 1000);
+        r.push(e);
+      }
+      S.route.push(r);
+      S.pred.push(r.map(e => rnd() < P.pred ? e : Math.floor(rnd() * E)));
+    }
+    S.used.fill(0);
+    S.layer = 0;
+    S.tok = { t0: S.t, wait: 0, attn: 0, exp: 0, hit: 0, pf: 0, miss: 0, bytes: 0 };
+  }
+
+  function enqueue() {
+    const start = Math.max(S.t, S.flashFree);
+    S.flashFree = start + EXPERT_BYTES / FLASH_BW;
+    return S.flashFree;
+  }
+
+  // same policy as src/es_cache.c
+  function claim(l, e) {
+    let best = -1, bestScore = 0;
+    const fw = S.P.freq * L;
+    for (let i = 0; i < S.nslots; i++) {
+      if (S.key[i] < 0) { best = i; break; }
+      if (S.readyAt[i] > S.t) continue;          // still loading
+      if (S.protect[i] >= S.step) continue;      // needed now or next layer
+      const score = S.lastUse[i] + fw * Math.min(S.uses[i], 16);
+      if (best < 0 || score < bestScore) { best = i; bestScore = score; }
+    }
+    if (best < 0) return -1;
+    if (S.key[best] >= 0) S.map[S.key[best]] = -1;
+    const k = l * E + e;
+    S.key[best] = k; S.map[k] = best; S.uses[best] = 0; S.pf[best] = 0;
+    S.lastUse[best] = S.step; S.protect[best] = S.step + 1;
+    S.readyAt[best] = enqueue();
+    return best;
+  }
+
+  function runLayer() {
+    const P = S.P, l = S.layer, T = S.tok;
+    S.step++;
+    if (P.attn) { const a = ATTN_BYTES / KERNEL_BW; S.t += a; T.attn += a; }
+    let ready = S.t;
+    for (const e of S.route[l]) {
+      const k = l * E + e;
+      let s = S.map[k];
+      if (s >= 0) {
+        if (S.pf[s]) { T.pf++; S.pf[s] = 0; S.used[k] = 2; } else { T.hit++; S.used[k] = 1; }
+      } else {
+        s = claim(l, e);
+        if (s < 0) continue;
+        T.miss++; T.bytes += EXPERT_BYTES; S.used[k] = 3;
+      }
+      S.uses[s]++; S.lastUse[s] = S.step; if (S.protect[s] < S.step) S.protect[s] = S.step;
+      ready = Math.max(ready, S.readyAt[s]);
+    }
+    if (P.pred > 0 && l + 1 < L) {
+      for (const e of S.pred[l + 1]) {
+        if (S.map[(l + 1) * E + e] >= 0) continue;
+        const s = claim(l + 1, e);
+        if (s < 0) break;
+        S.pf[s] = 1; T.bytes += EXPERT_BYTES;
+      }
+    }
+    const w = Math.max(0, ready - S.t); S.t += w; T.wait += w;
+    const c = K * EXPERT_BYTES / KERNEL_BW; S.t += c; T.exp += c;
+    S.layer++;
+    if (S.layer === L) finishToken();
+  }
+
+  function finishToken() {
+    const T = S.tok, ms = (S.t - T.t0) * 1000;
+    const rec = { i: S.token, ms, wait: T.wait * 1000, attn: T.attn * 1000, exp: T.exp * 1000, hit: T.hit, pf: T.pf, miss: T.miss, bytes: T.bytes, warm: S.token < WARMUP };
+    S.history.push(rec); if (S.history.length > HISTORY) S.history.shift();
+    if (!rec.warm) {
+      const st = S.steady; st.n++; st.ms += rec.ms; st.wait += rec.wait; st.attn += rec.attn; st.exp += rec.exp;
+      st.hit += rec.hit; st.pf += rec.pf; st.miss += rec.miss; st.bytes += rec.bytes;
+    }
+    S.token++;
+    newToken();
+  }
+
+  // ---- drawing ----
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const map = $('map'), mctx = map.getContext('2d');
+  function drawMap() {
+    const cw = 7, ch = 7;
+    const col = { empty: css('--cell-empty'), cached: css('--cell-cached'), hit: css('--s-exp'), pf: css('--s-attn'), miss: css('--s-flash'), ink: css('--ink'), panel: css('--panel') };
+    mctx.fillStyle = col.panel; mctx.fillRect(0, 0, map.width, map.height);
+    for (let l = 0; l < L; l++) {
+      for (let e = 0; e < E; e++) {
+        const k = l * E + e, u = S.used[k];
+        mctx.fillStyle = u === 1 ? col.hit : u === 2 ? col.pf : u === 3 ? col.miss : (S.map[k] >= 0 ? col.cached : col.empty);
+        mctx.fillRect(e * cw, l * ch, cw - 1, ch - 1);
+      }
+    }
+    const cur = Math.min(S.layer, L - 1);
+    mctx.strokeStyle = col.ink; mctx.lineWidth = 1.5;
+    mctx.strokeRect(0.75, cur * ch - 0.75, E * cw - 1.5, ch + 0.5);
+  }
+
+  const chart = $('chart'), cctx = chart.getContext('2d');
+  let bars = [];
+  function drawChart() {
+    const dpr = window.devicePixelRatio || 1, W = chart.clientWidth, H = chart.clientHeight;
+    chart.width = W * dpr; chart.height = H * dpr; cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cctx.clearRect(0, 0, W, H);
+    const pad = { l: 48, r: 8, t: 10, b: 24 };
+    const h = S.history;
+    const maxV = Math.max(1000, ...h.map(r => r.ms));
+    const stepV = maxV > 4000 ? 1000 : 500;
+    const top = Math.ceil(maxV / stepV) * stepV;
+    const y = v => pad.t + (H - pad.t - pad.b) * (1 - v / top);
+    cctx.font = '11px ' + css('--f-mono'); cctx.fillStyle = css('--ink-3'); cctx.strokeStyle = css('--line'); cctx.lineWidth = 1;
+    cctx.textAlign = 'right'; cctx.textBaseline = 'middle';
+    for (let v = 0; v <= top; v += stepV) {
+      cctx.beginPath(); cctx.moveTo(pad.l, Math.round(y(v)) + 0.5); cctx.lineTo(W - pad.r, Math.round(y(v)) + 0.5); cctx.stroke();
+      cctx.fillText((v / 1000).toFixed(v % 1000 ? 1 : 0) + ' s', pad.l - 6, y(v));
+    }
+    const slotW = (W - pad.l - pad.r) / HISTORY, bw = Math.max(3, slotW - 3);
+    const series = [['wait', css('--s-flash')], ['attn', css('--s-attn')], ['exp', css('--s-exp')]];
+    bars = [];
+    h.forEach((r, i) => {
+      const x = pad.l + i * slotW + (slotW - bw) / 2;
+      let base = 0;
+      series.forEach(([key, color], si) => {
+        const v = r[key]; if (v <= 0) return;
+        const y0 = y(base), y1 = y(base + v);
+        cctx.fillStyle = color; cctx.globalAlpha = r.warm ? 0.45 : 1;
+        const gap = base > 0 ? 2 : 0;
+        const topSeg = si === series.length - 1 || series.slice(si + 1).every(([k2]) => r[k2] <= 0);
+        roundRect(cctx, x, y1, bw, Math.max(0, y0 - y1 - gap), topSeg ? Math.min(4, bw / 2) : 0);
+        base += v;
+      });
+      cctx.globalAlpha = 1;
+      bars.push({ x: pad.l + i * slotW, w: slotW, r });
+    });
+    cctx.fillStyle = css('--ink-3'); cctx.textAlign = 'left'; cctx.textBaseline = 'alphabetic';
+    if (h.length) cctx.fillText('token ' + h[0].i, pad.l, H - 6);
+    cctx.textAlign = 'right';
+    if (h.length) cctx.fillText('token ' + h[h.length - 1].i + (h.some(r => r.warm) ? '   faded = warm-up' : ''), W - pad.r, H - 6);
+  }
+  function roundRect(c, x, y, w, h, r) {
+    if (h <= 0) return;
+    r = Math.min(r, h);
+    c.beginPath(); c.moveTo(x, y + h); c.lineTo(x, y + r); c.quadraticCurveTo(x, y, x + r, y);
+    c.lineTo(x + w - r, y); c.quadraticCurveTo(x + w, y, x + w, y + r); c.lineTo(x + w, y + h); c.closePath(); c.fill();
+  }
+
+  const tip = $('tip');
+  chart.addEventListener('mousemove', ev => {
+    const rect = chart.getBoundingClientRect(), mx = ev.clientX - rect.left;
+    const b = bars.find(b => mx >= b.x && mx < b.x + b.w);
+    if (!b) { tip.hidden = true; return; }
+    const r = b.r, n = r.hit + r.pf + r.miss || 1;
+    tip.innerHTML = `<strong>Token ${r.i}${r.warm ? ' (warm-up)' : ''}</strong>
+      <div class="r"><span>Total</span><span class="mono">${fmtMs(r.ms)}</span></div>
+      <div class="r"><span><i style="background:var(--s-flash)"></i>Flash wait</span><span class="mono">${fmtMs(r.wait)}</span></div>
+      <div class="r"><span><i style="background:var(--s-attn)"></i>Attention</span><span class="mono">${fmtMs(r.attn)}</span></div>
+      <div class="r"><span><i style="background:var(--s-exp)"></i>Experts</span><span class="mono">${fmtMs(r.exp)}</span></div>
+      <div class="r"><span>Cached / prefetched / demand</span><span class="mono">${pct(r.hit / n)} / ${pct(r.pf / n)} / ${pct(r.miss / n)}</span></div>`;
+    tip.hidden = false;
+    const tw = tip.offsetWidth;
+    tip.style.left = Math.min(Math.max(0, mx + 12), rect.width - tw) + 'px';
+    tip.style.top = '8px';
+  });
+  chart.addEventListener('mouseleave', () => { tip.hidden = true; });
+
+  const fmtMs = v => v >= 1000 ? (v / 1000).toFixed(2) + ' s' : Math.round(v) + ' ms';
+  const pct = v => (100 * v).toFixed(1) + '%';
+
+  function drawStats() {
+    const st = S.steady, P = S.P;
+    $('tok-count').textContent = st.n ? `${st.n} tokens after ${WARMUP} warm-up · token ${S.token}, layer ${S.layer}` : `warming up · token ${S.token}, layer ${S.layer}`;
+    if (st.n) {
+      const ms = st.ms / st.n, n = st.hit + st.pf + st.miss;
+      $('t-spt').textContent = (ms / 1000).toFixed(2);
+      $('t-tps').textContent = (1000 / ms).toFixed(2);
+      $('t-wait').textContent = Math.round(100 * st.wait / st.ms) + '%';
+      $('t-gb').textContent = (st.bytes / st.n / 1e9).toFixed(2);
+      $('r-hit').textContent = pct(st.hit / n); $('b-hit').style.width = pct(st.hit / n);
+      $('r-pf').textContent = pct(st.pf / n); $('b-pf').style.width = pct(st.pf / n);
+      $('r-miss').textContent = pct(st.miss / n); $('b-miss').style.width = pct(st.miss / n);
+    } else {
+      ['t-spt', 't-tps', 't-wait', 't-gb', 'r-hit', 'r-pf', 'r-miss'].forEach(id => $(id).textContent = '–');
+      ['b-hit', 'b-pf', 'b-miss'].forEach(id => $(id).style.width = '0');
+    }
+    // insight
+    const ws = L * K, ins = $('insight');
+    const hitRate = st.n ? st.hit / (st.hit + st.pf + st.miss) : 0;
+    if (S.nslots < ws) {
+      ins.className = 'note';
+      ins.innerHTML = `<strong>The cache holds ${S.nslots} experts, but one token needs ${ws}.</strong>
+        <p>Recency-based eviction throws each expert out before the next token comes back to it, so token-to-token reuse almost never hits (${pct(hitRate)} cached right now). Prefetch hides some flash time within a token, and wrong guesses add reads. Raise the weight of past uses, or try the skewed preset, to see a cache that keeps a stable set of experts.</p>`;
+    } else {
+      ins.className = 'note ok';
+      ins.innerHTML = `<strong>The cache (${S.nslots} experts) is larger than one token's working set (${ws}).</strong>
+        <p>Experts can now survive until the next token. That would need ${(ws * EXPERT_BYTES / 1e9).toFixed(1)} GB of RAM, more than the 2.9 GB free on your phone.</p>`;
+    }
+    // table
+    const tb = $('tok-table').tBodies[0];
+    tb.innerHTML = S.history.slice(-12).reverse().map(r => {
+      const n = r.hit + r.pf + r.miss || 1;
+      return `<tr><td class="mono">${r.i}${r.warm ? ' w' : ''}</td><td class="n">${Math.round(r.ms)}</td><td class="n">${Math.round(r.wait)}</td><td class="n">${Math.round(r.attn)}</td><td class="n">${Math.round(r.exp)}</td><td class="n">${pct(r.hit / n)}</td><td class="n">${pct(r.pf / n)}</td><td class="n">${pct(r.miss / n)}</td></tr>`;
+    }).join('');
+  }
+
+  function drawAll() { drawMap(); drawChart(); drawStats(); }
+
+  function syncLabels() {
+    const mb = +ctl.cache.value, slots = Math.floor(mb * 1048576 / EXPERT_BYTES);
+    $('cache-v').textContent = (mb >= 1024 ? (mb / 1024).toFixed(mb % 1024 ? 2 : 0) + ' GB' : mb + ' MB');
+    $('cache-note').textContent = `${slots} experts, ${(100 * slots / (L * E)).toFixed(1)}% of the model. One token needs ${L * K}.`;
+    $('freq-v').textContent = (+ctl.freq.value).toFixed(1);
+    $('pred-v').textContent = Math.round(+ctl.pred.value * 100) + '%';
+    $('reuse-v').textContent = Math.round(+ctl.reuse.value * 100) + '%';
+    $('zipf-v').textContent = (+ctl.zipf.value).toFixed(2);
+    $('speed-v').textContent = ctl.speed.value + ' layers/frame';
+  }
+
+  function applyPreset(name) {
+    const p = presets[name];
+    ctl.cache.value = p.cache; ctl.freq.value = p.freq; ctl.pred.value = p.pred; ctl.reuse.value = p.reuse; ctl.zipf.value = p.zipf; ctl.attn.checked = p.attn;
+    document.querySelectorAll('[data-preset]').forEach(b => b.setAttribute('aria-pressed', b.dataset.preset === name ? 'true' : 'false'));
+    syncLabels(); init();
+  }
+
+  ['cache', 'freq', 'pred', 'reuse', 'zipf'].forEach(id => ctl[id].addEventListener('input', () => {
+    document.querySelectorAll('[data-preset]').forEach(b => b.setAttribute('aria-pressed', 'false'));
+    syncLabels(); init();
+  }));
+  ctl.attn.addEventListener('change', () => init());
+  ctl.speed.addEventListener('input', syncLabels);
+  document.querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+
+  let playing = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const playBtn = $('play');
+  function setPlay(on) { playing = on; playBtn.textContent = on ? 'Pause' : 'Play'; playBtn.setAttribute('aria-pressed', on ? 'true' : 'false'); }
+  playBtn.addEventListener('click', () => setPlay(!playing));
+  $('step').addEventListener('click', () => { const t = S.token; while (S.token === t) runLayer(); drawAll(); });
+  $('reset').addEventListener('click', init);
+  $('copy').addEventListener('click', () => {
+    const text = $('cmd').textContent, btn = $('copy');
+    const done = () => { btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1500); };
+    try {
+      navigator.clipboard.writeText(text).then(done, () => selectCmd());
+    } catch (e) { selectCmd(); }
+  });
+  function selectCmd() { const r = document.createRange(); r.selectNodeContents($('cmd')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+
+  function frame() {
+    if (playing) { for (let i = 0; i < +ctl.speed.value; i++) runLayer(); drawAll(); }
+    requestAnimationFrame(frame);
+  }
+  window.addEventListener('resize', drawChart);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', drawAll);
+  new MutationObserver(drawAll).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  // start warmed up so the first view has data
+  applyPreset('default');
+  for (let i = 0; i < L * 14 + 40; i++) runLayer();
+  setPlay(playing);
+  drawAll();
+  requestAnimationFrame(frame);
+})();
+</script>
