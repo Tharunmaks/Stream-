@@ -89,6 +89,7 @@ cut from existing GGUF Q2_K models.
 ```sh
 cd ~/Stream- && git pull && make
 rm -rf ~/es_bench && ./es_gen -d ~/es_bench -L 8 -E 128   # 6.3 GB, 128 experts like Qwen3
+bash scripts/step3.sh                            # all four runs below, saved to step3_results.txt
 ./es_run -d ~/es_bench                           # defaults
 ./es_run -d ~/es_bench -q -p 0 -r 0              # worst case: no prefetch, no locality
 ./es_run -d ~/es_bench -q -r 0.5 -p 0.8 -C 1536  # optimistic routing, bigger cache

@@ -1,3 +1,4 @@
 es_gen
 es_bench
 *.o
+step3_results.txt
