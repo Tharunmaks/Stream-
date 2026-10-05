@@ -2,3 +2,5 @@ es_gen
 es_bench
 *.o
 step3_results.txt
+es_kbench
+es_run
