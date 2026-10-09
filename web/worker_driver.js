@@ -1,5 +1,5 @@
 // ---- ExpertStream engine worker: runs the WebAssembly engine on the user's GGUF file ----
-let M = null, file = null, busy = false;
+let M = null, file = null, busy = false, stage = 'idle';
 const reader = new FileReaderSync();
 const dec = new TextDecoder();
 const post = (type, data) => postMessage(Object.assign({ type }, data || {}));
@@ -24,8 +24,11 @@ self.onmessage = async (e) => {
   try {
     if (m.type === 'open') {
       file = m.file;
+      stage = 'starting the engine';
       const t0 = performance.now();
+      stage = 'compiling the engine (WebAssembly)';
       M = await ESEngine({ readAt, onProgress,  print: s => post('log', { text: s }), printErr: s => post('log', { text: s }) });
+      stage = 'reading the model file';
       const rc = M._esw_init(file.size, m.ctx || 1024, m.cache || 384);
       if (rc) return post('error', { text: M.UTF8ToString(M._esw_error()) });
       post('ready', { info: JSON.parse(M.UTF8ToString(M._esw_info())), ms: performance.now() - t0, heap_mb: M.HEAPU8.length / 1048576 });
@@ -46,6 +49,6 @@ self.onmessage = async (e) => {
       M._esw_reset(); post('reset');
     }
   } catch (err) {
-    post('error', { text: String(err && err.message || err) });
+    post('error', { text: '[' + stage + '] ' + String(err && err.message || err) });
   }
 };

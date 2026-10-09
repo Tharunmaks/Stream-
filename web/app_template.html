@@ -214,7 +214,7 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
         <button type="button" data-key="clear">clear</button>
       </div>
     </div>
-    <input type="file" id="gguf-file" accept=".gguf" hidden>
+    <input type="file" id="gguf-file" hidden>
   </section>
 
   <!-- ================= CHAT ================= -->
@@ -455,7 +455,7 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
   // ================= engine: runs in this browser (WebAssembly worker), or on es_serve =================
   const Engine = {
     backend: null, info: null, worker: null, busy: false, stopReq: false, mem: 0, file: null,
-    opts: { ctx: 1024, cache: 768, temp: 0.7, max: 256 },
+    opts: { ctx: 512, cache: 384, temp: 0.7, max: 256 },
     ready() { return !!this.backend; },
     async detectServer() {
       if (!/^https?:$/.test(location.protocol) || !/^(127\.0\.0\.1|localhost)$/.test(location.hostname)) return false;
@@ -469,21 +469,25 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
         return true;
       } catch (e) { return false; }
     },
-    open(file) {
+    open(file, opts) {
+      const o = Object.assign({}, this.opts, opts || {});
       return new Promise((resolve, reject) => {
         if (this.worker) this.worker.terminate();
         let src;
-        try { src = document.getElementById('engine-src').textContent; } catch (e) { return reject(new Error('engine missing from page')); }
+        try { src = document.getElementById('engine-src').textContent; } catch (e) { return reject(new Error('the engine is missing from this page')); }
         try { this.worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))); }
-        catch (e) { return reject(new Error('this browser view blocks background workers')); }
+        catch (e) { return reject(new Error('this browser view does not allow background workers (' + e.message + ')')); }
         this.backend = null; this.file = file;
-        this.worker.onerror = ev => reject(new Error(ev.message || 'engine failed to start'));
+        const timer = setTimeout(() => reject(new Error('the engine did not answer within 90 s (the browser may have blocked it or ran out of memory)')), 90000);
+        const fail = err => { clearTimeout(timer); reject(err); };
+        this.worker.onerror = ev => fail(new Error(ev.message ? ev.message : 'the browser blocked the engine from starting (script/worker policy)'));
+        this.worker.onmessageerror = () => fail(new Error('the browser could not pass the file to the engine'));
         this.worker.onmessage = e => {
           const m = e.data;
-          if (m.type === 'ready') { this.backend = 'browser'; this.info = m.info; this.mem = Math.round(m.heap_mb); resolve(m); }
-          else if (m.type === 'error') reject(new Error(m.text));
+          if (m.type === 'ready') { clearTimeout(timer); this.backend = 'browser'; this.info = m.info; this.mem = Math.round(m.heap_mb); resolve(m); }
+          else if (m.type === 'error') fail(new Error(m.text));
         };
-        this.worker.postMessage({ type: 'open', file, ctx: this.opts.ctx, cache: this.opts.cache });
+        this.worker.postMessage({ type: 'open', file, ctx: o.ctx, cache: o.cache });
       });
     },
     // onEvent gets {ev:'tokens'|'prompt'|'tok'|'done'|'info', ...}
@@ -628,7 +632,7 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
   const MODEL_LINKS = {
     olmoe: { name: 'OLMoE-1B-7B (2-bit, 2.56 GB)', url: 'https://huggingface.co/bartowski/OLMoE-1B-7B-0924-Instruct-GGUF/resolve/main/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf' },
   };
-  const CMDS = ['help', 'download', 'open', 'info', 'ask', 'raw', 'new', 'stop', 'set', 'stats', 'bench', 'history', 'clear', 'about'];
+  const CMDS = ['help', 'download', 'open', 'doctor', 'info', 'ask', 'raw', 'new', 'stop', 'set', 'stats', 'bench', 'history', 'clear', 'about'];
   let tHist = store.get('es-term-hist', []), tHi = tHist.length, lastStats = null;
   function termLine(text, cls, html) {
     const d = document.createElement('div'); d.className = 'ln' + (cls ? ' ' + cls : '');
@@ -649,6 +653,7 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
   const HELP = [
     ['download [olmoe]', 'get a model file (opens the download in a new tab)'],
     ['open', 'pick a .gguf file from this device and load it'],
+    ['doctor', 'check what this browser allows (use it if open fails)'],
     ['<anything else>', 'ask the model a question (chat)'],
     ['ask <question>', 'same, explicitly'],
     ['raw <text>', 'continue text without the chat format'],
@@ -692,21 +697,82 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
   function renderTermAnswer(text) {
     return text.split('```').map((p, i) => i % 2 ? `<span class="code">${esc(p)}</span>` : esc(p)).join('<span class="dim">```</span>');
   }
+  const EXPECT_SIZE = { 'OLMoE-1B-7B-0924-Instruct-Q2_K.gguf': 2562763584 };
+  async function checkFile(file) {
+    if (file.size < 1e6) return `that file is only ${file.size} bytes. A model is gigabytes, so the download probably failed (it may be a web page, not a model).`;
+    let head;
+    try { head = new Uint8Array(await file.slice(0, 8).arrayBuffer()); }
+    catch (e) { return 'the browser could not read the file (' + e.message + '). Try picking it again from Downloads.'; }
+    const magic = String.fromCharCode(...head.slice(0, 4));
+    if (magic !== 'GGUF') return `this is not a GGUF model file (it starts with "${magic.replace(/[^ -~]/g, '?')}"). Download the .gguf file and pick that one.`;
+    const want = EXPECT_SIZE[file.name];
+    if (want && file.size !== want) return `the download is incomplete: ${(file.size / 1e9).toFixed(2)} GB of ${(want / 1e9).toFixed(2)} GB. Download it again and let it finish.`;
+    return null;
+  }
   async function openFile(file) {
     if (!file) return;
     termHtml(`<span class="dim">[open]</span> ${esc(file.name)} <span class="dim">(${(file.size / 1e9).toFixed(2)} GB)</span>`);
+    const bad = await checkFile(file);
+    if (bad) { termHtml(`<span class="err">cannot load:</span> ${esc(bad)}`); return; }
     const l = termLine('connecting to the brain…', 'dim');
-    try {
-      const m = await Engine.open(file);
-      const i = m.info;
-      l.innerHTML = `<span class="ok">✓ ${esc(i.name)}</span> <span class="dim">(${i.arch}) loaded in ${(m.ms / 1000).toFixed(1)} s</span>`;
-      termHtml(`<span class="dim">  ${i.layers} layers · ${i.experts} experts, ${i.used} per token · core ${i.core_mb} MB · expert cache ${i.cache_mb} MB · memory ${i.ctx} tokens</span>`);
-      termHtml(`<span class="dim">  experts are read from your file on demand; nothing is uploaded.</span> Ask anything.`);
-      refreshPrompt(); engineReadyUI();
-    } catch (err) {
-      l.innerHTML = `<span class="err">could not load: ${esc(err.message)}</span>`;
-      if (/WebAssembly|wasm|CompileError|unsafe-eval/i.test(err.message)) termHtml(`<span class="warm">this page view blocks WebAssembly. Open the app from GitHub Pages or es_serve instead.</span>`);
+    let m = null, lastErr = null;
+    const tries = [{}, { cache: 192, ctx: 256 }];
+    for (let t = 0; t < tries.length && !m; t++) {
+      try {
+        if (t) { l.textContent = 'not enough memory: retrying with a smaller cache…'; Engine.opts.cache = tries[t].cache; Engine.opts.ctx = tries[t].ctx; }
+        m = await Engine.open(file, tries[t]);
+      } catch (err) {
+        lastErr = err;
+        if (!/memory|alloc|RangeError|grow|abort|OOM/i.test(err.message)) break;
+      }
     }
+    if (!m) {
+      l.innerHTML = `<span class="err">could not load the model</span>`;
+      termHtml(`<span class="err">  ${esc(lastErr.message)}</span>`);
+      if (/incomplete|past end of file|not a GGUF|magic/i.test(lastErr.message))
+        termHtml(`<span class="warm">  this file is damaged or cut short. Run <b>download</b> again, wait until it finishes, then <b>open</b>.</span>`);
+      else
+        termHtml(`<span class="warm">  run <b>doctor</b> to see what this browser allows, and send me its output.</span>`);
+      return;
+    }
+    const i = m.info;
+    l.innerHTML = `<span class="ok">✓ ${esc(i.name)}</span> <span class="dim">(${i.arch}) loaded in ${(m.ms / 1000).toFixed(1)} s</span>`;
+    termHtml(`<span class="dim">  ${i.layers} layers · ${i.experts} experts, ${i.used} per token · core ${i.core_mb} MB · expert cache ${i.cache_mb} MB · memory ${i.ctx} tokens</span>`);
+    termHtml(`<span class="dim">  experts are read from your file on demand; nothing is uploaded.</span> Ask anything.`);
+    refreshPrompt(); engineReadyUI();
+  }
+  // what this browser allows: the usual reasons a model will not load
+  async function doctor() {
+    const row = (good, name, detail) => termHtml(`  <span class="${good ? 'ok' : 'err'}">${good ? '✓' : '✗'}</span> ${esc(name)} <span class="dim">${esc(detail || '')}</span>`);
+    termHtml('<span class="warm">checking this browser…</span>');
+    const ua = navigator.userAgent.replace(/\s+/g, ' ').slice(0, 110);
+    termHtml(`<span class="dim">  ${esc(ua)}</span>`);
+    termHtml(`<span class="dim">  device memory ${navigator.deviceMemory || '?'} GB · ${navigator.hardwareConcurrency || '?'} cores · page ${esc(location.protocol)}//${esc(location.host || 'local file')}</span>`);
+    const wasm = typeof WebAssembly === 'object';
+    row(wasm, 'WebAssembly available');
+    let comp = false, compErr = '';
+    try { new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])); comp = true; } catch (e) { compErr = e.message; }
+    row(comp, 'WebAssembly can run code here', compErr);
+    let mem = '', memOk = false;
+    try { const w = new WebAssembly.Memory({ initial: 1, maximum: 32768 }); w.grow(8192); memOk = true; mem = '512 MB reserved'; try { w.grow(8192); mem = '1 GB reserved'; } catch (e) {} } catch (e) { mem = e.message; }
+    row(memOk, 'memory for the model', mem);
+    row(typeof File === 'function' && typeof Blob === 'function', 'file access');
+    const w = await new Promise(res => {
+      let done = false; const fin = r => { if (!done) { done = true; res(r); } };
+      setTimeout(() => fin({ err: 'no answer in 4 s' }), 4000);
+      try {
+        const src = "onmessage=()=>{var w='none',f=typeof FileReaderSync;try{new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0]));w='ok'}catch(e){w=e.message}postMessage({w:w,f:f})}";
+        const wk = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+        wk.onmessage = e => { wk.terminate(); fin(e.data); };
+        wk.onerror = e => fin({ err: e.message || 'blocked' });
+        wk.postMessage(1);
+      } catch (e) { fin({ err: e.message }); }
+    });
+    row(!w.err, 'background worker starts', w.err || '');
+    if (!w.err) { row(w.w === 'ok', 'WebAssembly works in the worker', w.w === 'ok' ? '' : w.w); row(w.f === 'function', 'worker can read your file', w.f); }
+    const good = wasm && comp && memOk && !w.err && w.w === 'ok' && w.f === 'function';
+    if (good) termHtml(`<span class="ok">this browser can run the model.</span> <span class="dim">If open still fails, the model file is the problem: open it again and read the message.</span>`);
+    else termHtml(`<span class="warm">this browser view blocks something the model needs.</span> <span class="dim">Open the page in Chrome itself (not inside another app), or run it with Termux: <b>bash scripts/setup.sh</b>.</span>`);
   }
   $('gguf-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; openFile(f); });
   async function runCommand(line) {
@@ -727,7 +793,13 @@ footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-blo
         termHtml(`  2. when it finishes, type <span class="ok">open</span> and pick the file`);
         termHtml(`<span class="dim">  any GGUF Mixture-of-Experts model with a byte-level BPE tokenizer works the same way.</span>`); break;
       }
-      case 'open': termLine('choose the .gguf file…', 'dim'); $('gguf-file').click(); break;
+      case 'open': {
+        termLine('choose the .gguf file…', 'dim');
+        const d = termHtml(`<span class="dim">  no picker appeared? tap here: </span><button type="button" class="btn" id="pick-btn" style="padding:4px 12px">Choose model file</button>`);
+        d.querySelector('button').addEventListener('click', () => $('gguf-file').click());
+        $('gguf-file').click(); break;
+      }
+      case 'doctor': await doctor(); break;
       case 'ask': if (!arg) termLine('usage: ask <question>', 'err'); else await answerInTerm(arg, false); break;
       case 'raw': if (!arg) termLine('usage: raw <text>', 'err'); else await answerInTerm(arg, true); break;
       case 'new': case 'reset': if (!Engine.ready()) { termLine('no model loaded', 'err'); break; } await Engine.reset(); termLine('new conversation', 'ok'); break;
