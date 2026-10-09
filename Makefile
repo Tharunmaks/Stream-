@@ -12,7 +12,7 @@ ifeq ($(ARCH),aarch64)
 DOTPROD_FLAGS ?= -march=armv8.2-a+dotprod
 endif
 
-BIN  = es_gen es_bench es_kbench es_run es_import es_chat
+BIN  = es_gen es_bench es_kbench es_run es_import es_chat es_serve
 HDRS = $(wildcard src/*.h) tools/es_common.h
 CORE = src/es_io.c src/es_cpu.c src/es_q2k.c src/es_compute.c src/es_cache.c
 
@@ -38,6 +38,9 @@ es_import: tools/es_import.c src/es_gguf.c src/es_io.c src/es_cpu.c $(HDRS)
 
 es_chat: tools/es_chat.c $(CORE) src/es_gguf.c src/es_quant.c src/es_tok.c es_q2k_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_chat.c $(CORE) src/es_gguf.c src/es_quant.c src/es_tok.c es_q2k_neon.o $(LDFLAGS) $(LDLIBS)
+
+es_serve: tools/es_serve.c
+	$(CC) $(CFLAGS) -o $@ tools/es_serve.c $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(BIN) *.o

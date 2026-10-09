@@ -400,24 +400,51 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
         snprintf(out, cap, "%s", msg);
 }
 
+/* ---------------- JSON-lines protocol (es_serve) ----------------
+ * stdin : one prompt per line, "\\n" for newlines, "/reset" clears the chat
+ * stdout: one JSON object per line: ready, tokens, prompt, tok, done, info */
+static void json_str(const char *s, int n) {
+    putchar('"');
+    for (int i = 0; i < n; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch == '"' || ch == '\\') { putchar('\\'); putchar(ch); }
+        else if (ch == '\n') fputs("\\n", stdout);
+        else if (ch == '\r') fputs("\\r", stdout);
+        else if (ch == '\t') fputs("\\t", stdout);
+        else if (ch < 0x20) printf("\\u%04x", ch);
+        else putchar(ch);
+    }
+    putchar('"');
+}
+static void unescape_line(char *s) {
+    char *o = s;
+    for (char *p = s; *p; p++) {
+        if (*p == '\\' && p[1] == 'n') { *o++ = '\n'; p++; }
+        else if (*p == '\\' && p[1] == '\\') { *o++ = '\\'; p++; }
+        else *o++ = *p;
+    }
+    *o = 0;
+}
+
 /* ---------------- main ---------------- */
 static void usage(void) {
     fprintf(stderr,
             "usage: es_chat -m PACKDIR [-p PROMPT] [-n max_tokens=256] [-r raw, no chat template]\n"
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
             "               [-c context=2048] [-C cache_mb=1024] [-j threads=4] [-s seed]\n"
-            "               [-T routing_trace.txt] [-q quiet: no stage log]\n");
+            "               [-T routing_trace.txt] [-q quiet: no stage log]\n"
+            "               [-J JSON-lines protocol on stdin/stdout, used by es_serve]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
     const char *prompt = NULL, *trace_path = NULL, *dump_ids = NULL, *dump_path = NULL;
-    int max_new = 256, raw = 0, quiet = 0, top_k = 40, opt;
+    int max_new = 256, raw = 0, quiet = 0, top_k = 40, opt, json = 0;
     float temp = 0.7f, top_p = 0.9f;
     size_t cache_mb = 1024;
     M.ctx = 2048;
     NT = 4;
-    while ((opt = getopt(argc, argv, "m:p:n:rt:k:P:c:C:j:s:T:qI:D:h")) != -1) {
+    while ((opt = getopt(argc, argv, "m:p:n:rt:k:P:c:C:j:s:T:qI:D:Jh")) != -1) {
         switch (opt) {
         case 'm': PACK = optarg; break;
         case 'p': prompt = optarg; break;
@@ -434,6 +461,7 @@ int main(int argc, char **argv) {
         case 'q': quiet = 1; break;
         case 'I': dump_ids = optarg; break;   /* testing: comma-separated token ids */
         case 'D': dump_path = optarg; break;  /* testing: write every position's logits */
+        case 'J': json = 1; quiet = 1; break; /* line protocol for es_serve */
         default: usage();
         }
     }
@@ -563,6 +591,15 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (json) {
+        printf("{\"ev\":\"ready\",\"model\":");
+        const char *nm = es_gguf_str(&G, "general.name");
+        json_str(nm ? nm : M.arch, (int)strlen(nm ? nm : M.arch));
+        printf(",\"arch\":\"%s\",\"layers\":%d,\"experts\":%d,\"used\":%d,\"core_mb\":%.0f,\"cache_mb\":%zu,\"ctx\":%d,\"load_s\":%.2f,\"ram_mb\":%ld}\n",
+               M.arch, M.n_layer, M.n_exp, M.n_used, M.core_bytes / 1e6, cache_mb, M.ctx, (es_now_ns() - t0) / 1e9, rss_mb());
+        fflush(stdout);
+    }
+
     /* ---- conversation loop ---- */
     int pos = 0, first = 1;
     static char line[1 << 15], text[1 << 16], piece[256];
@@ -570,11 +607,17 @@ int main(int argc, char **argv) {
     for (;;) {
         const char *msg = prompt;
         if (!msg) {
-            fprintf(stderr, "\n\033[1myou>\033[0m ");
+            if (!json) fprintf(stderr, "\n\033[1myou>\033[0m ");
             if (!fgets(line, sizeof line, stdin)) break;
             line[strcspn(line, "\n")] = 0;
             if (!line[0]) continue;
             if (!strcmp(line, "/exit") || !strcmp(line, "/quit")) break;
+            if (!strcmp(line, "/reset")) {
+                pos = 0; first = 1;
+                if (json) { printf("{\"ev\":\"info\",\"msg\":\"new chat\"}\n{\"ev\":\"done\"}\n"); fflush(stdout); }
+                continue;
+            }
+            if (json) unescape_line(line);
             msg = line;
         }
         if (raw) snprintf(text, sizeof text, "%s", msg);
@@ -585,12 +628,26 @@ int main(int argc, char **argv) {
             toks[0] = es_tok_bos(T);
             nt++;
         }
-        if (pos + nt + 1 >= M.ctx) { fprintf(stderr, "context full (%d tokens); restart or use -c\n", M.ctx); break; }
+        if (pos + nt + 1 >= M.ctx) {
+            if (!json) { fprintf(stderr, "context full (%d tokens); restart or use -c\n", M.ctx); break; }
+            /* start a fresh conversation rather than failing */
+            pos = 0; first = 1;
+            format_turn(text, sizeof text, msg, first);
+            nt = es_tok_encode(T, text, 1, toks, (int)(sizeof toks / sizeof toks[0]));
+            printf("{\"ev\":\"info\",\"msg\":\"context was full, started a new chat\"}\n");
+            if (nt + 1 >= M.ctx) { printf("{\"ev\":\"info\",\"msg\":\"prompt too long\"}\n{\"ev\":\"done\"}\n"); fflush(stdout); continue; }
+        }
 
         /* ---- 2. words to numbers ---- */
         STAGE("\033[1m[2/4] Turning words into numbers\033[0m  %d tokens:", nt);
         for (int i = 0; i < nt && i < 24; i++) STAGE(" %d", toks[i]);
         STAGE("%s\n", nt > 24 ? " ..." : "");
+        if (json) {
+            printf("{\"ev\":\"tokens\",\"n\":%d,\"ids\":[", nt);
+            for (int i = 0; i < nt && i < 64; i++) printf("%s%d", i ? "," : "", toks[i]);
+            printf("]}\n");
+            fflush(stdout);
+        }
 
         /* ---- 3. read the prompt ---- */
         unsigned long long h0 = STAT_HITS, m0 = STAT_MISS;
@@ -600,6 +657,10 @@ int main(int argc, char **argv) {
             TRACE_TOKEN = pos;
             forward(toks[i], pos++, i == nt - 1);
             STAGE("\r\033[1m[3/4] Reading the prompt\033[0m  %d/%d tokens", i + 1, nt);
+            if (json && ((i + 1) % 4 == 0 || i + 1 == nt)) {
+                printf("{\"ev\":\"prompt\",\"done\":%d,\"n\":%d,\"flash_mb\":%.0f,\"ram_mb\":%ld}\n", i + 1, nt, STAT_READ_MB - r0, rss_mb());
+                fflush(stdout);
+            }
         }
         double tps = (es_now_ns() - tp) / 1e9;
         STAGE("  %.1f s (%.2f tok/s) | flash %.0f MB | RAM %ld MB\n", tps, nt / tps, STAT_READ_MB - r0, rss_mb());
@@ -614,14 +675,26 @@ int main(int argc, char **argv) {
             int pl = es_tok_piece(T, next, 0, piece, sizeof piece);
             /* stop if the model starts writing the next user turn */
             if (!raw && !strcmp(TEMPLATE_KIND, "tulu") && next == es_tok_find(T, "<|user|>")) break;
-            fwrite(piece, 1, (size_t)pl, stdout);
+            if (json) {
+                printf("{\"ev\":\"tok\",\"t\":");
+                json_str(piece, pl);
+                printf("}\n");
+            } else {
+                fwrite(piece, 1, (size_t)pl, stdout);
+            }
             fflush(stdout);
             TRACE_TOKEN = pos;
             forward(next, pos++, 1);
         }
         double tgs = (es_now_ns() - tg) / 1e9;
         unsigned long long hits = STAT_HITS - h0, miss = STAT_MISS - m0;
-        printf("\n");
+        if (json)
+            printf("{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld}\n",
+                   gen, tgs, gen / (tgs > 0 ? tgs : 1), tps, 100.0 * hits / (hits + miss ? hits + miss : 1),
+                   STAT_READ_MB - r0, STAT_WAIT_S - w0, rss_mb());
+        else
+            printf("\n");
+        fflush(stdout);
         STAGE("\033[2m      %d tokens in %.1f s = %.2f tok/s | experts %.0f%% from RAM, %.0f MB read from flash (%.1f s waiting) | RAM %ld MB\033[0m\n",
               gen, tgs, gen / (tgs > 0 ? tgs : 1), 100.0 * hits / (hits + miss ? hits + miss : 1),
               STAT_READ_MB - r0, STAT_WAIT_S - w0, rss_mb());

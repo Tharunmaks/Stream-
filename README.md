@@ -1,5 +1,12 @@
 # ExpertStream
 
+**Quick start (Termux):** one command installs everything, downloads a
+model and opens the chat app in your phone's browser:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
+```
+
 CPU-only inference for very large Mixture-of-Experts models on an Android
 phone (Termux, aarch64, no root, no GPU). The expert weights are streamed
 from flash instead of being held in RAM.
@@ -47,6 +54,9 @@ src/es_quant.{h,c}    dequantize + matvec for F32/F16/Q4_0..Q8_0/Q2_K..Q6_K
 src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
 tools/es_chat.c       text generation: core in RAM, experts streamed + cached
 tools/es_qtest.c      dumps dequantized tensors for checking
+tools/es_serve.c      local web server: the app + live chat API (127.0.0.1 only)
+web/index.html        the app: Home, Chat, Convert, Testing, History
+scripts/setup.sh      install, build, download, import, start the app
 scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
 docs/expert_format.md format spec and design notes
