@@ -1,0 +1,692 @@
+<title>ExpertStream</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one dark "inside the machine" world. A full-bleed 3D hero of the expert tower, then stacked panels:
+   pipeline run, model picker, skill packs, phone-vs-GPU, roadmap. */
+:root {
+  color-scheme: dark;
+  --bg: #0a0f1c;          /* deep navy, not black */
+  --bg-2: #101828;
+  --panel: #131d30;
+  --line: #24314a;
+  --ink: #eef2f8;
+  --ink-2: #b3bfd1;
+  --ink-3: #7f8ca3;
+  --hit: #3987e5;         /* cached / expert compute  */
+  --pf: #199e70;          /* prefetched / attention   */
+  --flash: #d95926;       /* flash read / waiting     */
+  --warm: #f2c98a;        /* highlight ink            */
+  --good: #3fb37f; --warn: #e0a43a; --bad: #e66767;
+  --f-display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--ink); }
+body { font-family: var(--f-body); font-size: 15.5px; line-height: 1.55; overflow-x: hidden; }
+h1, h2, h3 { font-family: var(--f-display); margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 66ch; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-2); }
+.dim { color: var(--ink-3); }
+a { color: var(--warm); }
+button, input, select { font: inherit; }
+:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+
+/* ---------- hero ---------- */
+.hero { position: relative; min-height: min(92vh, 860px); display: grid; align-items: end; overflow: hidden; isolation: isolate; }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; display: block; }
+.hero::after { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: linear-gradient(180deg, rgba(10,15,28,0) 45%, var(--bg) 100%), radial-gradient(120% 70% at 15% 100%, rgba(10,15,28,.85), rgba(10,15,28,0) 60%); }
+.hero-inner { max-width: 1180px; margin: 0 auto; width: 100%; padding-inline: 20px; padding-block: 80px 56px; display: grid; gap: 18px; }
+.eyebrow { font-family: var(--f-mono); font-size: 12.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--warm); }
+.hero h1 { font-size: clamp(44px, 8.5vw, 112px); font-weight: 800; line-height: .92; letter-spacing: -0.02em; }
+.hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--hit), var(--pf) 55%, var(--warm)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero .lede { font-size: clamp(16px, 2vw, 20px); color: var(--ink-2); max-width: 58ch; }
+.hero-stats { display: flex; flex-wrap: wrap; gap: 10px; }
+.pill { font-family: var(--f-mono); font-size: 12.5px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: rgba(19,29,48,.7); backdrop-filter: blur(6px); color: var(--ink-2); }
+.pill b { color: var(--ink); font-weight: 500; }
+.legend-3d { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--ink-2); }
+.legend-3d span { display: inline-flex; gap: 7px; align-items: center; }
+.legend-3d i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+/* ---------- sections ---------- */
+main { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 8px 80px; display: grid; gap: 72px; }
+section { display: grid; gap: 22px; }
+.sec-head { display: grid; gap: 8px; }
+.sec-head h2 { font-size: clamp(28px, 4vw, 44px); font-weight: 700; letter-spacing: -0.01em; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: grid; gap: 16px; min-width: 0; }
+.panel > * { min-width: 0; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+@media (max-width: 880px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+label.field { display: grid; gap: 6px; font-size: 13.5px; color: var(--ink-2); }
+select, input[type=text], textarea { background: var(--bg-2); color: var(--ink); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; width: 100%; }
+textarea { resize: vertical; min-height: 84px; font: inherit; }
+input[type=range] { width: 100%; accent-color: var(--warm); }
+.btn { border: 1px solid var(--line); background: var(--bg-2); color: var(--ink); border-radius: 10px; padding: 10px 16px; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
+.btn:hover { border-color: var(--warm); transform: translateY(-1px); }
+.btn.primary { background: linear-gradient(135deg, var(--hit), #2c6cc0); border-color: transparent; font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: default; transform: none; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg-2); color: var(--ink-2); }
+.chip.good { border-color: color-mix(in srgb, var(--good) 60%, var(--line)); color: var(--ink); }
+.chip.warn { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); color: var(--ink); }
+.chip.bad { border-color: color-mix(in srgb, var(--bad) 60%, var(--line)); color: var(--ink); }
+.chip i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.toggle { display: inline-flex; gap: 8px; align-items: center; padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 13.5px; background: var(--bg-2); user-select: none; }
+.toggle input { accent-color: var(--warm); }
+.toggle:has(input:checked) { border-color: var(--warm); color: var(--ink); }
+
+/* ---------- pipeline ---------- */
+.stages { display: grid; gap: 10px; }
+.stage { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; border-radius: 11px; border: 1px solid var(--line); background: var(--bg-2); transition: border-color .3s ease, background .3s ease, transform .3s ease; }
+.stage .ix { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-family: var(--f-mono); font-size: 13px; border: 1px solid var(--line); color: var(--ink-3); transition: all .3s ease; }
+.stage .t { font-weight: 600; }
+.stage .d { font-size: 13px; color: var(--ink-3); }
+.stage .v { font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); text-align: right; }
+.stage.active { border-color: var(--warm); background: color-mix(in srgb, var(--warm) 7%, var(--bg-2)); transform: translateX(4px); }
+.stage.active .ix { border-color: var(--warm); color: var(--warm); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warm) 18%, transparent); }
+.stage.done .ix { background: var(--pf); border-color: var(--pf); color: #fff; }
+.tokens { display: flex; flex-wrap: wrap; gap: 6px; min-height: 34px; }
+.tok { display: inline-grid; gap: 1px; padding: 4px 8px; border-radius: 7px; background: var(--bg-2); border: 1px solid var(--line); font-size: 13px; animation: pop .35s ease both; }
+.tok b { font-weight: 500; }
+.tok span { font-family: var(--f-mono); font-size: 11px; color: var(--warm); }
+@keyframes pop { from { transform: translateY(6px) scale(.96); } to { transform: none; } }
+.meter { display: grid; gap: 6px; }
+.meter .lbl { display: flex; justify-content: space-between; font-size: 13px; color: var(--ink-2); }
+.bar { height: 12px; border-radius: 6px; background: var(--bg-2); border: 1px solid var(--line); overflow: hidden; display: flex; }
+.bar i { display: block; height: 100%; transition: width .6s cubic-bezier(.2,.8,.2,1); }
+.bar i + i { border-left: 2px solid var(--panel); }
+.log { font-family: var(--f-mono); font-size: 12.5px; background: #070b15; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; height: 210px; overflow: auto; color: var(--ink-2); white-space: pre-wrap; }
+.log .k { color: var(--warm); } .log .g { color: var(--good); } .log .b { color: var(--hit); } .log .o { color: var(--flash); }
+
+/* ---------- tables / tiles ---------- */
+.table-box { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 600; background: var(--bg-2); }
+td.n, th.n { text-align: right; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+tr.sel td { background: color-mix(in srgb, var(--warm) 8%, transparent); }
+tbody tr { cursor: pointer; transition: background .15s ease; }
+tbody tr:hover td { background: color-mix(in srgb, var(--hit) 8%, transparent); }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 2px; min-width: 0; }
+.tile .v { font-family: var(--f-display); font-size: 30px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.tile .k { font-size: 12.5px; color: var(--ink-3); }
+.note { border-left: 3px solid var(--warn); background: var(--bg-2); padding: 12px 16px; border-radius: 0 10px 10px 0; display: grid; gap: 6px; font-size: 14.5px; }
+.note.ok { border-left-color: var(--good); }
+.note.bad { border-left-color: var(--bad); }
+
+/* ---------- versus ---------- */
+.vs { display: grid; gap: 14px; }
+.vs-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 14px; align-items: center; }
+@media (max-width: 560px) { .vs-row { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+.vs-row .bars { display: grid; gap: 5px; }
+.vs-bar { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 10px; align-items: center; font-size: 13px; }
+.vs-bar .track { height: 14px; border-radius: 7px; background: var(--bg-2); overflow: hidden; }
+.vs-bar .fill { height: 100%; border-radius: 7px; transition: width 1s cubic-bezier(.2,.8,.2,1); }
+
+/* ---------- roadmap ---------- */
+.road { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 880px) { .road { grid-template-columns: minmax(0, 1fr); } }
+.road .col { display: grid; gap: 8px; align-content: start; }
+.road h3 { font-size: 15px; font-family: var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+.road li { list-style: none; padding: 10px 12px; border-radius: 10px; background: var(--bg-2); border: 1px solid var(--line); font-size: 14px; }
+.road ul { margin: 0; padding: 0; display: grid; gap: 8px; }
+.road .done li { border-left: 3px solid var(--good); }
+.road .next li { border-left: 3px solid var(--warm); }
+.road .later li { border-left: 3px solid var(--ink-3); }
+pre.cmd { margin: 0; background: #070b15; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; font-family: var(--f-mono); font-size: 13px; color: var(--ink); }
+footer { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 0 48px; color: var(--ink-3); font-size: 13px; }
+
+.reveal { transition: transform .8s cubic-bezier(.2,.8,.2,1); }
+.reveal.pre { transform: translateY(18px); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="hero">
+  <canvas id="scene" aria-label="3D view of an MoE model: rings of experts, a token passing through and lighting up the experts it uses"></canvas>
+  <div class="hero-inner">
+    <span class="eyebrow">Free · open source · runs on your own phone or laptop</span>
+    <h1>Expert<em>Stream</em></h1>
+    <p class="lede">Giant Mixture-of-Experts models don't use all their weights for each word. ExpertStream keeps the small core in RAM and streams in only the experts each token needs from your phone's storage.</p>
+    <div class="hero-stats">
+      <span class="pill">flash <b>1.75 GB/s</b> measured</span>
+      <span class="pill">2-bit kernel <b>9.81 GB/s</b> on 4× A78</span>
+      <span class="pill">import <b>any GGUF MoE</b> from Hugging Face</span>
+    </div>
+    <div class="legend-3d" aria-label="3D legend">
+      <span><i style="background:var(--hit)"></i>expert already in RAM</span>
+      <span><i style="background:var(--pf)"></i>prefetched ahead</span>
+      <span><i style="background:var(--flash)"></i>read from flash now</span>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- ============ RUN ============ -->
+  <section id="run" class="reveal">
+    <div class="sec-head">
+      <span class="eyebrow">See a prompt go through the engine</span>
+      <h2>From your words to the experts that answer</h2>
+      <p class="muted">Pick a model and type a prompt. Each stage shows what ExpertStream does and how much RAM, storage and time it costs on your phone. The figures come from your measured flash and kernel speeds. The engine can't generate real text yet, so this run shows the work and the timing, not an answer.</p>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <label class="field" for="run-model">Model
+          <select id="run-model"></select>
+        </label>
+        <label class="field" for="prompt">Prompt
+          <textarea id="prompt">Create a 3D racing game in JavaScript with three.js</textarea>
+        </label>
+        <label class="field" for="out-len">Expected answer length
+          <select id="out-len">
+            <option value="120">Short answer (~120 tokens)</option>
+            <option value="800">A function or an explanation (~800 tokens)</option>
+            <option value="3000" selected>A small 3D game (~3,000 tokens of code)</option>
+          </select>
+        </label>
+        <div class="row">
+          <button type="button" class="btn primary" id="go">Run the pipeline</button>
+          <span class="dim" id="run-note" style="font-size:13px"></span>
+        </div>
+        <div class="stages" id="stages"></div>
+      </div>
+      <div class="panel">
+        <h3 class="dim" style="font-size:13px;letter-spacing:.08em;text-transform:uppercase">Prompt as numbers</h3>
+        <div class="tokens" id="tokens"><span class="dim" style="font-size:13px">Token IDs appear here when you run.</span></div>
+        <p class="dim" style="font-size:12.5px">Illustration: the page splits on word pieces and numbers them itself. The real IDs come from the model's own tokenizer, which is stored in core.gguf.</p>
+        <div class="meter">
+          <div class="lbl"><span>Phone RAM in use</span><span class="mono" id="ram-v">0 / 2.9 GB free</span></div>
+          <div class="bar" aria-label="RAM use"><i id="ram-core" style="background:var(--hit);width:0"></i><i id="ram-cache" style="background:var(--pf);width:0"></i><i id="ram-kv" style="background:var(--warm);width:0"></i></div>
+          <div class="legend-3d" style="font-size:12px"><span><i style="background:var(--hit)"></i>core model</span><span><i style="background:var(--pf)"></i>expert cache</span><span><i style="background:var(--warm)"></i>context memory</span></div>
+        </div>
+        <div class="log" id="log" aria-live="polite">Ready.</div>
+        <div class="tiles" id="run-tiles">
+          <div class="tile"><span class="v" id="rt-spt">–</span><span class="k">seconds per token</span></div>
+          <div class="tile"><span class="v" id="rt-total">–</span><span class="k">for the whole answer</span></div>
+          <div class="tile"><span class="v" id="rt-gb">–</span><span class="k">GB read per token</span></div>
+          <div class="tile"><span class="v" id="rt-ram">–</span><span class="k">RAM needed</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MODELS ============ -->
+  <section id="models" class="reveal">
+    <div class="sec-head">
+      <span class="eyebrow">Models up to 2 trillion parameters</span>
+      <h2>What each model costs on your phone</h2>
+      <p class="muted">Select a row to use it everywhere on this page. Sizes come from each model's published shape. The OLMoE row was measured by <span class="mono">es_import</span> on the real file.</p>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <label class="field" for="quant" style="min-width:240px;flex:1">Compression
+          <select id="quant">
+            <option value="4.85">4-bit (Q4_K_M), 70% smaller than 16-bit</option>
+            <option value="3.9">3-bit (Q3_K_M), 76% smaller</option>
+            <option value="2.96" selected>2-bit (Q2_K mix), 81% smaller</option>
+          </select>
+        </label>
+        <label class="field" for="hit" style="min-width:240px;flex:1">Experts already in RAM: <span class="mono" id="hit-v"></span>
+          <input type="range" id="hit" min="0" max="0.9" step="0.05" value="0">
+        </label>
+      </div>
+      <div class="table-box"><table id="model-table">
+        <thead><tr><th>Model</th><th class="n">Params</th><th class="n">Active</th><th class="n">On disk</th><th class="n">Core RAM</th><th class="n">Read / token</th><th class="n">s / token</th><th>On this phone</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="dim" style="font-size:12.5px">s/token = time to read the experts not already in RAM at 1.75 GB/s, plus 2-bit compute at 9.81 GB/s, both measured on your phone. Context memory and prompt processing are not included. When the core doesn't fit in 2.9 GB of RAM it also has to be streamed, and that is added.</p>
+    </div>
+  </section>
+
+  <!-- ============ SKILL PACKS ============ -->
+  <section id="packs" class="reveal">
+    <div class="sec-head">
+      <span class="eyebrow">Load only what you need</span>
+      <h2>Skill packs</h2>
+      <p class="muted">Different topics tend to use different experts. A skill pack keeps the experts your tasks use on the phone and leaves the rest out. That is how a model bigger than your storage can still run. <span class="mono">es_import -x</span> already builds packs from a list of experts.</p>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="chips" role="group" aria-label="Skills">
+          <label class="toggle" for="sk-code"><input type="checkbox" id="sk-code" checked> Coding</label>
+          <label class="toggle" for="sk-chat"><input type="checkbox" id="sk-chat"> Chat</label>
+          <label class="toggle" for="sk-reason"><input type="checkbox" id="sk-reason"> Reasoning</label>
+          <label class="toggle" for="sk-math"><input type="checkbox" id="sk-math"> Math</label>
+          <label class="toggle" for="sk-research"><input type="checkbox" id="sk-research"> Research</label>
+        </div>
+        <label class="field" for="share">Experts each skill keeps (assumption until profiled): <span class="mono" id="share-v"></span>
+          <input type="range" id="share" min="0.1" max="0.6" step="0.05" value="0.3">
+        </label>
+        <div class="tiles" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+          <div class="tile"><span class="v" id="pk-keep">–</span><span class="k">of experts kept</span></div>
+          <div class="tile"><span class="v" id="pk-disk">–</span><span class="k">on the phone</span></div>
+          <div class="tile"><span class="v" id="pk-fit">–</span><span class="k">of 151 GB free</span></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="note" id="pack-note"></div>
+        <p class="dim" style="font-size:13px">How a pack gets made: run the full model on sample prompts for a skill (on a computer or in the cloud), record which experts the router picks, and keep the ones that cover nearly all picks. When a prompt needs an expert that isn't on the phone, the engine has to use the closest one it has, which lowers quality, or fetch it from the cloud, which is slow. Recording these routing traces is a later step.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHONE vs GPU ============ -->
+  <section id="gpu" class="reveal">
+    <div class="sec-head">
+      <span class="eyebrow">Old phones as accelerators</span>
+      <h2>Can an old phone become an RTX 3050?</h2>
+      <p class="muted">Not in speed. A phone can't gain memory bandwidth or compute through software. What old phones can add is storage and RAM for experts: several phones on Wi-Fi could each hold part of a model. Here is your phone next to an RTX 3050 (desktop, 8 GB).</p>
+    </div>
+    <div class="panel vs" id="vs"></div>
+    <div class="panel">
+      <label class="field" for="phones">Phones pooled over Wi-Fi: <span class="mono" id="phones-v"></span>
+        <input type="range" id="phones" min="1" max="20" step="1" value="4">
+      </label>
+      <div class="note" id="pool-note"></div>
+    </div>
+  </section>
+
+  <!-- ============ ROADMAP ============ -->
+  <section id="road" class="reveal">
+    <div class="sec-head">
+      <span class="eyebrow">Built so far, tested on your phone</span>
+      <h2>Where the engine is</h2>
+    </div>
+    <div class="road">
+      <div class="col done"><h3>Done</h3><ul>
+        <li>Expert file format and a 4-reader flash loader, 1.75 GB/s measured</li>
+        <li>2-bit NEON kernel, bit-exact with llama.cpp, 9.81 GB/s on 4× A78</li>
+        <li>Decode loop with expert cache and prefetch</li>
+        <li>Hugging Face download and GGUF importer, checked byte for byte on 3 real models</li>
+      </ul></div>
+      <div class="col next"><h3>Next</h3><ul>
+        <li>Tokenizer read from core.gguf</li>
+        <li>Attention, router, norms, and Q3_K / Q4_K kernels</li>
+        <li>First real text from OLMoE-1B-7B on your phone</li>
+      </ul></div>
+      <div class="col later"><h3>Later</h3><ul>
+        <li>Routing traces and skill-pack builder</li>
+        <li>Speculative decoding with a small draft model</li>
+        <li>Laptop build, then pooling several phones over Wi-Fi</li>
+      </ul></div>
+    </div>
+    <div class="panel">
+      <h3 style="font-size:16px">Try the real importer on your phone</h3>
+      <pre class="cmd" id="cmd">cd ~/Stream- &amp;&amp; git checkout -- . &amp;&amp; git pull &amp;&amp; make
+bash scripts/hf_get.sh bartowski/OLMoE-1B-7B-0924-Instruct-GGUF Q2_K.gguf ~/models
+./es_import -i ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf
+./es_import -o ~/packs/olmoe ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf</pre>
+      <div class="row"><button type="button" class="btn" id="copy">Copy commands</button></div>
+    </div>
+  </section>
+</main>
+<footer>ExpertStream is free and open source. Speeds on this page are estimates built from benchmarks run on your phone: Snapdragon-class 4× Cortex-A78 + 4× Cortex-A55, 7.3 GB RAM.</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  // ================= measured phone numbers =================
+  const FLASH = 1.75, KERNEL = 9.81, RAM_FREE = 2.9, DISK_FREE = 151;
+  // params in billions: total, core (non-routed), active routed-expert params per token
+  const MODELS = [
+    { id: 'olmoe', name: 'OLMoE-1B-7B', total: 6.92, core: 0.48, act: 0.81, layers: 16, experts: 64, k: 8, note: 'measured' },
+    { id: 'q30', name: 'Qwen3-30B-A3B', total: 30.5, core: 1.5, act: 1.81, layers: 48, experts: 128, k: 8 },
+    { id: 'oss', name: 'gpt-oss-120b', total: 116.8, core: 2.1, act: 3.58, layers: 36, experts: 128, k: 4 },
+    { id: 'air', name: 'GLM-4.5-Air', total: 106, core: 6.3, act: 6.23, layers: 46, experts: 128, k: 8 },
+    { id: 'q235', name: 'Qwen3-235B-A22B', total: 235, core: 7.9, act: 14.19, layers: 94, experts: 128, k: 8 },
+    { id: 'glm', name: 'GLM-4.5', total: 355, core: 19, act: 16.8, layers: 92, experts: 160, k: 8 },
+    { id: 'q480', name: 'Qwen3-Coder-480B', total: 480, core: 12, act: 23.4, layers: 62, experts: 160, k: 8 },
+    { id: 'dsv3', name: 'DeepSeek-V3', total: 671, core: 17.1, act: 20.4, layers: 61, experts: 256, k: 8 },
+    { id: 'k2', name: 'Kimi K2', total: 1026, core: 11.3, act: 21.1, layers: 61, experts: 384, k: 8 },
+    { id: '2t', name: '2T-class (hypothetical)', total: 2040, core: 11.3, act: 21.1, layers: 61, experts: 768, k: 8, note: 'Kimi K2 shape with twice the experts' },
+  ];
+  const $ = id => document.getElementById(id);
+  let sel = MODELS.find(m => m.id === 'q235');
+
+  function cost(m, bpw, hit) {
+    const coreGB = m.core * bpw / 8, actGB = m.act * bpw / 8, diskGB = m.total * bpw / 8;
+    const coreFits = coreGB + 0.4 <= RAM_FREE;
+    const streamGB = actGB * (1 - hit) + (coreFits ? 0 : coreGB);
+    const sPer = streamGB / FLASH + (actGB + coreGB) / KERNEL;
+    return { coreGB, actGB, diskGB, coreFits, streamGB, sPer, diskFits: diskGB <= DISK_FREE };
+  }
+  const fmtGB = g => g >= 100 ? Math.round(g) + ' GB' : g >= 10 ? g.toFixed(0) + ' GB' : g.toFixed(g < 1 ? 2 : 1) + ' GB';
+  const fmtP = b => b >= 1000 ? (b / 1000).toFixed(2) + 'T' : b >= 10 ? Math.round(b) + 'B' : b.toFixed(1) + 'B';
+  const fmtT = s => s < 60 ? s.toFixed(0) + ' s' : s < 3600 ? (s / 60).toFixed(0) + ' min' : (s / 3600).toFixed(1) + ' h';
+  const bpw = () => +$('quant').value;
+  const hit = () => +$('hit').value;
+
+  // ================= model table =================
+  function status(c) {
+    const out = [];
+    if (c.diskFits) out.push(['good', 'fits on disk']); else out.push(['bad', 'needs a skill pack']);
+    if (c.coreFits) out.push(['good', 'core fits RAM']); else out.push(['warn', 'core streamed too']);
+    return out.map(([k, t]) => `<span class="chip ${k}"><i style="background:var(--${k === 'good' ? 'good' : k === 'warn' ? 'warn' : 'bad'})"></i>${t}</span>`).join(' ');
+  }
+  function renderTable() {
+    $('hit-v').textContent = Math.round(hit() * 100) + '%';
+    $('model-table').tBodies[0].innerHTML = MODELS.map(m => {
+      const c = cost(m, bpw(), hit());
+      return `<tr data-id="${m.id}" class="${m === sel ? 'sel' : ''}" tabindex="0">
+        <td><b>${m.name}</b>${m.note ? `<div class="dim" style="font-size:12px">${m.note}</div>` : ''}</td>
+        <td class="n">${fmtP(m.total)}</td><td class="n">${fmtP(m.act + m.core)}</td>
+        <td class="n">${fmtGB(c.diskGB)}</td><td class="n">${fmtGB(c.coreGB)}</td>
+        <td class="n">${fmtGB(c.streamGB)}</td><td class="n">${c.sPer.toFixed(c.sPer < 10 ? 2 : 1)}</td>
+        <td>${status(c)}</td></tr>`;
+    }).join('');
+    [...$('model-table').tBodies[0].rows].forEach(r => {
+      const pick = () => { sel = MODELS.find(m => m.id === r.dataset.id); $('run-model').value = sel.id; renderAll(); };
+      r.addEventListener('click', pick);
+      r.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    });
+  }
+  $('run-model').innerHTML = MODELS.map(m => `<option value="${m.id}">${m.name} · ${fmtP(m.total)}</option>`).join('');
+  $('run-model').value = sel.id;
+  $('run-model').addEventListener('change', () => { sel = MODELS.find(m => m.id === $('run-model').value); renderAll(); });
+
+  // ================= skill packs =================
+  const skills = ['sk-code', 'sk-chat', 'sk-reason', 'sk-math', 'sk-research'];
+  function renderPacks() {
+    const share = +$('share').value, n = skills.filter(id => $(id).checked).length;
+    $('share-v').textContent = Math.round(share * 100) + '%';
+    // skills overlap: union of independent picks
+    const keep = n ? 1 - Math.pow(1 - share, n) : 0;
+    const c = cost(sel, bpw(), 0);
+    const expertGB = (sel.total - sel.core) * bpw() / 8;
+    const disk = c.coreGB + expertGB * keep;
+    $('pk-keep').textContent = Math.round(keep * 100) + '%';
+    $('pk-disk').textContent = fmtGB(disk);
+    $('pk-fit').textContent = Math.round(100 * disk / DISK_FREE) + '%';
+    const note = $('pack-note');
+    if (!n) { note.className = 'note'; note.innerHTML = '<strong>Pick at least one skill.</strong>'; return; }
+    if (c.diskFits && keep >= 0.99) { note.className = 'note ok'; note.innerHTML = `<strong>${sel.name} fits whole.</strong><p>At ${fmtGB(c.diskGB)} you don't need a pack, but one still saves space.</p>`; return; }
+    if (disk <= DISK_FREE) {
+      note.className = 'note ok';
+      note.innerHTML = `<strong>${sel.name} with these skills: ${fmtGB(disk)}.</strong><p>That fits in your 151 GB free. The full model would be ${fmtGB(c.diskGB)}. The ${Math.round(keep * 100)}% figure is an assumption until real routing traces are recorded for this model.</p>`;
+    } else {
+      note.className = 'note bad';
+      note.innerHTML = `<strong>Still too big: ${fmtGB(disk)}.</strong><p>Pick fewer skills, a lower share, or stronger compression.</p>`;
+    }
+  }
+  [...skills, 'share'].forEach(id => $(id).addEventListener('input', renderPacks));
+
+  // ================= phone vs GPU =================
+  const PHONE = { bw: 13.8, flops: 0.166, mem: 7.3 }, GPU = { bw: 224, flops: 9.1, mem: 8 };
+  function renderVs() {
+    const rows = [
+      ['Memory bandwidth', 'GB/s', PHONE.bw, GPU.bw, 'Sets decode speed: every weight is read once per token.'],
+      ['FP32 compute', 'TFLOPS', PHONE.flops, GPU.flops, 'Phone: 4 cores × 2.6 GHz × 16 FLOPs per cycle.'],
+      ['Memory', 'GB', PHONE.mem, GPU.mem, 'Similar. The GPU memory is just much faster.'],
+    ];
+    $('vs').innerHTML = rows.map(([label, unit, p, g, sub]) => {
+      const max = Math.max(p, g);
+      return `<div class="vs-row"><div><b>${label}</b><div class="dim" style="font-size:12.5px">${sub}</div></div><div class="bars">
+        <div class="vs-bar"><div class="track"><div class="fill" style="width:${100 * p / max}%;background:var(--warm)"></div></div><span class="mono">${p} ${unit}</span></div>
+        <div class="vs-bar"><div class="track"><div class="fill" style="width:${100 * g / max}%;background:var(--hit)"></div></div><span class="mono">${g} ${unit}</span></div>
+      </div></div>`;
+    }).join('') + `<div class="legend-3d"><span><i style="background:var(--warm)"></i>your phone (measured)</span><span><i style="background:var(--hit)"></i>RTX 3050 desktop (spec sheet)</span></div>`;
+    const n = +$('phones').value;
+    $('phones-v').textContent = n;
+    const storage = n * 120, ram = n * 3;
+    $('pool-note').className = 'note';
+    $('pool-note').innerHTML = `<strong>${n} phone${n > 1 ? 's' : ''}: about ${storage} GB of storage and ${ram} GB of free RAM for experts.</strong>
+      <p>That's enough to hold ${storage >= cost(sel, bpw(), 0).diskGB ? 'all of ' + sel.name : 'a larger skill pack for ' + sel.name}. Speed doesn't add up the same way: each token visits every layer in order, and each hop between phones costs a few milliseconds of Wi-Fi latency at about 50–100 MB/s. ${sel.layers} layers per token makes the round trips add up. It takes about ${Math.ceil(GPU.bw / PHONE.bw)} phones' combined memory bandwidth to equal one RTX 3050, before counting the network. Pooling phones adds capacity, not GPU speed.</p>`;
+  }
+  $('phones').addEventListener('input', renderVs);
+
+  // ================= pipeline run =================
+  const STAGES = [
+    ['Turn words into numbers', 'Tokenizer from core.gguf'],
+    ['Connect to the brain', 'Map the core model into RAM'],
+    ['Read the whole prompt', 'Prompt goes through every layer'],
+    ['Pick experts', 'Router chooses top-k experts per layer'],
+    ['Stream experts from flash', '4 readers on the little cores'],
+    ['Compute', '2-bit NEON kernels on the big cores'],
+    ['Write the answer', 'One token at a time'],
+  ];
+  $('stages').innerHTML = STAGES.map(([t, d], i) => `<div class="stage" id="st${i}"><span class="ix">${i + 1}</span><div><div class="t">${t}</div><div class="d">${d}</div></div><span class="v" id="sv${i}"></span></div>`).join('');
+
+  function tokenize(text) {
+    const pieces = text.match(/[A-Za-z]+|\d+|[^\sA-Za-z\d]/g) || [];
+    const out = [];
+    let h = 0;
+    for (const p of pieces) {
+      const parts = p.length > 6 && /^[A-Za-z]+$/.test(p) ? [p.slice(0, Math.ceil(p.length / 2)), p.slice(Math.ceil(p.length / 2))] : [p];
+      for (const q of parts) {
+        h = 0;
+        for (const ch of q) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+        out.push([q, 100 + (h % 151000)]);
+      }
+    }
+    return out;
+  }
+
+  let running = false;
+  const sleep = ms => new Promise(r => setTimeout(r, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
+  const log = (html) => { const l = $('log'); l.innerHTML += '\n' + html; l.scrollTop = l.scrollHeight; };
+  function setRam(core, cache, kv) {
+    const tot = Math.max(RAM_FREE, core + cache + kv);
+    $('ram-core').style.width = 100 * core / tot + '%';
+    $('ram-cache').style.width = 100 * cache / tot + '%';
+    $('ram-kv').style.width = 100 * kv / tot + '%';
+    $('ram-v').textContent = `${(core + cache + kv).toFixed(2)} / ${RAM_FREE} GB free`;
+  }
+
+  async function run() {
+    if (running) return;
+    running = true; $('go').disabled = true;
+    const m = sel, c = cost(m, bpw(), hit()), outN = +$('out-len').value;
+    const toks = tokenize($('prompt').value.slice(0, 600));
+    document.querySelectorAll('.stage').forEach(s => s.classList.remove('active', 'done'));
+    STAGES.forEach((_, i) => $('sv' + i).textContent = '');
+    $('log').innerHTML = `<span class="k">model</span> ${m.name} · ${fmtP(m.total)} params · ${$('quant').selectedOptions[0].text.split(',')[0]}`;
+    setRam(0, 0, 0);
+    trigger3D();
+    const step = async (i, ms, fn) => { const s = $('st' + i); s.classList.add('active'); await fn(); await sleep(ms); s.classList.remove('active'); s.classList.add('done'); };
+
+    await step(0, 500, async () => {
+      const box = $('tokens'); box.innerHTML = '';
+      for (const [w, id] of toks) { const el = document.createElement('span'); el.className = 'tok'; el.innerHTML = `<b></b><span></span>`; el.querySelector('b').textContent = w; el.querySelector('span').textContent = id; box.appendChild(el); await sleep(25); }
+      $('sv0').textContent = `${toks.length} tokens`;
+      log(`<span class="k">tokenize</span> ${toks.length} tokens → [${toks.slice(0, 8).map(t => t[1]).join(', ')}${toks.length > 8 ? ', …' : ''}]`);
+    });
+    const ramCore = c.coreFits ? c.coreGB : Math.min(c.coreGB, 0.6);
+    const cache = Math.max(0, Math.min(1.0, RAM_FREE - ramCore - 0.3));
+    await step(1, 600, async () => {
+      setRam(ramCore, 0, 0);
+      $('sv1').textContent = c.coreFits ? `${c.coreGB.toFixed(2)} GB in RAM` : `${c.coreGB.toFixed(1)} GB, streamed`;
+      log(c.coreFits ? `<span class="k">core</span> core.gguf loaded: <span class="b">${c.coreGB.toFixed(2)} GB RAM</span> (attention, router, embeddings)`
+                     : `<span class="k">core</span> core is ${c.coreGB.toFixed(1)} GB, more than ${RAM_FREE} GB free → <span class="o">attention layers stream from flash too</span>`);
+    });
+    const kvGB = Math.min(0.3, (toks.length + outN) * m.layers * 2 * 512 * 2 / 1e9);
+    await step(2, 600, async () => {
+      setRam(ramCore, cache, kvGB * 0.2);
+      const prefill = toks.length * c.sPer * 0.5;
+      $('sv2').textContent = '≈ ' + fmtT(prefill);
+      log(`<span class="k">prefill</span> ${toks.length} prompt tokens × ${m.layers} layers ≈ ${fmtT(prefill)} (prompt tokens share expert reads)`);
+    });
+    await step(3, 500, async () => {
+      $('sv3').textContent = `${m.k} of ${m.experts} / layer`;
+      log(`<span class="k">route</span> each token uses ${m.k} of ${m.experts} experts in each of ${m.layers} layers = ${m.k * m.layers} expert visits`);
+    });
+    await step(4, 700, async () => {
+      setRam(ramCore, cache, kvGB * 0.5);
+      $('sv4').textContent = `${c.streamGB.toFixed(2)} GB/token`;
+      log(`<span class="k">stream</span> <span class="o">${c.streamGB.toFixed(2)} GB per token from flash</span> at ${FLASH} GB/s = ${(c.streamGB / FLASH).toFixed(2)} s · cache holds ${cache.toFixed(1)} GB`);
+    });
+    await step(5, 600, async () => {
+      const comp = (c.actGB + c.coreGB) / KERNEL;
+      $('sv5').textContent = `${comp.toFixed(2)} s/token`;
+      log(`<span class="k">compute</span> ${(c.actGB + c.coreGB).toFixed(2)} GB of 2-bit weights through 4× A78 at ${KERNEL} GB/s = <span class="b">${comp.toFixed(2)} s</span>`);
+    });
+    await step(6, 400, async () => {
+      setRam(ramCore, cache, kvGB);
+      const total = outN * c.sPer + toks.length * c.sPer * 0.5;
+      $('sv6').textContent = `${outN} tokens`;
+      log(`<span class="k">answer</span> ${outN} tokens × ${c.sPer.toFixed(2)} s = <span class="g">${fmtT(total)}</span> total`);
+      log(`<span class="dim">Real text output arrives with the next engine step (tokenizer + attention).</span>`);
+      $('rt-spt').textContent = c.sPer.toFixed(c.sPer < 10 ? 2 : 1);
+      $('rt-total').textContent = fmtT(total);
+      $('rt-gb').textContent = c.streamGB.toFixed(2);
+      $('rt-ram').textContent = (ramCore + cache + kvGB).toFixed(1) + ' GB';
+    });
+    running = false; $('go').disabled = false;
+  }
+  $('go').addEventListener('click', run);
+  ['quant', 'hit'].forEach(id => $(id).addEventListener('input', renderAll));
+
+  function renderAll() {
+    renderTable(); renderPacks(); renderVs();
+    const c = cost(sel, bpw(), hit());
+    $('run-note').textContent = `${sel.name}: about ${c.sPer.toFixed(1)} s per token on your phone`;
+    if (window.__setTower) window.__setTower(sel);
+  }
+
+  $('copy').addEventListener('click', () => {
+    const text = $('cmd').textContent, b = $('copy');
+    const ok = () => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy commands', 1500); };
+    const fallback = () => { const r = document.createRange(); r.selectNodeContents($('cmd')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); };
+    try { navigator.clipboard.writeText(text).then(ok, fallback); } catch (e) { fallback(); }
+  });
+
+  // reveal on scroll: content is visible at rest; it only slides slightly into place
+  const io = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) e.target.classList.remove('pre'); }), { threshold: 0.08 }) : null;
+  document.querySelectorAll('.reveal').forEach(el => { const r = el.getBoundingClientRect(); if (io && r.top > innerHeight) { el.classList.add('pre'); io.observe(el); } });
+
+  // ================= 3D expert tower =================
+  let trigger3D = () => {};
+  try {
+    if (!window.THREE) throw new Error('three.js not loaded');
+    const canvas = $('scene');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x0a0f1c, 0.045);
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+    const C = { idle: new THREE.Color(0x26344f), hit: new THREE.Color(0x3987e5), pf: new THREE.Color(0x199e70), flash: new THREE.Color(0xd95926), core: new THREE.Color(0xf2c98a) };
+    scene.add(new THREE.AmbientLight(0x8aa0c8, 0.55));
+    const key = new THREE.PointLight(0xf2c98a, 1.4, 40); key.position.set(4, 6, 6); scene.add(key);
+    const rim = new THREE.PointLight(0x3987e5, 1.2, 40); rim.position.set(-6, -2, -4); scene.add(rim);
+
+    const group = new THREE.Group(); scene.add(group);
+    let LAYERS = 16, PER = 48, mesh, layerY, ringR = 3.2;
+    const dummy = new THREE.Object3D();
+    const state = []; // per instance: glow 0..1 and color kind
+    function build(m) {
+      if (mesh) { group.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
+      LAYERS = Math.min(24, Math.max(10, Math.round(m.layers / 4)));
+      PER = Math.min(64, Math.max(32, Math.round(m.experts / 4)));
+      const geo = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+      const mat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.3, emissive: 0x000000 });
+      mesh = new THREE.InstancedMesh(geo, mat, LAYERS * PER);
+      layerY = i => 3.4 - i * (6.8 / (LAYERS - 1));
+      state.length = 0;
+      for (let l = 0; l < LAYERS; l++) for (let e = 0; e < PER; e++) {
+        const a = e / PER * Math.PI * 2 + l * 0.17;
+        const r = ringR * (0.82 + 0.18 * Math.cos(l / (LAYERS - 1) * Math.PI - Math.PI / 2) ** 0.5);
+        dummy.position.set(Math.cos(a) * r, layerY(l), Math.sin(a) * r);
+        dummy.rotation.set(a, a * 0.5, 0);
+        dummy.updateMatrix();
+        const i = l * PER + e;
+        mesh.setMatrixAt(i, dummy.matrix);
+        mesh.setColorAt(i, C.idle);
+        state.push({ g: 0, kind: 0, pos: dummy.position.clone() });
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      group.add(mesh);
+    }
+    // core spine
+    const spine = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 7.4, 24, 1, true), new THREE.MeshBasicMaterial({ color: 0xf2c98a, transparent: true, opacity: 0.12, side: THREE.DoubleSide }));
+    group.add(spine);
+    // token comet
+    const glowTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, 'rgba(255,240,210,1)'); gr.addColorStop(0.3, 'rgba(242,201,138,.55)'); gr.addColorStop(1, 'rgba(242,201,138,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+    const comet = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+    comet.scale.set(1.3, 1.3, 1); group.add(comet);
+    // lines from comet to chosen experts
+    const lineGeo = new THREE.BufferGeometry(); const linePos = new Float32Array(8 * 6); lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3));
+    const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({ color: 0xf2c98a, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending }));
+    group.add(lines);
+    // star dust
+    const dustGeo = new THREE.BufferGeometry(); const N = 500, dp = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) { const r = 6 + Math.random() * 14, a = Math.random() * 6.283, y = (Math.random() - .5) * 18; dp[i * 3] = Math.cos(a) * r; dp[i * 3 + 1] = y; dp[i * 3 + 2] = Math.sin(a) * r; }
+    dustGeo.setAttribute('position', new THREE.BufferAttribute(dp, 3));
+    scene.add(new THREE.Points(dustGeo, new THREE.PointsMaterial({ color: 0x5a6f96, size: 0.05, transparent: true, opacity: 0.7 })));
+
+    let cached = new Set();
+    let layer = 0, t0 = performance.now(), speed = 1, chosen = [];
+    const LAYER_MS = 260;
+    function pickLayer(l) {
+      chosen = [];
+      const k = 8;
+      while (chosen.length < k) { const e = Math.floor(Math.random() * PER); if (!chosen.includes(e)) chosen.push(e); }
+      chosen.forEach((e, j) => {
+        const i = l * PER + e, s = state[i];
+        s.kind = cached.has(i) ? 1 : (Math.random() < 0.55 ? 2 : 3);
+        s.g = 1;
+        cached.add(i);
+        if (cached.size > LAYERS * PER * 0.12) cached.delete(cached.values().next().value);
+      });
+    }
+    function resize() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+      const narrow = w < 700;
+      camera.position.set(narrow ? 0 : 3.5, 1.2, narrow ? 15 : 12.5);
+      group.position.x = narrow ? 0 : 3.2;
+    }
+    window.addEventListener('resize', resize);
+    let mx = 0, my = 0;
+    window.addEventListener('pointermove', e => { mx = e.clientX / innerWidth - .5; my = e.clientY / innerHeight - .5; });
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const tmpC = new THREE.Color();
+    function frame(now) {
+      const dt = now - t0;
+      if (dt > LAYER_MS / speed) {
+        t0 = now; layer = (layer + 1) % LAYERS;
+        if (layer === 0) speed = Math.max(1, speed * 0.7);
+        pickLayer(layer);
+      }
+      const frac = Math.min(1, dt / (LAYER_MS / speed));
+      const y = layerY(layer) - frac * (6.8 / (LAYERS - 1));
+      comet.position.set(0, y + (6.8 / (LAYERS - 1)), 0);
+      chosen.forEach((e, j) => {
+        const p = state[layer * PER + e].pos;
+        linePos.set([comet.position.x, comet.position.y, comet.position.z, p.x, p.y, p.z], j * 6);
+      });
+      lineGeo.attributes.position.needsUpdate = true;
+      lines.material.opacity = 0.55 * (1 - frac * 0.6);
+      for (let i = 0; i < state.length; i++) {
+        const s = state[i];
+        if (s.g > 0) s.g = Math.max(0, s.g - 0.012);
+        const base = cached.has(i) ? 0.25 : 0;
+        const kc = s.kind === 1 ? C.hit : s.kind === 2 ? C.pf : s.kind === 3 ? C.flash : C.idle;
+        tmpC.copy(C.idle).lerp(kc, Math.min(1, s.g + base * (s.kind ? 1 : 0)));
+        mesh.setColorAt(i, tmpC);
+      }
+      mesh.instanceColor.needsUpdate = true;
+      group.rotation.y += reduce ? 0 : 0.0022 * speed;
+      camera.position.x += ((window.innerWidth < 700 ? 0 : 3.5) + mx * 1.6 - camera.position.x) * 0.04;
+      camera.position.y += (1.2 - my * 1.4 - camera.position.y) * 0.04;
+      camera.lookAt(group.position.x * 0.55, 0, 0);
+      renderer.render(scene, camera);
+      if (!reduce) requestAnimationFrame(frame);
+    }
+    let built = null;
+    window.__setTower = m => { if (m === built) return; built = m; build(m); cached = new Set(); layer = 0; pickLayer(0); };
+    trigger3D = () => { speed = 4; layer = 0; t0 = performance.now(); };
+    built = sel; build(sel); resize(); pickLayer(0);
+    requestAnimationFrame(frame);
+    if (reduce) { for (let l = 0; l < LAYERS; l++) pickLayer(l); frame(performance.now()); }
+  } catch (err) {
+    $('scene').style.background = 'radial-gradient(60% 60% at 70% 40%, #1a2a48, #0a0f1c)';
+  }
+
+  renderAll();
+})();
+</script>
