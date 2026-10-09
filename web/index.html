@@ -173,7 +173,7 @@ footer { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block:
     <div class="sec-head">
       <span class="eyebrow">See a prompt go through the engine</span>
       <h2>From your words to the experts that answer</h2>
-      <p class="muted">Pick a model and type a prompt. Each stage shows what ExpertStream does and how much RAM, storage and time it costs on your phone. The figures come from your measured flash and kernel speeds. The engine can't generate real text yet, so this run shows the work and the timing, not an answer.</p>
+      <p class="muted">Pick a model and type a prompt. Each stage shows what ExpertStream does and how much RAM, storage and time it costs on your phone. The figures come from your measured flash and kernel speeds. This page estimates the work and timing. Real answers come from <span class="mono">es_chat</span> in Termux, which already runs OLMoE-1B-7B.</p>
     </div>
     <div class="grid2">
       <div class="panel">
@@ -304,24 +304,24 @@ footer { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block:
         <li>2-bit NEON kernel, bit-exact with llama.cpp, 9.81 GB/s on 4× A78</li>
         <li>Decode loop with expert cache and prefetch</li>
         <li>Hugging Face download and GGUF importer, checked byte for byte on 3 real models</li>
+        <li>Real text from OLMoE-1B-7B: tokenizer, attention, router, streamed experts. Matches a float64 reference to about one part in a million</li>
       </ul></div>
       <div class="col next"><h3>Next</h3><ul>
-        <li>Tokenizer read from core.gguf</li>
-        <li>Attention, router, norms, and Q3_K / Q4_K kernels</li>
-        <li>First real text from OLMoE-1B-7B on your phone</li>
+        <li>NEON kernels for 3-bit and 6-bit layers (speed)</li>
+        <li>Routing traces from real prompts, then a skill-pack builder</li>
+        <li>A bigger model: Qwen3-30B-A3B</li>
       </ul></div>
       <div class="col later"><h3>Later</h3><ul>
-        <li>Routing traces and skill-pack builder</li>
         <li>Speculative decoding with a small draft model</li>
         <li>Laptop build, then pooling several phones over Wi-Fi</li>
       </ul></div>
     </div>
     <div class="panel">
-      <h3 style="font-size:16px">Try the real importer on your phone</h3>
-      <pre class="cmd" id="cmd">cd ~/Stream- &amp;&amp; git checkout -- . &amp;&amp; git pull &amp;&amp; make
+      <h3 style="font-size:16px">Chat with a real model on your phone</h3>
+      <pre class="cmd" id="cmd">cd ~/Stream- &amp;&amp; git pull &amp;&amp; make
 bash scripts/hf_get.sh bartowski/OLMoE-1B-7B-0924-Instruct-GGUF Q2_K.gguf ~/models
-./es_import -i ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf
-./es_import -o ~/packs/olmoe ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf</pre>
+./es_import -o ~/packs/olmoe ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf
+./es_chat -m ~/packs/olmoe</pre>
       <div class="row"><button type="button" class="btn" id="copy">Copy commands</button></div>
     </div>
   </section>
@@ -530,7 +530,7 @@ bash scripts/hf_get.sh bartowski/OLMoE-1B-7B-0924-Instruct-GGUF Q2_K.gguf ~/mode
       const total = outN * c.sPer + toks.length * c.sPer * 0.5;
       $('sv6').textContent = `${outN} tokens`;
       log(`<span class="k">answer</span> ${outN} tokens × ${c.sPer.toFixed(2)} s = <span class="g">${fmtT(total)}</span> total`);
-      log(`<span class="dim">Real text output arrives with the next engine step (tokenizer + attention).</span>`);
+      log(`<span class="dim">This is an estimate. es_chat in Termux generates the real answer.</span>`);
       $('rt-spt').textContent = c.sPer.toFixed(c.sPer < 10 ? 2 : 1);
       $('rt-total').textContent = fmtT(total);
       $('rt-gb').textContent = c.streamGB.toFixed(2);
