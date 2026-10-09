@@ -227,3 +227,62 @@ const char *es_gguf_str(const es_gguf *g, const char *key) {
     const es_gguf_kv *kv = es_gguf_find(g, key);
     return kv && kv->type == GGUF_T_STRING ? kv->str : NULL;
 }
+
+/* position a reader at the first element of an array KV */
+static rd *array_reader(const es_gguf *g, const es_gguf_kv *kv) {
+    rd *r = calloc(1, sizeof *r);
+    r->fd = g->fd;
+    r->pos = kv->raw_start;
+    free(rd_str(r));      /* key */
+    rd_u32(r);            /* type = ARRAY */
+    rd_u32(r);            /* element type */
+    rd_u64(r);            /* count */
+    return r;
+}
+
+char **es_gguf_strings(const es_gguf *g, const char *key, uint64_t *n, uint32_t **lens) {
+    const es_gguf_kv *kv = es_gguf_find(g, key);
+    if (!kv || kv->type != GGUF_T_ARRAY || kv->arr_type != GGUF_T_STRING) return NULL;
+    /* the array's bytes minus the 8-byte length prefixes = total chars */
+    uint64_t total = (kv->raw_end - kv->raw_start);
+    char **out = malloc(kv->arr_n * sizeof(char *) + total + kv->arr_n);
+    uint32_t *ln = malloc(kv->arr_n * sizeof(uint32_t));
+    char *pool = (char *)(out + kv->arr_n);
+    rd *r = array_reader(g, kv);
+    for (uint64_t i = 0; i < kv->arr_n && !r->err; i++) {
+        uint64_t len = rd_u64(r);
+        if (len > total) { r->err = 1; break; }
+        out[i] = pool;
+        rd_bytes(r, pool, len);
+        pool[len] = 0;
+        ln[i] = (uint32_t)len;
+        pool += len + 1;
+    }
+    int err = r->err;
+    free(r);
+    if (err) { free(out); free(ln); return NULL; }
+    *n = kv->arr_n;
+    if (lens) *lens = ln; else free(ln);
+    return out;
+}
+
+int32_t *es_gguf_ints(const es_gguf *g, const char *key, uint64_t *n) {
+    const es_gguf_kv *kv = es_gguf_find(g, key);
+    if (!kv || kv->type != GGUF_T_ARRAY) return NULL;
+    size_t sz = scalar_size(kv->arr_type);
+    if (!sz || kv->arr_type == GGUF_T_F32 || kv->arr_type == GGUF_T_F64) return NULL;
+    int32_t *out = malloc(kv->arr_n * sizeof(int32_t));
+    rd *r = array_reader(g, kv);
+    for (uint64_t i = 0; i < kv->arr_n && !r->err; i++) {
+        es_gguf_kv tmp = {0};
+        read_scalar(r, kv->arr_type, &tmp);
+        int is_signed = kv->arr_type == GGUF_T_I8 || kv->arr_type == GGUF_T_I16 ||
+                        kv->arr_type == GGUF_T_I32 || kv->arr_type == GGUF_T_I64;
+        out[i] = is_signed ? (int32_t)tmp.v.i : (int32_t)tmp.v.u;
+    }
+    int err = r->err;
+    free(r);
+    if (err) { free(out); return NULL; }
+    *n = kv->arr_n;
+    return out;
+}

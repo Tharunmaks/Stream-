@@ -56,6 +56,13 @@ const es_gguf_tensor *es_gguf_tensor_find(const es_gguf *g, const char *name);
 int64_t     es_gguf_int(const es_gguf *g, const char *key, int64_t def);
 const char *es_gguf_str(const es_gguf *g, const char *key);
 
+/* Read a string array (e.g. tokenizer.ggml.tokens). Returns n strings in
+ * one allocation (free the returned pointer only), lens[i] = byte length;
+ * NULL if missing or not a string array. */
+char  **es_gguf_strings(const es_gguf *g, const char *key, uint64_t *n, uint32_t **lens);
+/* Read an integer array (any int type) as int32; NULL if missing. */
+int32_t *es_gguf_ints(const es_gguf *g, const char *key, uint64_t *n);
+
 /* ggml type info: block size (weights) and bytes per block; 0 if unknown. */
 int         es_ggml_type_info(uint32_t type, uint32_t *blck, uint32_t *tsize);
 const char *es_ggml_type_name(uint32_t type);

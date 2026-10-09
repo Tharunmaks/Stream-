@@ -15,12 +15,17 @@ Status:
 - **Step 3 (done):** `es_run`, an end-to-end decode loop: hot-expert
   cache, router-ahead prefetch, readers on the little cores, compute on the
   big cores. Weights are synthetic and routing is simulated.
-- **Step 4 (current):** real models. `scripts/hf_get.sh` downloads GGUF
+- **Step 4 (done):** real models. `scripts/hf_get.sh` downloads GGUF
   files from Hugging Face. `es_import` turns any GGUF MoE (single file or
   split) into a pack: `core.gguf` plus one file per expert. Tested
   byte-for-byte against the official `gguf` reader on 3 real models. `-x`
   imports only chosen experts, which is how skill packs (coding, chat) will
   be stored.
+- **Step 5 (current):** real text. `es_chat` runs OLMoE-1B-7B from a pack:
+  tokenizer, attention, router and streamed experts. With float activations
+  its logits match an independent float64 NumPy reference to about 1e-6
+  over 6 tokens. With the default 8-bit activations (like llama.cpp) the
+  top-1 token matches llama.cpp at 14 of 15 positions.
 
 ## Layout
 
@@ -38,6 +43,10 @@ tools/es_kbench.c     kernel correctness + compute throughput per core type
 tools/es_run.c        end-to-end decode loop (cache + prefetch + kernels)
 tools/es_import.c     GGUF MoE -> ExpertStream pack (core.gguf + expert files)
 src/es_gguf.{h,c}     GGUF v2/v3 reader (metadata, tensor table, splits)
+src/es_quant.{h,c}    dequantize + matvec for F32/F16/Q4_0..Q8_0/Q2_K..Q6_K
+src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
+tools/es_chat.c       text generation: core in RAM, experts streamed + cached
+tools/es_qtest.c      dumps dequantized tensors for checking
 scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
 docs/expert_format.md format spec and design notes
@@ -132,6 +141,20 @@ the remaining kernels.
 
 Disk: the GGUF and the pack each take the model's full size. Delete the
 GGUF after importing if space is tight.
+
+## Step 5: chat with a real model (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+./es_chat -m ~/packs/olmoe -p "Write a short Python function that checks if a number is prime."
+./es_chat -m ~/packs/olmoe          # interactive chat, /exit to quit
+./es_chat -m ~/packs/olmoe -r -t 0 -p "The capital of France is" -n 32   # raw text, greedy
+```
+
+Options: `-n` max new tokens, `-t` temperature (0 = greedy), `-C` expert
+cache in MB (default 1024), `-c` context length (default 2048, 537 MB of
+RAM for this model), `-T file` writes the experts picked for every token
+and layer (input for building skill packs).
 
 ## What the numbers mean (back-of-envelope, I/O only)
 
