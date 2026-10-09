@@ -1,0 +1,903 @@
+<meta charset="utf-8">
+<title>ExpertStream</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an app shell. Sticky top bar with tabs, one short page visible at a time, pages slide in. */
+:root {
+  color-scheme: dark;
+  --bg: #0a0f1c; --bg-2: #101828; --panel: #131d30; --line: #24314a;
+  --ink: #eef2f8; --ink-2: #b3bfd1; --ink-3: #7f8ca3;
+  --hit: #3987e5; --pf: #199e70; --flash: #d95926; --warm: #f2c98a;
+  --good: #3fb37f; --warn: #e0a43a; --bad: #e66767;
+  --f-display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { background: var(--bg); color: var(--ink); }
+body { font-family: var(--f-body); font-size: 15px; line-height: 1.55; overflow-x: hidden; }
+h1, h2, h3 { font-family: var(--f-display); margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 64ch; }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-2); } .dim { color: var(--ink-3); }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+
+/* ---------- top bar + tabs ---------- */
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: rgba(10,15,28,.86); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.bar-in { max-width: 1080px; margin: 0 auto; padding-inline: 16px; display: flex; align-items: center; gap: 16px; height: 56px; }
+.logo { font-family: var(--f-display); font-weight: 800; font-size: 19px; letter-spacing: -.01em; white-space: nowrap; }
+.logo span { color: var(--warm); }
+.tabs { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; flex: 1; position: relative; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { background: none; border: 0; padding: 8px 12px; border-radius: 8px; color: var(--ink-2); cursor: pointer; white-space: nowrap; font-weight: 500; transition: color .2s, background .2s; }
+.tab:hover { color: var(--ink); background: var(--bg-2); }
+.tab[aria-selected="true"] { color: var(--ink); }
+.tab-ink { position: absolute; bottom: 0; height: 2px; background: var(--warm); border-radius: 2px; transition: left .35s cubic-bezier(.2,.8,.2,1), width .35s cubic-bezier(.2,.8,.2,1); }
+
+/* ---------- pages ---------- */
+main { max-width: 1080px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 64px; }
+.page { display: grid; gap: 20px; animation: pageIn .45s cubic-bezier(.2,.8,.2,1); }
+@keyframes pageIn { from { transform: translateY(12px); opacity: .4; } to { transform: none; opacity: 1; } }
+.head { display: grid; gap: 6px; }
+.head h1 { font-size: clamp(28px, 4.5vw, 40px); font-weight: 800; letter-spacing: -.015em; }
+.eyebrow { font-family: var(--f-mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--warm); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; display: grid; gap: 14px; min-width: 0; }
+.panel > * { min-width: 0; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 820px) { .grid2 { grid-template-columns: minmax(0, 1fr); } }
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 640px) { .tiles { grid-template-columns: minmax(0, 1fr); } }
+.tile { background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 2px; }
+.tile .v { font-family: var(--f-display); font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.tile .k { font-size: 13px; color: var(--ink-3); }
+.btn { border: 1px solid var(--line); background: var(--bg-2); border-radius: 10px; padding: 9px 15px; cursor: pointer; transition: transform .15s, border-color .15s; }
+.btn:hover { border-color: var(--warm); transform: translateY(-1px); }
+.btn.primary { background: linear-gradient(135deg, var(--hit), #2c6cc0); border-color: transparent; font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: default; transform: none; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+label.field { display: grid; gap: 6px; font-size: 13.5px; color: var(--ink-2); }
+select, input[type=text], textarea { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; width: 100%; }
+textarea { resize: none; min-height: 48px; max-height: 160px; }
+pre.cmd { margin: 0; background: #070b15; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; font-family: var(--f-mono); font-size: 13px; white-space: pre; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg-2); color: var(--ink-2); white-space: nowrap; }
+.chip i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.table-box { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); font-weight: 600; background: var(--bg-2); }
+td.n { text-align: right; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+
+/* ---------- home ---------- */
+.hero { position: relative; border-radius: 18px; overflow: hidden; border: 1px solid var(--line); min-height: 380px; display: grid; align-items: end; isolation: isolate; background: radial-gradient(80% 90% at 75% 40%, #16264a, var(--bg)); }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; }
+.hero::after { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg, rgba(10,15,28,.92) 0%, rgba(10,15,28,.4) 55%, rgba(10,15,28,0) 100%); }
+.hero-in { padding: 28px; display: grid; gap: 12px; max-width: 560px; }
+.hero h1 { font-size: clamp(38px, 7vw, 68px); font-weight: 800; line-height: .95; letter-spacing: -.02em; }
+.hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--hit), var(--pf) 55%, var(--warm)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.go-card { cursor: pointer; text-align: left; transition: transform .2s, border-color .2s; }
+.go-card:hover { transform: translateY(-3px); border-color: var(--warm); }
+.go-card h3 { font-size: 18px; }
+
+/* ---------- chat ---------- */
+.chat { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; height: min(72vh, 720px); min-height: 460px; padding: 0; gap: 0; overflow: hidden; }
+.chat-top { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.chat-top select { width: auto; padding: 7px 10px; }
+.msgs { overflow-y: auto; padding: 18px 16px; display: grid; gap: 14px; align-content: start; }
+.msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; animation: pageIn .35s ease both; }
+.msg.user { justify-self: end; background: linear-gradient(135deg, #24467c, #1d3a68); border-bottom-right-radius: 4px; white-space: pre-wrap; word-break: break-word; }
+.msg.bot { justify-self: start; background: var(--bg-2); border: 1px solid var(--line); border-bottom-left-radius: 4px; display: grid; gap: 10px; width: 86%; }
+.stage { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: center; font-size: 13.5px; color: var(--ink-3); transition: color .3s; }
+.stage .dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); transition: all .3s; }
+.stage.on { color: var(--ink); }
+.stage.on .dot { border-color: var(--warm); box-shadow: 0 0 0 4px rgba(242,201,138,.18); animation: pulse 1s ease infinite; }
+.stage.ok { color: var(--ink-2); }
+.stage.ok .dot { background: var(--pf); border-color: var(--pf); animation: none; box-shadow: none; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 7px rgba(242,201,138,.05); } }
+.stage .v { font-family: var(--f-mono); font-size: 12px; }
+.ids { display: flex; flex-wrap: wrap; gap: 4px; }
+.ids span { font-family: var(--f-mono); font-size: 11.5px; padding: 2px 6px; border-radius: 5px; background: #070b15; color: var(--warm); animation: pageIn .3s ease both; }
+.ram { height: 8px; border-radius: 4px; background: #070b15; overflow: hidden; display: flex; }
+.ram i { height: 100%; transition: width .6s cubic-bezier(.2,.8,.2,1); }
+.answer { white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.answer pre { white-space: pre; margin: 6px 0; }
+.answer .caret { display: inline-block; width: 8px; height: 1em; background: var(--warm); vertical-align: text-bottom; animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.stats { font-family: var(--f-mono); font-size: 12px; color: var(--ink-3); }
+.compose { display: flex; gap: 10px; padding: 12px; border-top: 1px solid var(--line); align-items: end; }
+.note { border-left: 3px solid var(--warn); background: var(--bg-2); padding: 10px 14px; border-radius: 0 10px 10px 0; font-size: 14px; display: grid; gap: 4px; }
+.note.ok { border-left-color: var(--good); }
+
+/* ---------- convert ---------- */
+.models { display: grid; gap: 8px; }
+.model { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg-2); cursor: pointer; text-align: left; transition: border-color .2s, transform .2s; }
+.model:hover { transform: translateX(3px); }
+.model[aria-pressed="true"] { border-color: var(--warm); background: color-mix(in srgb, var(--warm) 6%, var(--bg-2)); }
+.model b { font-weight: 600; }
+
+/* ---------- history ---------- */
+.hist { display: grid; gap: 8px; }
+.hitem { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-2); animation: pageIn .3s ease both; }
+.hitem .p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline { display: grid; gap: 0; border-left: 2px solid var(--line); margin-left: 6px; }
+.tl { position: relative; padding: 0 0 16px 20px; display: grid; gap: 2px; }
+.tl::before { content: ""; position: absolute; left: -7px; top: 5px; width: 12px; height: 12px; border-radius: 50%; background: var(--pf); }
+.tl.now::before { background: var(--warm); }
+.tl b { font-weight: 600; }
+/* ---------- terminal ---------- */
+.term { --t-bg: #04070d; background: var(--t-bg); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; height: min(74vh, 760px); min-height: 440px; box-shadow: 0 20px 60px rgba(0,0,0,.45); }
+.term-bar { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #0b111d; border-bottom: 1px solid var(--line); font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-3); }
+.term-bar .lights { display: flex; gap: 6px; }
+.term-bar .lights i { width: 10px; height: 10px; border-radius: 50%; background: #2a3550; }
+.term-bar .lights i:first-child { background: var(--flash); } .term-bar .lights i:nth-child(2) { background: var(--warn); } .term-bar .lights i:nth-child(3) { background: var(--pf); }
+.term-bar .title { flex: 1; text-align: center; color: var(--ink-2); }
+.term-out { overflow-y: auto; padding: 12px 14px; font-family: var(--f-mono); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #d6dde8; }
+.term-out .ln { animation: lnIn .18s ease both; }
+@keyframes lnIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.term-out .ps { color: var(--pf); } .term-out .cmd { color: #fff; }
+.term-out .dim { color: #6f7d93; } .term-out .warm { color: var(--warm); } .term-out .err { color: var(--bad); } .term-out .ok { color: var(--good); } .term-out .blue { color: #7fb2ef; }
+.term-out .code { color: var(--warm); }
+.term-out .ans { color: #eef2f8; }
+.term-out a { color: #7fb2ef; }
+.term-out .cursor { display: inline-block; width: .6em; height: 1.1em; background: var(--pf); vertical-align: text-bottom; animation: blink 1s steps(2) infinite; }
+.term-in { display: flex; align-items: center; gap: 8px; padding: 8px 14px 10px; border-top: 1px solid #141c2c; font-family: var(--f-mono); font-size: 14px; }
+.term-in .ps { color: var(--pf); white-space: nowrap; }
+.term-in input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #fff; font-family: var(--f-mono); font-size: 16px; caret-color: var(--pf); padding: 4px 0; }
+.keys { display: flex; gap: 6px; padding: 8px 10px; background: #0b111d; border-top: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.keys::-webkit-scrollbar { display: none; }
+.keys button { flex: 0 0 auto; font-family: var(--f-mono); font-size: 13px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--line); background: #121a2a; color: var(--ink-2); cursor: pointer; }
+.keys button:active { background: #1c2740; color: #fff; }
+.keys button.stop { color: var(--bad); }
+footer { text-align: center; color: var(--ink-3); font-size: 12.5px; padding-block: 0 32px; padding-inline: 16px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+
+<header class="bar">
+  <div class="bar-in">
+    <div class="logo">Expert<span>Stream</span></div>
+    <nav class="tabs" role="tablist" aria-label="Pages" id="tabs">
+      <button class="tab" role="tab" data-page="home" id="t-home">Home</button>
+      <button class="tab" role="tab" data-page="terminal" id="t-terminal">Terminal</button>
+      <button class="tab" role="tab" data-page="chat" id="t-chat">Chat</button>
+      <button class="tab" role="tab" data-page="convert" id="t-convert">Convert</button>
+      <button class="tab" role="tab" data-page="testing" id="t-testing">Testing</button>
+      <button class="tab" role="tab" data-page="history" id="t-history">History</button>
+      <span class="tab-ink" id="ink"></span>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- ================= HOME ================= -->
+  <section class="page" id="home" role="tabpanel" aria-labelledby="t-home">
+    <div class="hero">
+      <canvas id="scene" aria-label="3D tower of experts with a token passing through"></canvas>
+      <div class="hero-in">
+        <span class="eyebrow">Free · open source · on your phone</span>
+        <h1>Expert<em>Stream</em></h1>
+        <p class="muted">Big Mixture-of-Experts models on a phone. The core stays in RAM, and only the experts each word needs are read from storage.</p>
+        <div class="row"><button class="btn primary" data-goto="terminal">Open terminal</button><button class="btn" data-goto="chat">Chat</button></div>
+      </div>
+    </div>
+    <div class="tiles">
+      <div class="tile"><span class="v">1.75 GB/s</span><span class="k">flash read, measured on your phone</span></div>
+      <div class="tile"><span class="v">9.81 GB/s</span><span class="k">2-bit math on 4× Cortex-A78</span></div>
+      <div class="tile"><span class="v">1e-6</span><span class="k">match with a float64 reference</span></div>
+    </div>
+    <div class="grid2">
+      <button class="panel go-card" data-goto="terminal"><span class="eyebrow">Runs in this page</span><h3>ExpertStream CLI</h3><p class="muted">A terminal inside the website. Type <span class="mono">download</span>, then <span class="mono">open</span>, then ask anything. The model runs in your browser.</p></button>
+      <button class="panel go-card" data-goto="chat"><span class="eyebrow">Same engine</span><h3>Chat and watch it work</h3><p class="muted">See your words turn into numbers, the brain load, and the experts stream in.</p></button>
+    </div>
+  </section>
+
+  <!-- ================= TERMINAL ================= -->
+  <section class="page" id="terminal" role="tabpanel" aria-labelledby="t-terminal" hidden>
+    <div class="term" id="term">
+      <div class="term-bar"><span class="lights"><i></i><i></i><i></i></span><span class="title">expertstream — cli</span><span id="term-state">no model</span></div>
+      <div class="term-out" id="tout" aria-live="polite"></div>
+      <form class="term-in" id="tform" autocomplete="off">
+        <span class="ps" id="tps">expertstream ~ $</span>
+        <input id="tin" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Command" enterkeyhint="send">
+      </form>
+      <div class="keys" aria-label="Extra keys">
+        <button type="button" data-key="help">help</button>
+        <button type="button" data-key="download">download</button>
+        <button type="button" data-key="open">open</button>
+        <button type="button" data-key="up">↑</button>
+        <button type="button" data-key="down">↓</button>
+        <button type="button" data-key="tab">TAB</button>
+        <button type="button" data-key="stop" class="stop">CTRL+C</button>
+        <button type="button" data-key="clear">clear</button>
+      </div>
+    </div>
+    <input type="file" id="gguf-file" accept=".gguf" hidden>
+  </section>
+
+  <!-- ================= CHAT ================= -->
+  <section class="page" id="chat" role="tabpanel" aria-labelledby="t-chat" hidden>
+    <div class="panel chat">
+      <div class="chat-top">
+        <label class="row" for="chat-model" style="gap:8px;font-size:13.5px"><span class="dim">Model</span>
+          <select id="chat-model"></select></label>
+        <div class="row" style="gap:8px"><span class="chip" id="chat-status"></span><button class="btn" type="button" id="new-chat" hidden>New chat</button></div>
+      </div>
+      <div class="msgs" id="msgs" aria-live="polite"></div>
+      <form class="compose" id="compose">
+        <textarea id="prompt" rows="1" placeholder="Ask something, e.g. Write a Python function that checks if a number is prime"></textarea>
+        <button class="btn primary" id="send" type="submit">Send</button>
+      </form>
+    </div>
+    <p class="dim" style="font-size:12.5px" id="chat-foot">No model loaded: answers below are previews with estimated timings. Load a model in the <b>Terminal</b> tab (<span class="mono">download</span>, then <span class="mono">open</span>) and Chat answers for real, right in this page.</p>
+  </section>
+
+  <!-- ================= CONVERT ================= -->
+  <section class="page" id="convert" role="tabpanel" aria-labelledby="t-convert" hidden>
+    <div class="head"><span class="eyebrow">Hugging Face → phone</span><h1>Convert a model</h1></div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="models" id="models"></div>
+        <label class="field" for="custom">Or any GGUF MoE on Hugging Face (repo, then file name or part of it)
+          <input type="text" id="custom" placeholder="unsloth/Qwen3-30B-A3B-GGUF Q2_K.gguf">
+        </label>
+      </div>
+      <div class="panel">
+        <div class="tiles" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+          <div class="tile"><span class="v" id="cv-disk">–</span><span class="k">download and pack size</span></div>
+          <div class="tile"><span class="v" id="cv-ram">–</span><span class="k">core kept in RAM</span></div>
+        </div>
+        <div class="note" id="cv-note"></div>
+        <pre class="cmd" id="cv-cmd"></pre>
+        <div class="row"><button class="btn" id="cv-copy">Copy commands</button><span class="dim" id="cv-copied" style="font-size:13px"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TESTING ================= -->
+  <section class="page" id="testing" role="tabpanel" aria-labelledby="t-testing" hidden>
+    <div class="head"><span class="eyebrow">Measured, not guessed</span><h1>Testing</h1></div>
+    <div class="grid2">
+      <div class="panel">
+        <h3 style="font-size:16px">Your phone</h3>
+        <div class="table-box"><table><tbody>
+          <tr><td>Flash, 4 readers, cold</td><td class="n">1.71 GB/s</td></tr>
+          <tr><td>8 experts from one layer</td><td class="n">28.9 ms</td></tr>
+          <tr><td>2-bit kernel, 4× A78</td><td class="n">9.81 GB/s</td></tr>
+          <tr><td>Same, plus 4× A55</td><td class="n">2.86 GB/s</td></tr>
+          <tr><td>Memory read</td><td class="n">13.8 GB/s</td></tr>
+          <tr><td>Import OLMoE (1,024 experts)</td><td class="n">17 s</td></tr>
+        </tbody></table></div>
+      </div>
+      <div class="panel">
+        <h3 style="font-size:16px">Correctness checks</h3>
+        <div class="table-box"><table><tbody>
+          <tr><td>Weight decoding, 7 formats</td><td><span class="chip"><i style="background:var(--good)"></i>exact</span></td></tr>
+          <tr><td>Import vs original file</td><td><span class="chip"><i style="background:var(--good)"></i>byte-identical</span></td></tr>
+          <tr><td>Tokenizer vs llama.cpp, 11 texts</td><td><span class="chip"><i style="background:var(--good)"></i>11/11</span></td></tr>
+          <tr><td>Logits vs float64 reference</td><td><span class="chip"><i style="background:var(--good)"></i>~1e-6</span></td></tr>
+          <tr><td>Top token vs llama.cpp</td><td><span class="chip"><i style="background:var(--warn)"></i>14/15</span></td></tr>
+          <tr><td>ARM build vs x86</td><td><span class="chip"><i style="background:var(--good)"></i>identical</span></td></tr>
+        </tbody></table></div>
+      </div>
+    </div>
+    <div class="panel">
+      <label class="field" for="test-pick">Run a test on your phone
+        <select id="test-pick">
+          <option value="serve">Start the web app with real answers (es_serve)</option>
+          <option value="chat">Speed test: 64 tokens with OLMoE</option>
+          <option value="flash">Flash bandwidth (es_bench)</option>
+          <option value="kernel">Kernel speed per core (es_kbench)</option>
+          <option value="engine">Simulated big model (es_run)</option>
+        </select>
+      </label>
+      <pre class="cmd" id="test-cmd"></pre>
+      <div class="row"><button class="btn" id="test-copy">Copy command</button></div>
+    </div>
+  </section>
+
+  <!-- ================= HISTORY ================= -->
+  <section class="page" id="history" role="tabpanel" aria-labelledby="t-history" hidden>
+    <div class="head"><span class="eyebrow">Saved in this browser</span><h1>History</h1></div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="row" style="justify-content:space-between"><h3 style="font-size:16px">Your prompts</h3><button class="btn" id="clear-hist">Clear</button></div>
+        <div class="hist" id="hist"></div>
+      </div>
+      <div class="panel">
+        <h3 style="font-size:16px">Engine milestones</h3>
+        <div class="timeline">
+          <div class="tl"><b>Flash loader</b><span class="dim">4 parallel readers, 1.75 GB/s on your phone</span></div>
+          <div class="tl"><b>2-bit kernel</b><span class="dim">NEON dot product, bit-exact with llama.cpp</span></div>
+          <div class="tl"><b>Expert cache and prefetch</b><span class="dim">full decode loop on synthetic weights</span></div>
+          <div class="tl"><b>Hugging Face import</b><span class="dim">any GGUF MoE, split files too</span></div>
+          <div class="tl"><b>Real text</b><span class="dim">OLMoE-1B-7B answers with streamed experts</span></div>
+          <div class="tl now"><b>Next: speed</b><span class="dim">NEON for 3- and 6-bit layers, then skill packs</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>ExpertStream · free and open source · numbers measured on a 4× A78 + 4× A55 phone with 7.3 GB RAM</footer>
+
+<script id="engine-src" type="text/plain">@@ENGINE_JS@@</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const FLASH = 1.75, KERNEL = 9.81, RAM_FREE = 2.9, DISK = 151;
+  // billions of params: total, core, active routed-expert params per token; bpw of the file
+  const MODELS = [
+    { id: 'olmoe', name: 'OLMoE-1B-7B', total: 6.92, core: 0.48, act: 0.81, bpw: 2.96, layers: 16, experts: 64, k: 8, status: 'works', coreGB: 0.23, diskGB: 2.56, repo: 'bartowski/OLMoE-1B-7B-0924-Instruct-GGUF', file: 'OLMoE-1B-7B-0924-Instruct-Q2_K.gguf', pack: 'olmoe', hit: 0.87 },
+    { id: 'q30', name: 'Qwen3-30B-A3B', total: 30.5, core: 1.5, act: 1.81, bpw: 2.95, layers: 48, experts: 128, k: 8, status: 'import', repo: 'unsloth/Qwen3-30B-A3B-GGUF', file: 'Qwen3-30B-A3B-Q2_K.gguf', pack: 'qwen3-30b', hit: 0.3 },
+    { id: 'q235', name: 'Qwen3-235B-A22B', total: 235, core: 7.9, act: 14.19, bpw: 2.96, layers: 94, experts: 128, k: 8, status: 'later', hit: 0 },
+    { id: 'k2', name: 'Kimi K2 (1T)', total: 1026, core: 11.3, act: 21.1, bpw: 2.96, layers: 61, experts: 384, k: 8, status: 'later', hit: 0 },
+    { id: '2t', name: '2T-class, skill pack only', total: 2040, core: 11.3, act: 21.1, bpw: 2.96, layers: 61, experts: 768, k: 8, status: 'later', hit: 0 },
+  ];
+  const STATUS = { works: ['good', 'chat works'], import: ['warn', 'imports; chat not verified'], later: ['bad', 'not yet'] };
+  const raw = m => {
+    const coreGB = m.coreGB ?? m.core * m.bpw / 8, actGB = m.act * m.bpw / 8, diskGB = m.diskGB ?? m.total * m.bpw / 8;
+    const coreFits = coreGB + 0.4 <= RAM_FREE;
+    const streamGB = actGB * (1 - m.hit) + (coreFits ? 0 : coreGB);
+    return { coreGB, actGB, diskGB, coreFits, streamGB, sPer: streamGB / FLASH + (actGB + coreGB) / KERNEL };
+  };
+  // The bandwidth formula is optimistic: 3- and 6-bit layers still use a slow path.
+  // Calibrate every estimate against es_chat's measured 3.56 tok/s on OLMoE.
+  const MEASURED_TPS = 3.56, CAL = (1 / raw(MODELS[0]).sPer) / MEASURED_TPS;
+  const cost = m => { const c = raw(m); c.sPer *= CAL; return c; };
+  const gb = g => g >= 100 ? Math.round(g) + ' GB' : g >= 10 ? g.toFixed(0) + ' GB' : g.toFixed(g < 1 ? 2 : 1) + ' GB';
+  const fmtT = s => s < 60 ? s.toFixed(0) + ' s' : s < 3600 ? (s / 60).toFixed(0) + ' min' : (s / 3600).toFixed(1) + ' h';
+  const shq = s => "'" + s.replace(/'/g, "'\\''") + "'";
+  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+  const copy = (text, btn, label) => {
+    const done = () => { const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = label || o, 1400); };
+    try { navigator.clipboard.writeText(text).then(done, () => {}); } catch (e) {}
+  };
+
+  // ================= tabs =================
+  const PAGES = ['home', 'terminal', 'chat', 'convert', 'testing', 'history'];
+  function show(page, push) {
+    if (!PAGES.includes(page)) page = 'home';
+    PAGES.forEach(p => { $(p).hidden = p !== page; $('t-' + p).setAttribute('aria-selected', p === page); });
+    const t = $('t-' + page), ink = $('ink');
+    ink.style.left = t.offsetLeft + 'px'; ink.style.width = t.offsetWidth + 'px';
+    t.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (push) { try { history.replaceState(null, '', '#' + page); } catch (e) {} }
+    if (page === 'history') renderHistory();
+    if (page === 'chat') setTimeout(() => $('prompt').focus(), 50);
+    if (page === 'terminal') setTimeout(() => $('tin').focus(), 50);
+    tower.active = page === 'home';
+    window.scrollTo({ top: 0 });
+  }
+  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => show(t.dataset.page, true)));
+  document.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => show(b.dataset.goto, true)));
+  window.addEventListener('resize', () => { const t = document.querySelector('.tab[aria-selected="true"]'); if (t) { $('ink').style.left = t.offsetLeft + 'px'; $('ink').style.width = t.offsetWidth + 'px'; } });
+
+  // ================= chat =================
+  const chatModels = MODELS.filter(m => m.status !== 'later');
+  $('chat-model').innerHTML = chatModels.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+  const curModel = () => MODELS.find(m => m.id === $('chat-model').value);
+  function chatStatus() {
+    const m = curModel(), [k, t] = STATUS[m.status];
+    $('chat-status').innerHTML = `<i style="background:var(--${k})"></i>${t}`;
+  }
+  $('chat-model').addEventListener('change', chatStatus);
+
+  function tokenize(text) {
+    const out = [];
+    for (const p of text.match(/ ?[A-Za-z]+| ?\d+| ?[^\sA-Za-z\d]+|\s+/g) || []) {
+      let h = 0; for (const ch of p) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      out.push(100 + (h % 50000));
+    }
+    return out;
+  }
+  const sleep = ms => new Promise(r => setTimeout(r, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : ms));
+  function bubble(cls, html) {
+    const d = document.createElement('div'); d.className = 'msg ' + cls; d.innerHTML = html;
+    $('msgs').appendChild(d); $('msgs').scrollTop = $('msgs').scrollHeight; return d;
+  }
+  function welcome() {
+    $('msgs').innerHTML = '';
+    bubble('bot', `<div><b>Hi.</b> Ask anything. I'll show each step ExpertStream takes on your phone, how long it would take, and the exact command that produces the real answer in Termux.</div>`);
+  }
+  let busy = false;
+  async function send(text) {
+    if (busy || !text.trim()) return;
+    if (Engine.ready()) return sendLive(text);
+    bubble('user', '').textContent = text;
+    return needModelBubble();
+    busy = true; $('send').disabled = true;
+    const m = curModel(), c = cost(m), ids = tokenize(text);
+    bubble('user', '').textContent = text;
+    const b = bubble('bot', '');
+    const stages = [
+      ['Turning words into numbers', `${ids.length} tokens`],
+      ['Connecting to the brain', `${gb(c.coreGB)} core in RAM`],
+      ['Reading your prompt', `≈ ${fmtT(ids.length * c.sPer * 0.6)}`],
+      ['Picking experts', `${m.k} of ${m.experts} per layer`],
+      ['Streaming experts from flash', `${(c.streamGB * 1000).toFixed(0)} MB / token`],
+      ['Writing the answer', `≈ ${(1 / c.sPer).toFixed(m.id === 'olmoe' ? 1 : 2)} tokens/s`],
+    ];
+    b.innerHTML = stages.map(([t, v], i) => `<div class="stage" id="s${i}"><span class="dot"></span><span>${t}</span><span class="v">${v}</span></div>`).join('') +
+      `<div class="ids" id="ids"></div><div><div class="row" style="justify-content:space-between;font-size:12px" class="dim"><span class="dim">Phone RAM</span><span class="mono dim" id="ramv">0 GB</span></div><div class="ram"><i id="r1" style="background:var(--hit);width:0"></i><i id="r2" style="background:var(--pf);width:0"></i></div></div>`;
+    const ids_ = b.querySelector('#ids'), st = i => b.querySelector('#s' + i);
+    for (let i = 0; i < stages.length; i++) {
+      st(i).classList.add('on');
+      if (i === 0) for (const id of ids.slice(0, 40)) { const s = document.createElement('span'); s.textContent = id; ids_.appendChild(s); await sleep(18); }
+      if (i === 1) { b.querySelector('#r1').style.width = (100 * Math.min(c.coreGB, 0.6 + c.coreGB * 0) / RAM_FREE) + '%'; b.querySelector('#ramv').textContent = gb(c.coreGB); }
+      if (i === 4) { b.querySelector('#r2').style.width = (100 * 1.0 / RAM_FREE) + '%'; b.querySelector('#ramv').textContent = gb(Math.min(c.coreGB, RAM_FREE) + 1.5) + ' incl. cache + context'; }
+      await sleep(i === 0 ? 150 : 520);
+      st(i).classList.replace('on', 'ok');
+      $('msgs').scrollTop = $('msgs').scrollHeight;
+    }
+    const cmd = m.pack ? `./es_chat -m ~/packs/${m.pack} -p ${shq(text)}` : '';
+    const out = document.createElement('div');
+    out.style.display = 'grid'; out.style.gap = '8px';
+    out.innerHTML = m.status === 'works'
+      ? `<div class="note ok"><b>Run it on your phone for the real answer</b><span class="muted" style="font-size:13px">Measured 3.6 tokens/s on the test machine (your phone's speed is still to be measured); a 300-token answer ≈ ${fmtT(300 * c.sPer)}.</span></div><pre class="cmd"></pre><div class="row"><button class="btn" type="button">Copy command</button></div>`
+      : `<div class="note"><b>${m.name} imports, but chat isn't verified on it yet.</b><span class="muted" style="font-size:13px">Its tokenizer splits text differently from OLMoE. It's on the list after speed work.</span></div>`;
+    b.appendChild(out);
+    if (cmd && m.status === 'works') { out.querySelector('pre').textContent = cmd; const btn = out.querySelector('button'); btn.addEventListener('click', () => copy(cmd, btn)); }
+    $('msgs').scrollTop = $('msgs').scrollHeight;
+    const h = store.get('es-history', []);
+    h.unshift({ t: Date.now(), model: m.id, prompt: text, tps: +(1 / c.sPer).toFixed(2) });
+    store.set('es-history', h.slice(0, 50));
+    busy = false; $('send').disabled = false;
+  }
+  $('compose').addEventListener('submit', e => { e.preventDefault(); const t = $('prompt').value; $('prompt').value = ''; autosize(); send(t); });
+  $('prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('compose').requestSubmit(); } });
+  const autosize = () => { const t = $('prompt'); t.style.height = 'auto'; t.style.height = Math.min(160, t.scrollHeight) + 'px'; };
+  $('prompt').addEventListener('input', autosize);
+
+
+  // ================= engine: runs in this browser (WebAssembly worker), or on es_serve =================
+  const Engine = {
+    backend: null, info: null, worker: null, busy: false, stopReq: false, mem: 0, file: null,
+    opts: { ctx: 1024, cache: 768, temp: 0.7, max: 256 },
+    ready() { return !!this.backend; },
+    async detectServer() {
+      if (!/^https?:$/.test(location.protocol) || !/^(127\.0\.0\.1|localhost)$/.test(location.hostname)) return false;
+      try {
+        const ctl = new AbortController(); setTimeout(() => ctl.abort(), 2500);
+        const r = await fetch('/api/status', { signal: ctl.signal });
+        if (!r.ok) return false;
+        const i = await r.json();
+        this.backend = 'server'; this.mem = i.ram_mb;
+        this.info = { name: i.model, arch: i.arch, layers: i.layers, experts: i.experts, used: i.used, core_mb: i.core_mb, cache_mb: i.cache_mb, ctx: i.ctx, load_s: i.load_s };
+        return true;
+      } catch (e) { return false; }
+    },
+    open(file) {
+      return new Promise((resolve, reject) => {
+        if (this.worker) this.worker.terminate();
+        let src;
+        try { src = document.getElementById('engine-src').textContent; } catch (e) { return reject(new Error('engine missing from page')); }
+        try { this.worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))); }
+        catch (e) { return reject(new Error('this browser view blocks background workers')); }
+        this.backend = null; this.file = file;
+        this.worker.onerror = ev => reject(new Error(ev.message || 'engine failed to start'));
+        this.worker.onmessage = e => {
+          const m = e.data;
+          if (m.type === 'ready') { this.backend = 'browser'; this.info = m.info; this.mem = Math.round(m.heap_mb); resolve(m); }
+          else if (m.type === 'error') reject(new Error(m.text));
+        };
+        this.worker.postMessage({ type: 'open', file, ctx: this.opts.ctx, cache: this.opts.cache });
+      });
+    },
+    // onEvent gets {ev:'tokens'|'prompt'|'tok'|'done'|'info', ...}
+    ask(text, raw, onEvent) {
+      if (this.busy) return Promise.reject(new Error('busy'));
+      this.busy = true; this.stopReq = false;
+      const fin = r => { this.busy = false; return r; };
+      if (this.backend === 'server') return this.askServer(text, onEvent).then(fin, e => { fin(); throw e; });
+      return new Promise((resolve, reject) => {
+        const w = this.worker;
+        w.onmessage = e => {
+          const m = e.data;
+          if (m.type === 'progress') onEvent({ ev: 'prompt', done: m.done, n: m.total });
+          else if (m.type === 'tokens') onEvent({ ev: 'tokens', n: m.n, ids: m.ids });
+          else if (m.type === 'next') w.postMessage({ type: this.stopReq ? 'stop' : 'next' });
+          else if (m.type === 'tok') { onEvent({ ev: 'tok', t: m.t }); w.postMessage({ type: this.stopReq ? 'stop' : 'next' }); }
+          else if (m.type === 'done') {
+            if (m.heap_mb) this.mem = Math.round(m.heap_mb);
+            const s = m.stats || {};
+            const st = { tokens: s.tokens || 0, secs: s.secs || 0, tps: s.tps || 0, prompt_s: s.prompt_s || 0, prompt_tokens: s.prompt_tokens || 0, hit: s.hit || 0, read_mb: s.read_mb || 0, mem_mb: this.mem, stopped: !!m.stopped, ctx_reset: !!s.ctx_reset };
+            if (m.text) onEvent({ ev: 'info', msg: m.text });
+            onEvent(Object.assign({ ev: 'done' }, st));
+            fin(); resolve(st);
+          } else if (m.type === 'error') { fin(); reject(new Error(m.text)); }
+        };
+        w.postMessage({ type: 'ask', text, raw, temp: this.opts.temp, max: this.opts.max });
+      });
+    },
+    async askServer(text, onEvent) {
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text });
+      if (!res.ok) throw new Error('server said ' + res.status);
+      const rd = res.body.getReader(), dec = new TextDecoder();
+      let buf = '', st = null;
+      for (;;) {
+        const { value, done } = await rd.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          const e = JSON.parse(line);
+          if (e.ev === 'done' && e.tokens !== undefined) {
+            this.mem = e.ram_mb;
+            st = { tokens: e.tokens, secs: e.secs, tps: e.tps, prompt_s: e.prompt_secs, hit: e.hit, read_mb: e.flash_mb, mem_mb: e.ram_mb };
+            onEvent(Object.assign({ ev: 'done' }, st));
+          } else if (e.ev !== 'done') onEvent(e);
+        }
+      }
+      return st;
+    },
+    stop() { this.stopReq = true; },
+    async reset() {
+      if (this.backend === 'server') { try { await (await fetch('/api/reset', { method: 'POST' })).text(); } catch (e) {} }
+      else if (this.worker) this.worker.postMessage({ type: 'reset' });
+    },
+  };
+
+  // ================= chat page on the engine =================
+  function engineReadyUI() {
+    const i = Engine.info;
+    $('chat-model').innerHTML = `<option>${i.name}</option>`;
+    $('chat-model').disabled = true;
+    $('chat-status').innerHTML = `<i style="background:var(--good)"></i>${Engine.backend === 'server' ? 'live on this phone' : 'running in this browser'}`;
+    $('new-chat').hidden = false;
+    $('chat-foot').innerHTML = `${i.name} is loaded ${Engine.backend === 'server' ? 'by es_serve on this phone' : 'in this browser tab'}: core ${i.core_mb} MB in memory, expert cache ${i.cache_mb} MB, ${i.ctx}-token memory. Terminal and Chat share the same conversation.`;
+    $('term-state').textContent = i.name.split(' ').slice(0, 2).join(' ');
+    welcomeLive();
+  }
+  function welcomeLive() {
+    $('msgs').innerHTML = '';
+    bubble('bot', `<div><b>Connected.</b> ${Engine.info.name} is running ${Engine.backend === 'server' ? 'on this phone' : 'in this browser'}. Ask anything; every stage below each answer is measured live.</div>`);
+  }
+  function needModelBubble() {
+    const b = bubble('bot', `<div><b>No model is loaded yet.</b> Open a .gguf file to run it right here in your browser.</div><div class="row"><button class="btn primary" type="button">Open a model file</button><button class="btn" type="button">How to get one</button></div>`);
+    const [bo, bh] = b.querySelectorAll('button');
+    bo.addEventListener('click', () => $('gguf-file').click());
+    bh.addEventListener('click', () => { show('terminal', true); runCommand('download'); });
+  }
+  const esc = s => s.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+  function renderAnswer(text, streaming) {
+    const parts = text.split('```');
+    return parts.map((p, i) => i % 2 ? `<pre class="cmd">${esc(p.replace(/^[a-zA-Z0-9_+-]*\n/, '').replace(/\n$/, ''))}</pre>`
+      : esc((i > 0 ? p.replace(/^\n/, '') : p).replace(/\n$/, i < parts.length - 1 ? '' : '\n'))).join('') + (streaming ? '<span class="caret"></span>' : '');
+  }
+  function saveHistory(text, answer, st) {
+    const h = store.get('es-history', []);
+    h.unshift({ t: Date.now(), model: 'olmoe', live: true, prompt: text, answer: answer.slice(0, 4000), tps: st ? st.tps : 0 });
+    store.set('es-history', h.slice(0, 50));
+  }
+  async function sendLive(text) {
+    busy = true; $('send').disabled = true;
+    bubble('user', '').textContent = text;
+    const b = bubble('bot', '');
+    const names = ['Turning words into numbers', 'Connecting to the brain', 'Reading your prompt', 'Streaming experts from storage', 'Writing the answer'];
+    b.innerHTML = names.map((t, i) => `<div class="stage" id="s${i}"><span class="dot"></span><span>${t}</span><span class="v" id="v${i}"></span></div>`).join('') +
+      `<div class="ids" id="ids"></div><div><div class="row" style="justify-content:space-between;font-size:12px"><span class="dim">Memory used by the engine</span><span class="mono dim" id="ramv"></span></div><div class="ram"><i id="r1" style="background:var(--hit);width:0"></i></div></div><div class="answer" id="ans"></div><div class="stats" id="stats"></div>`;
+    const q = s => b.querySelector(s), st = (i, cls) => { const e = q('#s' + i); e.classList.remove('on', 'ok'); if (cls) e.classList.add(cls); };
+    const setRam = mb => { if (!mb) return; q('#r1').style.width = Math.min(100, 100 * mb / 2900) + '%'; q('#ramv').textContent = mb + ' MB'; };
+    st(0, 'on'); setRam(Engine.mem);
+    let answer = '', t0 = 0, ntok = 0;
+    try {
+      await Engine.ask(text, false, e => {
+        if (e.ev === 'tokens') {
+          const box = q('#ids');
+          e.ids.slice(0, 48).forEach(id => { const s = document.createElement('span'); s.textContent = id; box.appendChild(s); });
+          q('#v0').textContent = e.n + ' tokens'; st(0, 'ok');
+          q('#v1').textContent = Engine.info.core_mb + ' MB core'; st(1, 'ok');
+          st(2, 'on'); st(3, 'on');
+        } else if (e.ev === 'prompt') {
+          if (q('#s0').classList.contains('on')) { st(0, 'ok'); st(1, 'ok'); q('#v1').textContent = Engine.info.core_mb + ' MB core'; st(2, 'on'); st(3, 'on'); }
+          q('#v2').textContent = `${e.done}/${e.n}`;
+          if (e.flash_mb !== undefined) q('#v3').textContent = e.flash_mb + ' MB read';
+          setRam(e.ram_mb);
+          if (e.done === e.n) { st(2, 'ok'); st(4, 'on'); t0 = performance.now(); }
+        } else if (e.ev === 'tok') {
+          answer += e.t; ntok++;
+          q('#ans').innerHTML = renderAnswer(answer, true);
+          if (t0) q('#v4').textContent = (ntok / ((performance.now() - t0) / 1000)).toFixed(2) + ' tok/s';
+        } else if (e.ev === 'info') {
+          const d = document.createElement('div'); d.className = 'note'; d.textContent = e.msg; b.insertBefore(d, q('#ans'));
+        } else if (e.ev === 'done') {
+          ['0', '1', '2', '3', '4'].forEach(i => st(+i, 'ok'));
+          setRam(e.mem_mb);
+          q('#v3').textContent = e.read_mb + ' MB read';
+          q('#v4').textContent = e.tps + ' tok/s';
+          q('#ans').innerHTML = renderAnswer(answer, false);
+          q('#stats').textContent = `${e.tokens} tokens in ${e.secs} s · ${e.tps} tok/s · prompt ${e.prompt_s} s · experts ${e.hit}% from cache · ${e.read_mb} MB read${e.stopped ? ' · stopped' : ''}`;
+          saveHistory(text, answer, e);
+        }
+        $('msgs').scrollTop = $('msgs').scrollHeight;
+      });
+    } catch (err) {
+      const d = document.createElement('div'); d.className = 'note'; d.textContent = 'The engine stopped: ' + err.message; b.appendChild(d);
+    }
+    busy = false; $('send').disabled = false;
+  }
+  $('new-chat').addEventListener('click', async () => { if (Engine.busy) return; await Engine.reset(); welcomeLive(); termLine('new chat started', 'dim'); });
+
+  // ================= ExpertStream CLI (terminal) =================
+  const tout = $('tout'), tin = $('tin');
+  const MODEL_LINKS = {
+    olmoe: { name: 'OLMoE-1B-7B (2-bit, 2.56 GB)', url: 'https://huggingface.co/bartowski/OLMoE-1B-7B-0924-Instruct-GGUF/resolve/main/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf' },
+  };
+  const CMDS = ['help', 'download', 'open', 'info', 'ask', 'raw', 'new', 'stop', 'set', 'stats', 'bench', 'history', 'clear', 'about'];
+  let tHist = store.get('es-term-hist', []), tHi = tHist.length, lastStats = null;
+  function termLine(text, cls, html) {
+    const d = document.createElement('div'); d.className = 'ln' + (cls ? ' ' + cls : '');
+    if (html) d.innerHTML = text; else d.textContent = text;
+    tout.appendChild(d); tout.scrollTop = tout.scrollHeight; return d;
+  }
+  const termHtml = (h, cls) => termLine(h, cls, true);
+  function banner() {
+    termHtml(`<span class="warm"> ___ __ __ ___  ___  ___  _____  ___  _____  ___  ___   _   __  __
+| __|\\ \\/ /| _ \\| __|| _ \\|_   _|/ __||_   _|| _ \\| __| /_\\ |  \\/  |
+| _|  >  < |  _/| _| |   /  | |  \\__ \\  | |  |   /| _| / _ \\| |\\/| |
+|___|/_/\\_\\|_|  |___||_|_\\  |_|  |___/  |_|  |_|_\\|___/_/ \\_\\_|  |_|</span>`);
+    termHtml(`<span class="dim">ExpertStream CLI · Mixture-of-Experts models running inside this web page</span>`);
+    termHtml(`Type <span class="ok">help</span> for commands. New here? <span class="ok">download</span> → <span class="ok">open</span> → ask anything.`);
+  }
+  function prompt() { return `expertstream ${Engine.ready() ? '(' + Engine.info.arch + ') ' : ''}~ $`; }
+  function refreshPrompt() { $('tps').textContent = prompt(); }
+  const HELP = [
+    ['download [olmoe]', 'get a model file (opens the download in a new tab)'],
+    ['open', 'pick a .gguf file from this device and load it'],
+    ['<anything else>', 'ask the model a question (chat)'],
+    ['ask <question>', 'same, explicitly'],
+    ['raw <text>', 'continue text without the chat format'],
+    ['new', 'start a new conversation'],
+    ['stop  (or CTRL+C)', 'stop the current answer'],
+    ['info', 'model, memory and settings'],
+    ['stats', 'numbers from the last answer'],
+    ['bench', 'speed test: 32 tokens, greedy'],
+    ['set temp|max|cache|ctx <n>', 'change sampling or memory settings'],
+    ['history', 'your recent questions'],
+    ['clear', 'clear the screen'],
+  ];
+  async function answerInTerm(text, raw) {
+    if (!Engine.ready()) { termHtml(`<span class="err">no model loaded.</span> run <span class="ok">download</span>, then <span class="ok">open</span>.`); return; }
+    if (Engine.busy) { termLine('busy: still answering (CTRL+C to stop)', 'err'); return; }
+    const pline = termLine('[1/4] turning words into numbers…', 'dim');
+    let rline = null, aline = null, answer = '', t0 = 0;
+    const cur = '<span class="cursor"></span>';
+    try {
+      lastStats = await Engine.ask(text, raw, e => {
+        if (e.ev === 'tokens') {
+          pline.innerHTML = `<span class="dim">[1/4] words → numbers:</span> <span class="blue">${e.n} tokens</span> <span class="dim">[${e.ids.slice(0, 16).join(' ')}${e.n > 16 ? ' …' : ''}]</span>`;
+          termHtml(`<span class="dim">[2/4] brain connected:</span> core ${Engine.info.core_mb} MB in memory`);
+        } else if (e.ev === 'prompt') {
+          if (!rline) rline = termLine('', 'dim');
+          rline.textContent = `[3/4] reading prompt ${e.done}/${e.n}` + (e.flash_mb !== undefined ? ` · ${e.flash_mb} MB from storage` : '');
+        } else if (e.ev === 'tok') {
+          if (!aline) { termHtml('<span class="dim">[4/4] answering:</span>'); aline = termLine('', 'ans'); t0 = performance.now(); }
+          answer += e.t;
+          aline.innerHTML = renderTermAnswer(answer) + cur;
+          tout.scrollTop = tout.scrollHeight;
+        } else if (e.ev === 'info') termLine(e.msg, 'warm');
+        else if (e.ev === 'done') {
+          if (aline) aline.innerHTML = renderTermAnswer(answer);
+          termHtml(`<span class="dim">── ${e.tokens} tokens · ${e.tps} tok/s · prompt ${e.prompt_s} s · experts ${e.hit}% from cache · ${e.read_mb} MB read · memory ${e.mem_mb} MB${e.stopped ? ' · stopped' : ''}</span>`);
+        }
+      });
+      if (!raw) saveHistory(text, answer, lastStats);
+    } catch (err) { termLine('engine error: ' + err.message, 'err'); }
+  }
+  function renderTermAnswer(text) {
+    return text.split('```').map((p, i) => i % 2 ? `<span class="code">${esc(p)}</span>` : esc(p)).join('<span class="dim">```</span>');
+  }
+  async function openFile(file) {
+    if (!file) return;
+    termHtml(`<span class="dim">[open]</span> ${esc(file.name)} <span class="dim">(${(file.size / 1e9).toFixed(2)} GB)</span>`);
+    const l = termLine('connecting to the brain…', 'dim');
+    try {
+      const m = await Engine.open(file);
+      const i = m.info;
+      l.innerHTML = `<span class="ok">✓ ${esc(i.name)}</span> <span class="dim">(${i.arch}) loaded in ${(m.ms / 1000).toFixed(1)} s</span>`;
+      termHtml(`<span class="dim">  ${i.layers} layers · ${i.experts} experts, ${i.used} per token · core ${i.core_mb} MB · expert cache ${i.cache_mb} MB · memory ${i.ctx} tokens</span>`);
+      termHtml(`<span class="dim">  experts are read from your file on demand; nothing is uploaded.</span> Ask anything.`);
+      refreshPrompt(); engineReadyUI();
+    } catch (err) {
+      l.innerHTML = `<span class="err">could not load: ${esc(err.message)}</span>`;
+      if (/WebAssembly|wasm|CompileError|unsafe-eval/i.test(err.message)) termHtml(`<span class="warm">this page view blocks WebAssembly. Open the app from GitHub Pages or es_serve instead.</span>`);
+    }
+  }
+  $('gguf-file').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; openFile(f); });
+  async function runCommand(line) {
+    const raw = line.trim();
+    termHtml(`<span class="ps">${esc(prompt())}</span> <span class="cmd">${esc(raw)}</span>`);
+    if (!raw) return;
+    tHist = tHist.filter(x => x !== raw); tHist.push(raw); tHist = tHist.slice(-100); tHi = tHist.length; store.set('es-term-hist', tHist);
+    const [cmd, ...rest] = raw.split(/\s+/); const arg = raw.slice(cmd.length).trim();
+    switch (cmd.toLowerCase()) {
+      case 'help': case '?':
+        { const wide = tout.clientWidth > 560;
+          HELP.forEach(([c, d]) => termHtml(wide ? `  <span class="ok">${esc(c.padEnd(28))}</span><span class="dim">${esc(d)}</span>` : `  <span class="ok">${esc(c)}</span>\n      <span class="dim">${esc(d)}</span>`)); }
+        break;
+      case 'download': {
+        const m = MODEL_LINKS[(rest[0] || 'olmoe').toLowerCase()] || MODEL_LINKS.olmoe;
+        termHtml(`model: <span class="warm">${m.name}</span>`);
+        termHtml(`  1. tap: <a href="${m.url}" target="_blank" rel="noopener">${m.url.split('/').pop()}</a> <span class="dim">(your browser saves it to Downloads)</span>`);
+        termHtml(`  2. when it finishes, type <span class="ok">open</span> and pick the file`);
+        termHtml(`<span class="dim">  any GGUF Mixture-of-Experts model with a byte-level BPE tokenizer works the same way.</span>`); break;
+      }
+      case 'open': termLine('choose the .gguf file…', 'dim'); $('gguf-file').click(); break;
+      case 'ask': if (!arg) termLine('usage: ask <question>', 'err'); else await answerInTerm(arg, false); break;
+      case 'raw': if (!arg) termLine('usage: raw <text>', 'err'); else await answerInTerm(arg, true); break;
+      case 'new': case 'reset': if (!Engine.ready()) { termLine('no model loaded', 'err'); break; } await Engine.reset(); termLine('new conversation', 'ok'); break;
+      case 'stop': if (Engine.busy) { Engine.stop(); termLine('^C', 'err'); } else termLine('nothing is running', 'dim'); break;
+      case 'info': {
+        if (!Engine.ready()) { termLine('no model loaded · type download, then open', 'dim'); }
+        else { const i = Engine.info; termHtml(`<span class="warm">${esc(i.name)}</span> <span class="dim">(${i.arch}, ${Engine.backend === 'server' ? 'es_serve on this phone' : 'WebAssembly in this tab'})</span>`); termHtml(`<span class="dim">  ${i.layers} layers · ${i.experts} experts · ${i.used} per token · core ${i.core_mb} MB · cache ${i.cache_mb} MB · context ${i.ctx} · memory now ${Engine.mem} MB</span>`); }
+        termHtml(`<span class="dim">  settings: temp ${Engine.opts.temp} · max ${Engine.opts.max} tokens · cache ${Engine.opts.cache} MB · ctx ${Engine.opts.ctx} (cache/ctx apply on next open)</span>`); break;
+      }
+      case 'stats': if (!lastStats) termLine('no answer yet', 'dim'); else Object.entries(lastStats).forEach(([k, v]) => termHtml(`  <span class="ok">${k.padEnd(14)}</span>${v}`)); break;
+      case 'bench': {
+        if (!Engine.ready()) { termLine('no model loaded', 'err'); break; }
+        const save = Object.assign({}, Engine.opts); Engine.opts.temp = 0; Engine.opts.max = 32;
+        termLine('benchmark: 32 tokens, greedy, raw text…', 'dim');
+        await answerInTerm('The history of the computer began', true);
+        Object.assign(Engine.opts, save);
+        if (lastStats) termHtml(`<span class="ok">result: ${lastStats.tps} tok/s</span> <span class="dim">(${Engine.backend === 'server' ? 'native engine' : 'browser engine, 1 thread'})</span>`);
+        await Engine.reset(); break;
+      }
+      case 'set': {
+        const [k, v] = rest, n = parseFloat(v);
+        if (!['temp', 'max', 'cache', 'ctx'].includes(k) || !isFinite(n)) { termLine('usage: set temp 0.7 | set max 256 | set cache 768 | set ctx 1024', 'err'); break; }
+        Engine.opts[k] = k === 'temp' ? n : Math.round(n); termLine(`${k} = ${Engine.opts[k]}${k === 'cache' || k === 'ctx' ? ' (used on next open)' : ''}`, 'ok'); break;
+      }
+      case 'history': { const h = store.get('es-history', []); if (!h.length) termLine('no questions yet', 'dim'); h.slice(0, 15).forEach((x, i) => termHtml(`  <span class="dim">${String(i + 1).padStart(2)}.</span> ${esc(x.prompt.slice(0, 90))} <span class="dim">${x.live ? x.tps + ' tok/s' : ''}</span>`)); break; }
+      case 'clear': case 'cls': tout.innerHTML = ''; break;
+      case 'about': termHtml(`ExpertStream streams the experts of a Mixture-of-Experts model from storage instead of keeping the whole model in memory. This CLI runs the same C engine as the Termux tools, compiled to WebAssembly. Free and open source.`); break;
+      default: await answerInTerm(raw, false);
+    }
+    refreshPrompt();
+  }
+  $('tform').addEventListener('submit', e => { e.preventDefault(); const v = tin.value; tin.value = ''; runCommand(v); });
+  function histMove(d) { if (!tHist.length) return; tHi = Math.max(0, Math.min(tHist.length, tHi + d)); tin.value = tHist[tHi] || ''; }
+  function complete() { const v = tin.value.trim(); if (!v || v.includes(' ')) return; const m = CMDS.filter(c => c.startsWith(v)); if (m.length === 1) tin.value = m[0] + ' '; else if (m.length > 1) termLine(m.join('  '), 'dim'); }
+  tin.addEventListener('keydown', e => {
+    if (e.key === 'ArrowUp') { e.preventDefault(); histMove(-1); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); histMove(1); }
+    else if (e.key === 'Tab') { e.preventDefault(); complete(); }
+    else if (e.key === 'c' && e.ctrlKey && Engine.busy) { e.preventDefault(); Engine.stop(); termLine('^C', 'err'); }
+    else if (e.key === 'l' && e.ctrlKey) { e.preventDefault(); tout.innerHTML = ''; }
+  });
+  document.querySelectorAll('.keys button').forEach(b => b.addEventListener('click', () => {
+    const k = b.dataset.key;
+    if (k === 'up') histMove(-1); else if (k === 'down') histMove(1); else if (k === 'tab') complete();
+    else if (k === 'stop') { if (Engine.busy) { Engine.stop(); termLine('^C', 'err'); } }
+    else runCommand(k);
+    tin.focus();
+  }));
+  $('term').addEventListener('click', e => { if (!e.target.closest('a,button') && !getSelection().toString()) tin.focus(); });
+  banner(); refreshPrompt();
+  Engine.detectServer().then(ok => { if (ok) { termHtml(`<span class="ok">✓ connected to es_serve:</span> ${esc(Engine.info.name)} <span class="dim">(native engine on this phone)</span>`); refreshPrompt(); engineReadyUI(); } });
+
+
+  // ================= convert =================
+  let conv = MODELS[0];
+  function renderModels() {
+    $('models').innerHTML = MODELS.map(m => {
+      const [k, t] = STATUS[m.status];
+      return `<button type="button" class="model" data-id="${m.id}" aria-pressed="${m === conv}"><span><b>${m.name}</b><br><span class="dim mono" style="font-size:12.5px">${m.total >= 1000 ? (m.total / 1000).toFixed(1) + 'T' : m.total + 'B'} params · ${gb(cost(m).diskGB)}</span></span><span class="chip"><i style="background:var(--${k})"></i>${t}</span></button>`;
+    }).join('');
+    document.querySelectorAll('.model').forEach(b => b.addEventListener('click', () => { conv = MODELS.find(m => m.id === b.dataset.id); $('custom').value = ''; renderModels(); renderConvert(); }));
+  }
+  function renderConvert() {
+    const custom = $('custom').value.trim().split(/\s+/);
+    const c = cost(conv);
+    $('cv-disk').textContent = gb(c.diskGB);
+    $('cv-ram').textContent = gb(c.coreGB);
+    const note = $('cv-note');
+    if (custom[0] && custom[0].includes('/')) {
+      const match = custom[1] || 'Q2_K.gguf', name = custom[0].split('/')[1].replace(/-GGUF$/i, '').toLowerCase();
+      note.className = 'note'; note.innerHTML = '<b>Custom model</b><span class="muted" style="font-size:13px">es_import -i prints its size and layout first. It must be a GGUF Mixture-of-Experts model.</span>';
+      $('cv-cmd').textContent = `cd ~/Stream- && git pull && make\nbash scripts/hf_get.sh ${custom[0]} ${match} ~/models\n./es_import -i ~/models/*${match}\n./es_import -o ~/packs/${name} ~/models/*${match}`;
+      return;
+    }
+    if (!conv.repo) {
+      note.className = 'note';
+      note.innerHTML = c.diskGB > DISK ? `<b>${gb(c.diskGB)} won't fit in your ${DISK} GB.</b><span class="muted" style="font-size:13px">It needs a skill pack: only the experts your tasks use. That comes after routing traces are recorded.</span>`
+        : `<b>Fits on disk, not supported by the engine yet.</b><span class="muted" style="font-size:13px">About ${(1 / c.sPer).toFixed(2)} tokens/s expected once it is.</span>`;
+      $('cv-cmd').textContent = '# not available yet';
+      return;
+    }
+    note.className = conv.status === 'works' ? 'note ok' : 'note';
+    note.innerHTML = conv.status === 'works' ? `<b>Ready to chat after import.</b><span class="muted" style="font-size:13px">Download ${gb(c.diskGB)} (about ${fmtT(c.diskGB * 1000 / 16)} at 16 MB/s), import in under a minute.</span>`
+      : `<b>Imports today; chat support is being finished.</b><span class="muted" style="font-size:13px">Download ${gb(c.diskGB)}, about ${fmtT(c.diskGB * 1000 / 16)} at 16 MB/s.</span>`;
+    $('cv-cmd').textContent = `cd ~/Stream- && git pull && make\nbash scripts/hf_get.sh ${conv.repo} ${conv.file} ~/models\n./es_import -o ~/packs/${conv.pack} ~/models/${conv.file}` + (conv.status === 'works' ? `\n./es_chat -m ~/packs/${conv.pack}` : '');
+  }
+  $('custom').addEventListener('input', renderConvert);
+  $('cv-copy').addEventListener('click', () => copy($('cv-cmd').textContent, $('cv-copy')));
+
+  // ================= testing =================
+  const TESTS = {
+    serve: 'cd ~/Stream- && bash scripts/setup.sh',
+    chat: 'cd ~/Stream- && git pull && make\n./es_chat -m ~/packs/olmoe -r -t 0 -n 64 -p "The capital of France is"',
+    flash: './es_bench -d ~/es_bench -t 4',
+    kernel: './es_kbench',
+    engine: 'bash scripts/step3.sh',
+  };
+  const renderTest = () => { $('test-cmd').textContent = TESTS[$('test-pick').value]; };
+  $('test-pick').addEventListener('change', renderTest);
+  $('test-copy').addEventListener('click', () => copy($('test-cmd').textContent, $('test-copy')));
+
+  // ================= history =================
+  function renderHistory() {
+    const h = store.get('es-history', []), box = $('hist');
+    if (!h.length) { box.innerHTML = '<p class="dim">No prompts yet. Ask something on the Chat page and it shows up here.</p>'; return; }
+    box.innerHTML = '';
+    h.forEach(item => {
+      const m = MODELS.find(x => x.id === item.model) || MODELS[0];
+      const d = document.createElement('div'); d.className = 'hitem';
+      d.innerHTML = `<div style="min-width:0"><div class="p"></div><div class="dim mono" style="font-size:12px">${new Date(item.t).toLocaleString()} · ${m.name} · ${item.live ? item.tps + ' tok/s measured' : '~' + item.tps + ' tok/s estimated'}</div>${item.answer ? '<details style="margin-top:6px"><summary class="dim" style="cursor:pointer;font-size:13px">Answer</summary><div class="answer" style="font-size:14px;margin-top:6px"></div></details>' : ''}</div><button class="btn" type="button">Ask again</button>`;
+      if (item.answer) d.querySelector('.answer').innerHTML = renderAnswer(item.answer, false);
+      d.querySelector('.p').textContent = item.prompt;
+      d.querySelector('button').addEventListener('click', () => { $('chat-model').value = m.status === 'later' ? 'olmoe' : m.id; chatStatus(); show('chat', true); send(item.prompt); });
+      box.appendChild(d);
+    });
+  }
+  $('clear-hist').addEventListener('click', () => { store.set('es-history', []); renderHistory(); });
+
+  // ================= 3D tower (home) =================
+  const tower = { active: true };
+  try {
+    if (!window.THREE) throw 0;
+    const canvas = $('scene');
+    const r = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    r.setPixelRatio(Math.min(devicePixelRatio, 2));
+    const scene = new THREE.Scene(); scene.fog = new THREE.FogExp2(0x0a0f1c, 0.05);
+    const cam = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+    scene.add(new THREE.AmbientLight(0x8aa0c8, 0.6));
+    const l1 = new THREE.PointLight(0xf2c98a, 1.3, 40); l1.position.set(4, 6, 6); scene.add(l1);
+    const l2 = new THREE.PointLight(0x3987e5, 1.1, 40); l2.position.set(-6, -2, -4); scene.add(l2);
+    const LAY = 14, PER = 40, grp = new THREE.Group(); scene.add(grp);
+    const C = { idle: new THREE.Color(0x26344f), k: [new THREE.Color(0x3987e5), new THREE.Color(0x199e70), new THREE.Color(0xd95926)] };
+    const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(.17, .17, .17), new THREE.MeshStandardMaterial({ roughness: .35, metalness: .3 }), LAY * PER);
+    const st = [], dmy = new THREE.Object3D(), yOf = l => 3 - l * 6 / (LAY - 1);
+    for (let l = 0; l < LAY; l++) for (let e = 0; e < PER; e++) {
+      const a = e / PER * Math.PI * 2 + l * .2, rr = 2.6 + .3 * Math.sin(l / (LAY - 1) * Math.PI);
+      dmy.position.set(Math.cos(a) * rr, yOf(l), Math.sin(a) * rr); dmy.rotation.set(a, a / 2, 0); dmy.updateMatrix();
+      mesh.setMatrixAt(l * PER + e, dmy.matrix); mesh.setColorAt(l * PER + e, C.idle); st.push({ g: 0, k: 0 });
+    }
+    grp.add(mesh);
+    const glow = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, '#fff2d6'); gr.addColorStop(.3, 'rgba(242,201,138,.5)'); gr.addColorStop(1, 'rgba(242,201,138,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+    const comet = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+    comet.scale.set(1.2, 1.2, 1); grp.add(comet);
+    let layer = 0, t0 = 0;
+    const tmp = new THREE.Color(), reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function pick(l) { for (let j = 0; j < 8; j++) { const s = st[l * PER + Math.floor(Math.random() * PER)]; s.g = 1; s.k = Math.random() < .5 ? 0 : Math.random() < .6 ? 1 : 2; } }
+    function size() {
+      const w = canvas.clientWidth, h = canvas.clientHeight; if (!w) return;
+      r.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+      const narrow = w < 640; cam.position.set(0, .8, narrow ? 15 : 11); grp.position.x = narrow ? 0 : 3.2;
+    }
+    window.addEventListener('resize', size);
+    function frame(now) {
+      if (tower.active) {
+        if (!canvas.clientWidth || r.domElement.width !== Math.round(canvas.clientWidth * r.getPixelRatio())) size();
+        if (now - t0 > 230) { t0 = now; layer = (layer + 1) % LAY; pick(layer); }
+        comet.position.set(0, yOf(layer) + .4 - Math.min(1, (now - t0) / 230) * (6 / (LAY - 1)), 0);
+        for (let i = 0; i < st.length; i++) { const s = st[i]; if (s.g > 0) s.g = Math.max(0, s.g - .01); tmp.copy(C.idle).lerp(C.k[s.k], s.g); mesh.setColorAt(i, tmp); }
+        mesh.instanceColor.needsUpdate = true;
+        if (!reduce) grp.rotation.y += .003;
+        cam.lookAt(grp.position.x * .5, 0, 0);
+        r.render(scene, cam);
+      }
+      if (!reduce) requestAnimationFrame(frame);
+    }
+    size(); for (let l = 0; l < LAY; l++) pick(l); requestAnimationFrame(frame);
+  } catch (e) { /* the hero keeps its gradient background */ }
+
+  // ================= boot =================
+  chatStatus(); welcome(); renderModels(); renderConvert(); renderTest();
+  show((location.hash || '#home').slice(1), false);
+})();
+</script>

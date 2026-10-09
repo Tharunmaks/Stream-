@@ -36,6 +36,7 @@ typedef struct {
 
 typedef struct {
     int       fd;
+    int       owns_fd;    /* opened by es_gguf_open, closed by es_gguf_close */
     uint64_t  file_size;
     uint32_t  version;
     uint64_t  n_kv, n_tensors;
@@ -46,8 +47,15 @@ typedef struct {
     uint64_t  data_start;
 } es_gguf;
 
+/* All file reads go through this hook (default: pread). The browser build
+ * points it at a JavaScript File reader. */
+#include <sys/types.h>
+extern ssize_t (*es_gguf_pread)(int fd, void *buf, size_t n, uint64_t off);
+
 /* Returns 0 or sets err (static string) and returns -1. */
 int  es_gguf_open(es_gguf *g, const char *path, const char **err);
+/* Same, for an already open descriptor (or a hook-defined handle) of known size. */
+int  es_gguf_open_fd(es_gguf *g, int fd, uint64_t size, const char **err);
 void es_gguf_close(es_gguf *g);
 
 const es_gguf_kv     *es_gguf_find(const es_gguf *g, const char *key);

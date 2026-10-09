@@ -36,8 +36,10 @@ es_run: tools/es_run.c $(CORE) es_q2k_neon.o $(HDRS)
 es_import: tools/es_import.c src/es_gguf.c src/es_io.c src/es_cpu.c $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_import.c src/es_gguf.c src/es_io.c src/es_cpu.c $(LDFLAGS) $(LDLIBS)
 
-es_chat: tools/es_chat.c $(CORE) src/es_gguf.c src/es_quant.c src/es_tok.c es_q2k_neon.o $(HDRS)
-	$(CC) $(CFLAGS) -o $@ tools/es_chat.c $(CORE) src/es_gguf.c src/es_quant.c src/es_tok.c es_q2k_neon.o $(LDFLAGS) $(LDLIBS)
+ENGINE = src/es_engine.c src/es_gguf.c src/es_quant.c src/es_tok.c
+
+es_chat: tools/es_chat.c $(CORE) $(ENGINE) es_q2k_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_chat.c $(CORE) $(ENGINE) es_q2k_neon.o $(LDFLAGS) $(LDLIBS)
 
 es_serve: tools/es_serve.c
 	$(CC) $(CFLAGS) -o $@ tools/es_serve.c $(LDFLAGS) $(LDLIBS)

@@ -1,7 +1,12 @@
 # ExpertStream
 
-**Quick start (Termux):** one command installs everything, downloads a
-model and opens the chat app in your phone's browser:
+**Quick start (no install):** open the website, go to **Terminal**
+(ExpertStream CLI), type `download`, then `open`, then ask anything. The
+engine runs in the page as WebAssembly and reads the model file from your
+device. Website: `docs/index.html` (GitHub Pages) or `web/index.html`.
+
+**Faster, native (Termux):** one command installs everything, downloads a
+model and opens the same app backed by the native engine:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
@@ -55,7 +60,13 @@ src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
 tools/es_chat.c       text generation: core in RAM, experts streamed + cached
 tools/es_qtest.c      dumps dequantized tensors for checking
 tools/es_serve.c      local web server: the app + live chat API (127.0.0.1 only)
-web/index.html        the app: Home, Chat, Convert, Testing, History
+web/index.html        the app: Home, Terminal (ExpertStream CLI), Chat, Convert,
+                      Testing, History; self-contained (engine embedded)
+web/app_template.html the app source; scripts/build_web.sh embeds the engine
+web/es_wasm.c         WebAssembly entry points (Emscripten, runs in a Worker)
+web/worker_driver.js  worker side: reads the user's GGUF with FileReaderSync
+src/es_engine.{h,c}   the engine shared by es_chat, es_serve and the browser
+docs/index.html       copy of web/index.html for GitHub Pages
 scripts/setup.sh      install, build, download, import, start the app
 scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)

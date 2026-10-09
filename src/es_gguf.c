@@ -43,6 +43,11 @@ uint64_t es_ggml_row_bytes(uint32_t type, uint64_t ne0) {
     return ne0 / b * s;
 }
 
+static ssize_t default_pread(int fd, void *buf, size_t n, uint64_t off) {
+    return pread(fd, buf, n, (off_t)off);
+}
+ssize_t (*es_gguf_pread)(int fd, void *buf, size_t n, uint64_t off) = default_pread;
+
 /* ---- buffered sequential reader over the header ---- */
 typedef struct {
     int fd;
@@ -56,7 +61,7 @@ static int rd_bytes(rd *r, void *dst, size_t n) {
     uint8_t *d = dst;
     while (n) {
         if (r->boff == r->blen) {
-            ssize_t got = pread(r->fd, r->buf, sizeof r->buf, (off_t)r->pos);
+            ssize_t got = es_gguf_pread(r->fd, r->buf, sizeof r->buf, r->pos);
             if (got <= 0) { r->err = 1; return -1; }
             r->blen = (size_t)got;
             r->boff = 0;
@@ -126,12 +131,19 @@ static void skip_array(rd *r, uint32_t t, uint64_t n) {
 }
 
 int es_gguf_open(es_gguf *g, const char *path, const char **err) {
-    memset(g, 0, sizeof *g);
-    g->fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (g->fd < 0) { *err = strerror(errno); return -1; }
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) { *err = strerror(errno); return -1; }
     struct stat st;
-    fstat(g->fd, &st);
-    g->file_size = (uint64_t)st.st_size;
+    fstat(fd, &st);
+    int rc = es_gguf_open_fd(g, fd, (uint64_t)st.st_size, err);
+    if (rc == 0) g->owns_fd = 1; else close(fd);
+    return rc;
+}
+
+int es_gguf_open_fd(es_gguf *g, int fd, uint64_t size, const char **err) {
+    memset(g, 0, sizeof *g);
+    g->fd = fd;
+    g->file_size = size;
 
     rd *r = calloc(1, sizeof *r);
     r->fd = g->fd;
@@ -195,7 +207,7 @@ void es_gguf_close(es_gguf *g) {
     for (uint64_t i = 0; g->t && i < g->n_tensors; i++) free(g->t[i].name);
     free(g->kv);
     free(g->t);
-    if (g->fd > 0) close(g->fd);
+    if (g->owns_fd) close(g->fd);
     memset(g, 0, sizeof *g);
 }
 

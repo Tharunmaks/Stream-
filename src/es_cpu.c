@@ -76,14 +76,23 @@ int es_topo_read(es_topo *t) {
     }
     fclose(f);
 
+#if defined(__EMSCRIPTEN__)
+    int have_mask = 0;   /* no CPU affinity in the browser */
+#else
     cpu_set_t set;
     CPU_ZERO(&set);
     int have_mask = sched_getaffinity(0, sizeof set, &set) == 0;
+#endif
     for (int c = 0; c < t->ncpu; c++) {
         char path[128];
         snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
         t->max_khz[c] = read_long(path);
+#if defined(__EMSCRIPTEN__)
+        t->allowed[c] = 1;
+        (void)have_mask;
+#else
         t->allowed[c] = have_mask ? CPU_ISSET(c, &set) : 1;
+#endif
         t->order[c] = c;
     }
     /* fastest first: by max frequency, then higher cpu id (big cores are
@@ -101,10 +110,15 @@ int es_topo_read(es_topo *t) {
 }
 
 int es_pin_self(int cpu) {
+#if defined(__EMSCRIPTEN__)
+    (void)cpu;
+    return 0;
+#else
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
     return sched_setaffinity(0, sizeof set, &set) == 0 ? 0 : errno;
+#endif
 }
 
 int es_has_dotprod(void) {

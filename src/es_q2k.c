@@ -147,14 +147,42 @@ float es_dot_q2_K_q8_K_ref(int n, const es_block_q2_K *x, const es_block_q8_K *y
     return sumf;
 }
 
+/* Portable fast path (same math as the reference, ggml loop order): used
+ * when there is no NEON dot product, e.g. in the WebAssembly build. */
+static float dot_q2_K_portable(int n, const es_block_q2_K *x, const es_block_q8_K *y) {
+    float sumf = 0;
+    for (int b = 0; b < n / ES_QK_K; b++) {
+        const uint8_t *q2 = x[b].qs, *sc = x[b].scales;
+        const int8_t *q8 = y[b].qs;
+        int summs = 0;
+        for (int g = 0; g < 16; g++) summs += y[b].bsums[g] * (sc[g] >> 4);
+        int isum = 0, is = 0;
+        for (int half = 0; half < 2; half++) {
+            for (int shift = 0; shift < 8; shift += 2) {
+                int s0 = 0, s1 = 0;
+                for (int l = 0; l < 16; l++) s0 += q8[l] * ((q2[l] >> shift) & 3);
+                for (int l = 0; l < 16; l++) s1 += q8[l + 16] * ((q2[l + 16] >> shift) & 3);
+                isum += (sc[is] & 15) * s0 + (sc[is + 1] & 15) * s1;
+                is += 2;
+                q8 += 32;
+            }
+            q2 += 32;
+        }
+        const float dall = y[b].d * es_fp16_to_fp32(x[b].d);
+        const float dmin = y[b].d * es_fp16_to_fp32(x[b].dmin);
+        sumf += dall * isum - dmin * summs;
+    }
+    return sumf;
+}
+
 typedef float (*dot_fn)(int, const es_block_q2_K *, const es_block_q8_K *);
 static dot_fn g_dot;
 static const char *g_name;
 static int g_force_scalar;
 
 static void pick_kernel(void) {
-    g_dot = es_dot_q2_K_q8_K_ref;
-    g_name = "scalar";
+    g_dot = g_force_scalar ? es_dot_q2_K_q8_K_ref : dot_q2_K_portable;
+    g_name = g_force_scalar ? "scalar" : "portable";
 #if defined(__aarch64__)
     if (!g_force_scalar && es_has_dotprod()) {
         g_dot = es_dot_q2_K_q8_K_neon;
