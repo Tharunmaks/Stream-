@@ -101,8 +101,19 @@ static int copy_range(int dst, int src, uint64_t off, uint64_t n) {
     return 0;
 }
 
+/* mkdir -p: create every missing parent directory too */
 static int mkdir_p(const char *p) {
-    return mkdir(p, 0755) == 0 || errno == EEXIST ? 0 : -1;
+    char tmp[4096];
+    size_t n = strlen(p);
+    if (n == 0 || n >= sizeof tmp) { errno = ENAMETOOLONG; return -1; }
+    memcpy(tmp, p, n + 1);
+    for (char *s = tmp + 1; *s; s++) {
+        if (*s != '/') continue;
+        *s = 0;
+        if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+        *s = '/';
+    }
+    return mkdir(tmp, 0755) == 0 || errno == EEXIST ? 0 : -1;
 }
 
 /* ---- core.gguf: metadata (minus split.*) + every non-expert tensor ---- */

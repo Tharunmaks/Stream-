@@ -38,7 +38,7 @@ for r in "${ROWS[@]}"; do
     f=${r% *}
     dest="$OUT/$(basename "$f")"
     echo "-> $dest"
-    curl -fL -C - --retry 5 --retry-delay 3 "${AUTH[@]}" -o "$dest" \
+    curl -fL --progress-bar -C - --retry 5 --retry-delay 3 "${AUTH[@]}" -o "$dest" \
         "https://huggingface.co/$REPO/resolve/main/$f"
 done
 echo "done. import with:  ./es_import -o ~/packs/NAME $OUT/<the .gguf file(s)>"
