@@ -12,9 +12,15 @@ Status:
   4x Cortex-A78: 9.8 GB/s of weights (memory read tops out at 13.8 GB/s),
   so about 0.72 s/token of compute for the Qwen3-235B shape. Adding the
   A55 cores makes it slower, so compute uses only the big cores.
-- **Step 3 (current):** `es_run`, an end-to-end decode loop: hot-expert
+- **Step 3 (done):** `es_run`, an end-to-end decode loop: hot-expert
   cache, router-ahead prefetch, readers on the little cores, compute on the
   big cores. Weights are synthetic and routing is simulated.
+- **Step 4 (current):** real models. `scripts/hf_get.sh` downloads GGUF
+  files from Hugging Face. `es_import` turns any GGUF MoE (single file or
+  split) into a pack: `core.gguf` plus one file per expert. Tested
+  byte-for-byte against the official `gguf` reader on 3 real models. `-x`
+  imports only chosen experts, which is how skill packs (coding, chat) will
+  be stored.
 
 ## Layout
 
@@ -30,6 +36,9 @@ tools/es_gen.c        writes synthetic expert files in the real format
 tools/es_bench.c      cold-read bandwidth/latency benchmark with cache checks
 tools/es_kbench.c     kernel correctness + compute throughput per core type
 tools/es_run.c        end-to-end decode loop (cache + prefetch + kernels)
+tools/es_import.c     GGUF MoE -> ExpertStream pack (core.gguf + expert files)
+src/es_gguf.{h,c}     GGUF v2/v3 reader (metadata, tensor table, splits)
+scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
 docs/expert_format.md format spec and design notes
 ```
@@ -102,6 +111,27 @@ so reusing files can't produce fake cache hits.
 
 `-r`, `-z` and `-p` are **assumptions**, not measurements. Real values need
 real routing traces (later step).
+
+## Step 4: import a real model (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+bash scripts/hf_get.sh bartowski/OLMoE-1B-7B-0924-Instruct-GGUF Q2_K.gguf ~/models
+./es_import -i ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf          # inspect
+./es_import -o ~/packs/olmoe ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf
+```
+
+What `es_import -i` reports for this model: 6.9B parameters, of which
+0.48B are core (0.23 GB, kept in RAM) and 6.44B are routed experts
+(2.33 GB, streamed). Each token needs 0.29 GB of expert weights.
+
+Note: "Q2_K" files usually mix quant types. In this one the down
+projection is Q3_K, so the engine needs a Q3_K kernel as well as Q2_K.
+Generating real text is the next step: tokenizer, attention, router and
+the remaining kernels.
+
+Disk: the GGUF and the pack each take the model's full size. Delete the
+GGUF after importing if space is tight.
 
 ## What the numbers mean (back-of-envelope, I/O only)
 

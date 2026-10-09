@@ -254,7 +254,10 @@ int main(int argc, char **argv) {
     }
     const es_header *h0 = (const es_header *)probe;
     const es_tensor_desc *tg = find_role(h0, ES_ROLE_GATE), *td = find_role(h0, ES_ROLE_DOWN);
-    if (!tg || !td || tg->qtype != ES_QT_Q2_K) { fprintf(stderr, "unsupported expert layout\n"); return 1; }
+    if (!tg || !td || !es_qtype_is_q2k(tg->qtype) || !es_qtype_is_q2k(td->qtype)) {
+        fprintf(stderr, "es_run only has a Q2_K kernel so far; this pack uses another quant type\n");
+        return 1;
+    }
     if ((h0->flags & ES_FLAG_SYNTHETIC) && !(h0->flags & ES_FLAG_SANE_SCALES)) {
         fprintf(stderr, "dataset was made by an older es_gen (random fp16 scales -> NaN).\n"
                         "regenerate it:  rm -rf %s && ./es_gen -d %s -L 8 -E 64\n", o_dir, o_dir);

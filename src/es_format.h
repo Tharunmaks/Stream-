@@ -32,9 +32,16 @@ enum es_qtype {
     ES_QT_RAW  = 0, /* opaque bytes */
     ES_QT_F16  = 1,
     ES_QT_Q8_0 = 2,
-    ES_QT_Q2_K = 3, /* 256-weight blocks, 84 bytes each (2.625 bpw); exact
-                       in-block layout is fixed in the kernel step */
+    ES_QT_Q2_K = 3, /* llama.cpp block_q2_K: 256 weights in 84 bytes */
+    /* Imported tensors keep their GGUF type: qtype = ES_QT_GGML | ggml_type
+     * (e.g. ES_QT_GGML | 10 is Q2_K, | 8 is Q8_0, | 12 is Q4_K). */
+    ES_QT_GGML = 0x1000,
 };
+
+#define ES_GGML_Q2_K 10
+static inline int es_qtype_is_q2k(uint32_t qt) {
+    return qt == ES_QT_Q2_K || qt == (ES_QT_GGML | ES_GGML_Q2_K);
+}
 
 enum es_role {
     ES_ROLE_GATE  = 0,
