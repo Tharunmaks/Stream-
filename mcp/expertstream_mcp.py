@@ -21,7 +21,7 @@ ROOT = os.path.dirname(HERE)
 MODELS = os.path.expanduser(os.environ.get('ES_MODELS', '~/models'))
 MAX_B = float(os.environ.get('ES_MAX_PARAMS_B', '250'))
 CFG = os.path.expanduser('~/.expertstream/config.json')
-VERSION = '3.0.0'
+VERSION = '3.1.0'
 
 def cfg():
     try: return json.load(open(CFG))
@@ -654,6 +654,39 @@ TOOLS += [
  ('create_model', 'Create a randomly initialised model of any size from 1,000 up to 37 billion parameters as a loadable GGUF (streamed to disk; checks free space). It is UNTRAINED.', S(target_params=P('number', 'parameters', req=True), name=P('string', 'file name', req=True), dtype=P('string', 'f16 or f32'), vocab_size=P('integer', 'default 32000'), overwrite=P('boolean', 'replace existing')), t_create),
  ('export_model', 'Export a trained checkpoint to GGUF in the models folder with a model card; load it with load_model.', S(name=P('string', 'build name', req=True), dtype=P('string', 'f16 or f32'), overwrite=P('boolean', 'replace existing')), t_export),
 ]
+
+# ---------------- Expert Craft (craft/expertcraft_mcp.py): build models from scratch on free GPUs (Colab / Kaggle) ----------------
+# Same tools as the standalone Expert Craft server, merged in under a craft_ prefix (the NumPy builder above already owns
+# design_model / job_status / stop_job). The craft module keeps its own workspace sandbox (EXPERTCRAFT_HOME, default ~/expertcraft).
+_CRAFT = None
+def _load_craft():
+    global _CRAFT
+    if _CRAFT is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'craft', 'expertcraft_mcp.py')
+        if not os.path.isfile(path): _CRAFT = False; return _CRAFT
+        spec = importlib.util.spec_from_file_location('expertcraft_mcp', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); _CRAFT = m
+    return _CRAFT
+def _craft_rename(x, names):
+    """tool calls written in the craft guide/results (design_model(...)) -> the merged names (craft_design_model(...))"""
+    if isinstance(x, str): return re.sub(r'\b(%s)\(' % '|'.join(names), r'craft_\1(', x)
+    if isinstance(x, list): return [_craft_rename(v, names) for v in x]
+    if isinstance(x, dict): return {k: _craft_rename(v, names) for k, v in x.items()}
+    return x
+def _craft_tools():
+    try: C = _load_craft()
+    except Exception: return []
+    if not C: return []
+    names = [t['name'] for t in C.TOOLS if not t['name'].startswith('craft_')]
+    out = []
+    for t in C.TOOLS:
+        n = t['name']; new = n if n.startswith('craft_') else 'craft_' + n
+        def f(a, n=n):
+            r = _craft_rename(C.call(n, a), names)
+            return dict(guide=r.splitlines()) if isinstance(r, str) else r
+        out.append((new, '[Expert Craft] ' + _craft_rename(t['description'], names), t['inputSchema'], f))
+    return out
+TOOLS += _craft_tools()
 
 TOOLMAP = {n: f for n, d, s, f in TOOLS}
 

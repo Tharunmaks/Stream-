@@ -15,7 +15,8 @@ self.addEventListener('fetch', (e) => {
     h.set('Referrer-Policy', 'no-referrer');
     h.set('Cross-Origin-Resource-Policy', 'same-origin');
     h.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=(), clipboard-read=(), interest-cohort=()');
-    h.set('Content-Security-Policy', "@@CSP@@");
+    /* the CSP header pins this app page's inline scripts by hash; other pages (craft.html) carry their own CSP meta */
+    if (/\/(index\.html)?$/.test(new URL(r.url).pathname)) h.set('Content-Security-Policy', "@@CSP@@");
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
   }).catch(() => fetch(r)));
 });

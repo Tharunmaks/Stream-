@@ -253,3 +253,10 @@ Qwen3-235B-A22B shape at Q2_K: 94 MoE layers × 8 experts × 5.9 MiB is
 - The cloud tier (20–100 MB/s, high latency) costs 0.15–0.7 s or more per
   expert miss. It must **never be on the per-token critical path**. Only
   fill local flash from it in the background.
+
+
+## Expert Craft is part of the MCP server
+The tools of `craft/expertcraft_mcp.py` (design 1M-70B models, scaffold a PyTorch project, train on free Colab/Kaggle GPUs with FSDP, export) are
+merged into `mcp/expertstream_mcp.py` as `craft_guide`, `craft_design_model`, `craft_estimate_model`, `craft_free_compute_plan`,
+`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (45 tools in total). The standalone
+`craft/expertcraft_mcp.py` still works on its own. Projects live in `~/expertcraft` (`EXPERTCRAFT_HOME`), and paths outside it are refused.
