@@ -47,7 +47,9 @@ async function sendChat(text) {
   const setRam = mb => { if (!mb) return; ramv.textContent = mb + ' MB'; ramfill.style.width = Math.min(100, mb / 29) + '%'; };
   st(0, 'on'); let answer = '', t0 = 0, n = 0, last = 0;
   try {
-    await Brain.ask(text, { temp: settings.temp, max: settings.max }, e => {
+    const ag = currentAgent(); let toSend = text;
+    if (ag && agentPending) { toSend = ag.system + '\n\nUser message:\n' + text; agentPending = false; }
+    await Brain.ask(toSend, { temp: settings.temp, max: settings.max }, e => {
       if (e.ev === 'tokens') { e.ids.slice(0, 48).forEach(id => ids.append(h('span', {}, id))); st(0, 'ok', e.n + ' tokens'); st(1, 'ok', Math.round(Brain.info.core_mb) + ' MB'); st(2, 'on'); st(3, 'on'); }
       else if (e.ev === 'prompt') { if (stages[0].className.includes('on')) { st(0, 'ok'); st(1, 'ok'); st(2, 'on'); st(3, 'on'); } st(2, 'on', e.done + '/' + e.n); if (e.flash_mb) st(3, 'on', Math.round(e.flash_mb) + ' MB'); setRam(e.ram_mb); if (e.done >= e.n) { st(2, 'ok'); st(4, 'on'); t0 = performance.now(); } }
       else if (e.ev === 'tok') { if (!t0) { t0 = performance.now(); st(2, 'ok'); st(4, 'on'); } answer += e.t; n++; const now = performance.now(); if (now - last > 60) { last = now; ans.innerHTML = answerHTML(answer, true); st(4, 'on', (n / ((now - t0) / 1000)).toFixed(2) + ' tok/s'); box.scrollTop = box.scrollHeight; } }
@@ -69,7 +71,8 @@ $('#compose').addEventListener('submit', e => { e.preventDefault(); const p = $(
 $('#send').addEventListener('click', () => { if (chatBusy) Brain.stop(); });
 $('#prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) { e.preventDefault(); $('#compose').requestSubmit(); } });
 $('#prompt').addEventListener('input', e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(160, e.target.scrollHeight) + 'px'; });
-$('#chat-new').addEventListener('click', async () => { if (chatBusy) return; await Brain.reset(); chatWelcome(); });
+$('#chat-new').addEventListener('click', async () => { if (chatBusy) return; await Brain.reset(); agentPending = true; chatWelcome(); });
+$('#chat-agent').addEventListener('click', agentPicker);
 $('#chat-set').addEventListener('click', () => {
   const sl = (key, label, min, max, step, def, fmt, note) => { const v = h('b', { class: 'mono' }, fmt(store.get(key, def))); return h('label', { class: 'field' }, h('span', { class: 'row', style: 'justify-content:space-between' }, label, v), h('input', { type: 'range', min, max, step, value: store.get(key, def), oninput: e => { store.set(key, +e.target.value); v.textContent = fmt(+e.target.value); } }), note ? h('span', { class: 'dim', style: 'font-size:12px' }, note) : null); };
   const s = sheet([h('h2', { style: 'font-size:20px' }, 'Chat settings'), sl('temp', 'Creativity (temperature)', 0, 1.5, .05, .7, v => v.toFixed(2), '0 = always the most likely word'), sl('max', 'Longest answer (tokens)', 32, 1024, 32, 256, v => v), sl('ctx', 'Memory of the chat (tokens)', 256, 4096, 256, 1024, v => v, 'Applies the next time a model loads'), sl('cache', 'Expert cache (MB)', 64, 1024, 32, 384, v => v + ' MB', 'Applies the next time a model loads'), h('button', { class: 'btn', onclick: () => s.close() }, 'Done')]);
@@ -81,4 +84,4 @@ $('#pill').addEventListener('click', () => {
     h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { s.close(); go('chat'); } }, 'Chat'), h('button', { class: 'btn', onclick: () => { s.close(); go('models'); } }, 'Switch model'), Brain.mode === 'web' ? h('button', { class: 'btn danger', onclick: () => { Brain.close(); s.close(); toast('Model unloaded'); } }, 'Unload') : null)]);
 });
 Brain.on(() => { chatChipUpdate(); if (!chatBusy && !$('#msgs').querySelector('.msg.user')) chatWelcome(); });
-pageHooks.chat = () => { chatChipUpdate(); if (!chatBusy && !$('#msgs').querySelector('.msg.user')) chatWelcome(); };
+pageHooks.chat = () => { agentChipDraw(); chatChipUpdate(); if (!chatBusy && !$('#msgs').querySelector('.msg.user')) chatWelcome(); };

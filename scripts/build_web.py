@@ -12,6 +12,10 @@ js = '\n'.join(rd(p) for p in sorted(glob.glob(os.path.join(root, 'web/src/js/*.
 q3 = 'not compared yet'
 if '--verify-q3' in sys.argv: q3 = sys.argv[sys.argv.index('--verify-q3') + 1]
 js = js.replace('@@Q3VERIFY@@', q3)
+import json
+ag = json.load(open(os.path.join(root, 'mcp/agents.json'), encoding='utf-8'))
+ag['agents'] = [{k: a[k] for k in ('id', 'name', 'category', 'category_name', 'description', 'system', 'tags') if k in a} for a in ag['agents']]
+js = js.replace('@@AGENTS@@', json.dumps(ag, ensure_ascii=False).replace('</', '<\\/'))
 for name, txt in (('engine mt', engine_mt), ('engine', engine), ('dl worker', dl), ('app js', js)):
     assert '</script' not in txt.lower() and '\0' not in txt, name + ' contains </script or NUL'
 page = rd('web/src/template.html').replace('@@STYLE@@', rd('web/src/style.css')).replace('@@DLWORKER@@', dl).replace('@@ENGINE_MT@@', engine_mt).replace('@@ENGINE@@', engine).replace('@@JS@@', js)

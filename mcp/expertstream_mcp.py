@@ -4,8 +4,10 @@ GGUF language models locally through the ExpertStream engine, with no browser.
 
   claude mcp add expertstream -- python3 ~/Stream-/mcp/expertstream_mcp.py
 
-Transport: MCP over stdio (newline-delimited JSON-RPC). With --http PORT it also answers on
-127.0.0.1:PORT (POST /mcp for JSON-RPC, GET /health) so the website's Settings page can see it.
+Transports: MCP over stdio; or --http PORT for streamable HTTP (POST /mcp) and legacy SSE (GET /sse),
+plus an OpenAI-compatible API (POST /v1/chat/completions, model "agent:<id>") and GET /health.
+--host 0.0.0.0 shares it on the network (a token is then required); --model FILE loads a model at start.
+250+ agent presets (mcp/agents.json) run on the loaded local model.
 Pure standard library. Environment: ES_MODELS (default ~/models), HF_TOKEN, ES_MAX_PARAMS_B (default 250).
 """
 import json, os, sys, struct, threading, subprocess, time, shutil, urllib.request, urllib.parse, urllib.error, http.server, re
@@ -15,7 +17,7 @@ ROOT = os.path.dirname(HERE)
 MODELS = os.path.expanduser(os.environ.get('ES_MODELS', '~/models'))
 MAX_B = float(os.environ.get('ES_MAX_PARAMS_B', '250'))
 CFG = os.path.expanduser('~/.expertstream/config.json')
-VERSION = '1.0.0'
+VERSION = '2.0.0'
 
 def cfg():
     try: return json.load(open(CFG))
@@ -172,10 +174,10 @@ class Engine:
             try: self.p.stdin.close(); self.p.terminate()
             except Exception: pass
         self.p = self.path = self.info = None
-    def ask(self, text, max_tokens=256, temperature=0.7, raw=False):
+    def ask(self, text, max_tokens=256, temperature=0.7, raw=False, on_tok=None, fresh=False):
         if not self.p: raise RuntimeError('no model loaded; call load_model first')
         with self.lock:
-            # sampling is fixed per process; restart is not needed for these small controls, so apply by command line on load
+            if fresh: self._reset()
             self.p.stdin.write(text.replace('\\', '\\\\').replace('\n', '\\n') + '\n'); self.p.stdin.flush()
             out, st = [], {}
             while True:
@@ -183,9 +185,19 @@ class Engine:
                 if not line: raise RuntimeError('engine stopped')
                 try: e = json.loads(line)
                 except Exception: continue
-                if e['ev'] == 'tok': out.append(e['t'])
+                if e['ev'] == 'tok':
+                    out.append(e['t'])
+                    if on_tok:
+                        try: on_tok(e['t'])
+                        except Exception: on_tok = None   # client went away: keep draining so the engine stays in sync
                 elif e['ev'] == 'done': st = e; break
             return ''.join(out), st
+    def _reset(self):
+        self.p.stdin.write('/reset\n'); self.p.stdin.flush()
+        while json.loads(self.p.stdout.readline() or '{}').get('ev') != 'done': pass
+    def reset(self):
+        if self.p:
+            with self.lock: self._reset()
 ENG = Engine()
 
 # ---------------- catalog for recommendations ----------------
@@ -206,6 +218,70 @@ def plan(params_b, bits, active_b=None, cache_gb=2.0, flash_gbs=1.75, disk_free_
     sec = act * (1 - hit) / flash_gbs + act / 9.8
     free = disk_free_gb if disk_free_gb is not None else device()['disk_free_gb']
     return dict(ok=True, file_gb=round(disk, 1), fits_on_disk=disk <= free, free_disk_gb=free, read_per_token_gb=round(act, 2), est_cache_hit=round(hit, 2), seconds_per_token=round(sec, 2), tokens_per_second=round(1 / sec, 3), note='rough estimate; measure with benchmark')
+
+
+# ---------------- agents: 250+ presets that run on the loaded model ----------------
+def load_agents():
+    for p in (os.path.join(HERE, 'agents.json'),):
+        try: return json.load(open(p, encoding='utf-8'))
+        except Exception: pass
+    return dict(count=0, categories={}, agents=[])
+AGENTS = load_agents(); AGENT_BY_ID = {a['id']: a for a in AGENTS['agents']}
+def agent_brief(a): return dict(id=a['id'], name=a['name'], category=a['category_name'], description=a['description'])
+STOP = set('a an the and or of to in on for with my me i we you it is are be should would could can how do does what why when use using need want make get your our this that from into as at by if so then about some any new small big'.split())
+def toks(t): return [w for w in re.findall(r'[a-z0-9+#]+', t.lower()) if w not in STOP and len(w) > 1]
+_DOC = {}
+def _doc(a):
+    if a['id'] not in _DOC: _DOC[a['id']] = (set(toks(a['id'].replace('-', ' ') + ' ' + a['name'])), set(toks(a['description'] + ' ' + a['category_name'])), set(toks(a.get('tags', ''))))
+    return _DOC[a['id']]
+_DF = {}
+def _idf(w):
+    if not _DF:
+        for x in AGENTS['agents']:
+            for t in _doc(x)[0] | _doc(x)[1] | _doc(x)[2]: _DF[t] = _DF.get(t, 0) + 1
+    import math
+    return math.log(1 + len(AGENTS['agents']) / (1 + _DF.get(w, 0)))
+def score_agent(a, words):
+    names, desc, tags = _doc(a)
+    return sum(_idf(w) * (3 if (w in names or w in tags) else 1) for w in words if w in names or w in desc or w in tags)
+def find_agents(query='', category='', limit=20):
+    ws = toks(query)
+    pool = [a for a in AGENTS['agents'] if not category or category.lower() in (a['category'], a['category_name'].lower())]
+    if ws: pool = sorted([a for a in pool if score_agent(a, ws) > 0], key=lambda a: -score_agent(a, ws))
+    return pool[:limit]
+def agent_prompt(a, task, context=''):
+    return a['system'] + '\n\n' + ('Context:\n' + context.strip() + '\n\n' if context and context.strip() else '') + 'Task:\n' + task.strip()
+def run_agent_text(agent_id, task, context='', on_tok=None, keep=False):
+    a = AGENT_BY_ID.get(agent_id)
+    if not a: raise RuntimeError('unknown agent %r; use list_agents or recommend_agents' % agent_id)
+    text, st = ENG.ask(agent_prompt(a, task, context), on_tok=on_tok, fresh=not keep)
+    return a, text, st
+def t_list_agents(a):
+    ags = find_agents(a.get('query', ''), a.get('category', ''), int(a.get('limit', 25)))
+    return dict(total=AGENTS['count'], categories=AGENTS['categories'], shown=len(ags), agents=[agent_brief(x) for x in ags])
+def t_get_agent(a):
+    x = AGENT_BY_ID.get(a['agent_id'])
+    return x or dict(error='unknown agent')
+def t_recommend_agents(a):
+    ags = find_agents(a['task'], '', int(a.get('limit', 5)))
+    return dict(task=a['task'], suggested=[agent_brief(x) for x in ags], next='run_agent(agent_id, task) or run_pipeline([...], task)')
+def t_run_agent(a):
+    ag, text, st = run_agent_text(a['agent_id'], a['task'], a.get('context', ''), keep=bool(a.get('keep_context')))
+    return dict(agent=ag['name'], answer=text, tokens=st.get('tokens'), tokens_per_second=st.get('tps'))
+def t_pipeline(a):
+    ids = a['agent_ids']; cur = a['task']; steps = []
+    for i in ids[:8]:
+        ag, text, st = run_agent_text(i, cur if not steps else 'Previous agent output:\n' + steps[-1]['answer'] + '\n\nOriginal task:\n' + a['task'] + '\n\nDo your part.')
+        steps.append(dict(agent=ag['name'], answer=text))
+    return dict(steps=steps, final=steps[-1]['answer'] if steps else '')
+def t_council(a):
+    ids = a.get('agent_ids') or [x['id'] for x in find_agents(a['task'], '', 3)]
+    views = []
+    for i in ids[:5]:
+        ag, text, st = run_agent_text(i, a['task']); views.append((ag['name'], text))
+    merged = '\n\n'.join('### %s\n%s' % v for v in views)
+    ag, final, st = run_agent_text('synthesizer', 'Task:\n' + a['task'] + '\n\nAgent answers:\n' + merged + '\n\nMerge into one answer and note disagreements.')
+    return dict(members=[v[0] for v in views], answers=[dict(agent=n, answer=t) for n, t in views], synthesis=final)
 
 # ---------------- tools ----------------
 def t_status(a):
@@ -272,11 +348,7 @@ def t_generate(a):
     text, st = ENG.ask(a['prompt'], raw=bool(a.get('raw')))
     return dict(text=text, tokens=st.get('tokens'), seconds=st.get('secs'), tokens_per_second=st.get('tps'), expert_cache_hit_pct=st.get('hit'), flash_mb_read=st.get('flash_mb'), ram_mb=st.get('ram_mb'))
 def t_reset(a):
-    if ENG.p:
-        with ENG.lock:
-            ENG.p.stdin.write('/reset\n'); ENG.p.stdin.flush()
-            while json.loads(ENG.p.stdout.readline() or '{}').get('ev') != 'done': pass
-    return dict(reset=True)
+    ENG.reset(); return dict(reset=True)
 def t_bench(a):
     t0 = time.time(); text, st = ENG.ask('Write a short story about a robot who learns to paint.')
     return dict(tokens=st.get('tokens'), tokens_per_second=st.get('tps'), prompt_seconds=st.get('prompt_secs'), wall_seconds=round(time.time() - t0, 2), ram_mb=st.get('ram_mb'))
@@ -362,14 +434,29 @@ TOOLS = [
  ('connect_huggingface', 'Link the user\'s Hugging Face account (for private/gated models). Without arguments it starts a one-step sign-in: give the user the URL and code it returns, then call connect_huggingface_finish. Or pass a token directly.', S(token=P('string', 'optional hf_... token')), t_connect),
  ('connect_huggingface_finish', 'Wait for the user to approve the Hugging Face sign-in started by connect_huggingface and save the access.', S(wait_s=P('number', 'seconds to wait, default 60')), t_connect_finish),
 ]
+TOOLS += [
+ ('list_agents', 'Browse the 250+ built-in agent presets (coding languages, DevOps, security, data/ML, product, writing, daily life, phone/Termux, agent teams). Each runs on the loaded local model.', S(query=P('string', 'search words, e.g. "rust" or "postgres"'), category=P('string', 'category id: languages, engineering, devops, security, data, product, learning, life, mobile, orchestrators'), limit=P('integer', 'default 25')), t_list_agents),
+ ('get_agent', 'Full definition (system prompt) of one agent.', S(agent_id=P('string', 'agent id', req=True)), t_get_agent),
+ ('recommend_agents', 'Suggest the best agents for a task described in words.', S(task=P('string', 'what you need done', req=True), limit=P('integer', 'default 5')), t_recommend_agents),
+ ('run_agent', 'Run one agent on a task using the loaded local model. Fresh context each call unless keep_context is true.', S(agent_id=P('string', 'agent id', req=True), task=P('string', 'the task or question', req=True), context=P('string', 'extra material such as code or notes'), keep_context=P('boolean', 'continue the previous conversation')), t_run_agent),
+ ('run_pipeline', 'Run agents in sequence; each receives the previous agent\'s output (max 8). Example: planner -> python -> test-writer -> code-reviewer.', S(agent_ids=dict(type='array', items=dict(type='string'), description='agent ids in order'), task=P('string', 'the overall task', req=True)), t_pipeline),
+ ('agent_council', 'Ask up to 5 agents the same question and merge their answers with the synthesizer agent.', S(task=P('string', 'question or task', req=True), agent_ids=dict(type='array', items=dict(type='string'), description='optional agent ids; default = best 3 matches')), t_council),
+]
 TOOLMAP = {n: f for n, d, s, f in TOOLS}
 
 # ---------------- JSON-RPC ----------------
 def handle(req):
     m, i = req.get('method'), req.get('id'); params = req.get('params') or {}
     if m == 'initialize':
-        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models.' % MAX_B))
+        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False), prompts=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models.' % MAX_B))
     if m == 'ping': return dict(jsonrpc='2.0', id=i, result={})
+    if m == 'prompts/list': return dict(jsonrpc='2.0', id=i, result=dict(prompts=[dict(name=a['id'], title=a['name'], description=a['description'], arguments=[dict(name='task', description='what you want this agent to do', required=True)]) for a in AGENTS['agents']]))
+    if m == 'prompts/get':
+        a = AGENT_BY_ID.get(params.get('name'))
+        if not a: return dict(jsonrpc='2.0', id=i, error=dict(code=-32602, message='unknown prompt'))
+        t = (params.get('arguments') or {}).get('task', '')
+        return dict(jsonrpc='2.0', id=i, result=dict(description=a['description'], messages=[dict(role='user', content=dict(type='text', text=agent_prompt(a, t or '(describe your task here)')))]))
+    if m == 'resources/list': return dict(jsonrpc='2.0', id=i, result=dict(resources=[]))
     if m == 'tools/list': return dict(jsonrpc='2.0', id=i, result=dict(tools=[dict(name=n, description=d, inputSchema=s) for n, d, s, f in TOOLS]))
     if m == 'tools/call':
         f = TOOLMAP.get(params.get('name'))
@@ -378,21 +465,125 @@ def handle(req):
         except Exception as e: return dict(jsonrpc='2.0', id=i, result=dict(isError=True, content=[dict(type='text', text='%s: %s' % (type(e).__name__, e))]))
     if i is None: return None   # notification
     return dict(jsonrpc='2.0', id=i, error=dict(code=-32601, message='method not found'))
+# ---------------- HTTP: MCP (streamable + legacy SSE), OpenAI-compatible API, health ----------------
+import queue, secrets, socket
+TOKEN = os.environ.get('ES_MCP_TOKEN', '')
+SESSIONS = {}   # legacy SSE sessions: id -> queue
+def flat(c):
+    if isinstance(c, list): return '\n'.join(x.get('text', '') for x in c if isinstance(x, dict))
+    return c or ''
+def oa_prompt(messages, model):
+    sysm = [flat(m.get('content')) for m in messages if m.get('role') in ('system', 'developer')]
+    convo = [m for m in messages if m.get('role') not in ('system', 'developer')]
+    parts = []
+    ag = AGENT_BY_ID.get(model[6:]) if str(model).startswith('agent:') else None
+    if ag: parts.append(ag['system'])
+    if sysm: parts.append('Instructions:\n' + '\n'.join(sysm))
+    if len(convo) > 1: parts.append('Conversation so far:\n' + '\n'.join('%s: %s' % (m.get('role', 'user').capitalize(), flat(m.get('content'))) for m in convo[:-1]))
+    parts.append(flat(convo[-1].get('content')) if convo else '')
+    return '\n\n'.join(p for p in parts if p)
+def lan_ips():
+    ips = set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('10.255.255.255', 1)); ips.add(s.getsockname()[0]); s.close()
+    except Exception: pass
+    return sorted(ips)
 class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.0'
     def log_message(self, *a): pass
-    def _cors(self): self.send_header('Access-Control-Allow-Origin', '*'); self.send_header('Access-Control-Allow-Headers', 'content-type'); self.send_header('Access-Control-Allow-Private-Network', 'true')
+    def _cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*'); self.send_header('Access-Control-Allow-Headers', 'content-type, authorization, mcp-session-id, mcp-protocol-version, accept, last-event-id')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS'); self.send_header('Access-Control-Allow-Private-Network', 'true'); self.send_header('Access-Control-Expose-Headers', 'Mcp-Session-Id')
+    def _send(self, code, obj=None, ctype='application/json', extra=None):
+        b = b'' if obj is None else (obj if isinstance(obj, bytes) else json.dumps(obj).encode())
+        self.send_response(code); self._cors(); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(b)))
+        for k, v in (extra or {}).items(): self.send_header(k, v)
+        self.end_headers(); self.wfile.write(b)
+    def _auth(self):
+        if not TOKEN: return True
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        got = (self.headers.get('Authorization', '')[7:] if self.headers.get('Authorization', '').startswith('Bearer ') else '') or (q.get('token') or [''])[0]
+        return secrets.compare_digest(got, TOKEN)
     def do_OPTIONS(self): self.send_response(204); self._cors(); self.end_headers()
+    def do_DELETE(self): self._send(200, {})
     def do_GET(self):
-        b = json.dumps(dict(ok=True, server='expertstream-mcp', version=VERSION, tools=len(TOOLS), max_params_b=MAX_B, device=device())).encode()
-        self.send_response(200); self._cors(); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(b)
+        u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/') or '/'
+        if path == '/health':
+            info = dict(ok=True, server='expertstream-mcp', version=VERSION, tools=len(TOOLS), agents=AGENTS['count'], max_params_b=MAX_B, auth=bool(TOKEN))
+            if self._auth(): info['device'] = device(); info['loaded'] = ENG.path
+            return self._send(200, info)
+        if not self._auth(): return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
+        if path == '/': return self._send(200, ('ExpertStream MCP %s\n\nMCP (streamable HTTP):  POST /mcp\nMCP (legacy SSE):       GET /sse  +  POST /messages\nOpenAI-compatible API:  POST /v1/chat/completions   GET /v1/models\nAgents:                 GET /agents   (model name "agent:<id>")\nHealth:                 GET /health\n' % VERSION).encode(), 'text/plain')
+        if path == '/agents': return self._send(200, dict(total=AGENTS['count'], categories=AGENTS['categories'], agents=[agent_brief(a) for a in AGENTS['agents']]))
+        if path == '/v1/models': return self._send(200, dict(object='list', data=[dict(id='expertstream', object='model', owned_by='local')] + [dict(id='agent:' + a['id'], object='model', owned_by='expertstream-agents') for a in AGENTS['agents']]))
+        if path == '/sse':
+            sid = secrets.token_hex(8); qu = queue.Queue(); SESSIONS[sid] = qu
+            self.send_response(200); self._cors(); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
+            try:
+                self.wfile.write(('event: endpoint\ndata: /messages?session_id=%s\n\n' % sid).encode()); self.wfile.flush()
+                while True:
+                    try: m = qu.get(timeout=15); self.wfile.write(('event: message\ndata: %s\n\n' % json.dumps(m)).encode())
+                    except queue.Empty: self.wfile.write(b': ping\n\n')
+                    self.wfile.flush()
+            except Exception: pass
+            finally: SESSIONS.pop(sid, None)
+            return
+        if path == '/mcp': return self._send(405, dict(error='use POST'))
+        self._send(404, dict(error='not found'))
+    def _body(self):
+        n = int(self.headers.get('Content-Length', 0)); return json.loads(self.rfile.read(n) or b'{}')
     def do_POST(self):
-        n = int(self.headers.get('Content-Length', 0)); r = handle(json.loads(self.rfile.read(n) or b'{}')); b = json.dumps(r).encode() if r else b''
-        self.send_response(200 if r else 202); self._cors(); self.send_header('Content-Type', 'application/json'); self.end_headers(); self.wfile.write(b)
+        if not self._auth(): return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
+        u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/')
+        try: body = self._body()
+        except Exception: return self._send(400, dict(error='bad JSON'))
+        if path == '/mcp':
+            batch = isinstance(body, list); rs = [r for r in (handle(x) for x in (body if batch else [body])) if r]
+            extra = {'Mcp-Session-Id': secrets.token_hex(8)} if not batch and body.get('method') == 'initialize' else {}
+            if not rs: return self._send(202, None, extra=extra)
+            return self._send(200, rs if batch else rs[0], extra=extra)
+        if path == '/messages':
+            qu = SESSIONS.get((urllib.parse.parse_qs(u.query).get('session_id') or [''])[0])
+            if not qu: return self._send(404, dict(error='unknown session'))
+            r = handle(body)
+            if r: qu.put(r)
+            return self._send(202, None)
+        if path == '/v1/chat/completions': return self._openai(body)
+        self._send(404, dict(error='not found'))
+    def _openai(self, body):
+        model = body.get('model') or 'expertstream'
+        if not ENG.p: return self._send(503, dict(error=dict(message='no model is loaded. Start the server with --model FILE or call load_model first.', type='unavailable')))
+        prompt = oa_prompt(body.get('messages') or [], model); cid = 'chatcmpl-' + secrets.token_hex(6); now = int(time.time())
+        if body.get('stream'):
+            self.send_response(200); self._cors(); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
+            def chunk(delta, fin=None): self.wfile.write(('data: %s\n\n' % json.dumps(dict(id=cid, object='chat.completion.chunk', created=now, model=model, choices=[dict(index=0, delta=delta, finish_reason=fin)]))).encode()); self.wfile.flush()
+            try:
+                chunk(dict(role='assistant', content=''))
+                ENG.ask(prompt, on_tok=lambda t: chunk(dict(content=t)), fresh=True)
+                chunk({}, 'stop'); self.wfile.write(b'data: [DONE]\n\n'); self.wfile.flush()
+            except Exception: pass
+            return
+        try: text, st = ENG.ask(prompt, fresh=True)
+        except Exception as e: return self._send(500, dict(error=dict(message=str(e))))
+        n = st.get('tokens') or 0
+        self._send(200, dict(id=cid, object='chat.completion', created=now, model=model, choices=[dict(index=0, message=dict(role='assistant', content=text), finish_reason='stop')], usage=dict(prompt_tokens=0, completion_tokens=n, total_tokens=n)))
+def arg(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 def main():
+    global TOKEN
+    if arg('--token'): TOKEN = arg('--token')
+    host = arg('--host', '127.0.0.1')
+    if host not in ('127.0.0.1', 'localhost') and not TOKEN:
+        TOKEN = secrets.token_urlsafe(18); print('Generated access token (needed by remote clients): %s' % TOKEN, file=sys.stderr)
+    if arg('--model'):
+        try: e = ENG.load(os.path.abspath(os.path.expanduser(arg('--model'))) if os.path.exists(os.path.expanduser(arg('--model'))) else os.path.join(MODELS, arg('--model')), int(arg('--ctx', 4096)), int(arg('--cache', 1024)), float(arg('--temp', 0.7)), int(arg('--max-tokens', 512))); print('Loaded model %s' % e.get('model'), file=sys.stderr)
+        except Exception as ex: print('Could not load model: %s' % ex, file=sys.stderr)
     if '--http' in sys.argv:
-        port = int(sys.argv[sys.argv.index('--http') + 1]); srv = http.server.ThreadingHTTPServer(('127.0.0.1', port), H)
-        if '--stdio' not in sys.argv:
-            print('ExpertStream MCP on http://127.0.0.1:%d/mcp (GET /health)' % port, file=sys.stderr); srv.serve_forever(); return
+        port = int(arg('--http')); srv = http.server.ThreadingHTTPServer((host, port), H); srv.daemon_threads = True
+        shown = lan_ips() if host == '0.0.0.0' else [host]
+        for ip in shown:
+            print('ExpertStream MCP  http://%s:%d/mcp   (OpenAI API: http://%s:%d/v1)%s' % (ip, port, ip, port, '   token required' if TOKEN else ''), file=sys.stderr)
+        if '--stdio' not in sys.argv: srv.serve_forever(); return
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
