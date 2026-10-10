@@ -741,7 +741,7 @@ const Dl = {
       if (m.type === 'progress') { if (m.total && j.total !== m.total) { j.total = m.total; } j.done = m.done; j.total = m.total; j.bps = m.bps; j.status = 'downloading'; }
       else if (m.type === 'retry') { j.status = 'retrying'; j.note = 'connection dropped, retry ' + m.n; }
       else if (m.type === 'done') { j.status = 'done'; j.done = j.total = m.size; Lib.meta[j.name] = Object.assign(Lib.meta[j.name] || {}, { size: m.size, done: true }); Lib.saveMeta(); toast(j.file + ' is ready', 'good'); afterSave(j.name); }
-      else if (m.type === 'error') { j.status = 'error'; j.note = m.text; toast('Download failed: ' + m.text, 'bad', 6000); }
+      else if (m.type === 'error') { j.status = 'error'; j.note = friendlyNet(m.text); toast('Download failed. ' + friendlyNet(m.text), 'bad', 9000); }
       else if (m.type === 'cancelled') { j.status = 'paused'; j.done = m.done; }
       else if (m.type === 'copied') { j.status = 'done'; j.done = j.total = m.size; Lib.meta[j.name] = Object.assign(Lib.meta[j.name] || {}, { size: m.size, done: true }); Lib.saveMeta(); toast(j.file + ' added to your library', 'good'); afterSave(j.name); }
       this.emit();
@@ -777,13 +777,15 @@ async function afterSave(name) {
   if (typeof renderModels === 'function' && !$('#models').hidden) renderModels();
 }
 
+const NET_MSG = 'This page cannot reach huggingface.co ("Failed to fetch"). That happens inside sandboxed viewers such as the claude.ai preview, or when offline. Open the site from GitHub Pages in Chrome, or use the built-in demo model, which needs no internet.';
+const friendlyNet = t => /Failed to fetch|NetworkError|Load failed|network/i.test(t) ? NET_MSG : t;
 /* ===== Hugging Face client + model catalog ===== */
 const HF = {
   base: 'https://huggingface.co',
   headers() { const t = store.get('hftoken', ''); return t ? { Authorization: 'Bearer ' + t } : {}; },
   resolve(repo, file) { return `${this.base}/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`; },
   async json(url) {
-    const r = await fetch(url, { headers: this.headers() });
+    let r; try { r = await fetch(url, { headers: this.headers() }); } catch (e) { throw new Error(NET_MSG); }
     if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? 'This repo needs a Hugging Face token (Settings in Models).' : 'Hugging Face answered HTTP ' + r.status);
     return r.json();
   },
@@ -988,7 +990,7 @@ async function checkRemote(repo, file, size, btn) {
     acts.push(h('button', { class: 'btn', onclick: () => s.close() }, 'Close'));
     const s = sheet([...verdictBody(sum, a), h('div', { class: 'row' }, acts)]);
     return { sum, a };
-  } catch (e) { toast('Could not read the model header: ' + e.message, 'bad', 5000); }
+  } catch (e) { toast('Could not read the model header: ' + friendlyNet(e.message), 'bad', 9000); }
   finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
 }
 
@@ -1000,6 +1002,7 @@ function renderModels() {
   $$('#mseg button').forEach(b => b.setAttribute('aria-selected', b.dataset.m === mtab));
   const body = $('#mbody'); body.replaceChildren();
   ({ lib: renderLib, cat: renderCat, hf: renderHF, dev: renderDev, plan: renderPlan }[mtab])(body);
+  if (mtab === 'lib' || mtab === 'cat') { const d = demoCard(); if (d) body.prepend(d); }
 }
 pageHooks.models = renderModels;
 
@@ -1135,6 +1138,7 @@ function renderPlan(body) {
   body.append(h('div', { class: 'row' }, presets.map(([n, p, b, a]) => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => setPlan(p, b, a) }, n))),
     h('div', { class: 'card' }, sl('params', 'Total parameters (billions)', 1, 2500, 1, v => v + 'B'), sl('bits', 'Bits per weight', 1, 8, .1, v => (+v).toFixed(1)), sl('active', 'Parameters used per word (billions)', 1, 400, 1, v => v + 'B'), sl('cache', 'Expert cache in RAM (GB)', .2, 4, .1, v => (+v).toFixed(1) + ' GB')), out);
   calc();
+  body.append(simPanel());
 }
 let lastSig = '';
 Dl.on(() => {
@@ -1143,6 +1147,50 @@ Dl.on(() => {
   if (sig !== lastSig) { lastSig = sig; renderModels(); return; }
   jobs.forEach(j => { if (!j._ui) return; const f = j.total ? j.done / j.total : 0, C = 2 * Math.PI * 19; j._ui.fg.setAttribute('stroke-dashoffset', C * (1 - Math.min(1, f))); j._ui.pct.textContent = Math.round(f * 100) + '%'; const rem = j.bps > 0 && j.total ? (j.total - j.done) / j.bps : 0; j._ui.txt.textContent = `${fmtB(j.done)} / ${fmtB(j.total)}${j.bps ? ' · ' + fmtB(j.bps) + '/s' : ''}${rem ? ' · ' + fmtT(rem) + ' left' : ''}`; });
 });
+
+/* ----- built-in demo model (published next to the page, no internet needed) ----- */
+const Demo = { man: null, async probe() { try { const r = await fetch('demo/manifest.json'); if (r.ok) { this.man = await r.json(); renderModels(); if (typeof chatWelcome === 'function' && !$('#msgs').querySelector('.msg.user')) chatWelcome(); } } catch (e) { } },
+  async load(save) {
+    const man = this.man, prog = h('div', { class: 'bar' }, h('i', { style: 'width:0' })), txt = h('div', { class: 'mono dim' }, '0%');
+    const sh = sheet([h('span', { class: 'eyebrow' }, 'Built-in demo'), h('h2', { style: 'font-size:20px' }, man.name), prog, txt]);
+    try {
+      const parts = []; let got = 0;
+      for (const p of man.parts) { const b = await (await fetch('demo/' + p)).blob(); parts.push(b); got += b.size; prog.firstChild.style.width = (100 * got / man.size) + '%'; txt.textContent = fmtB(got) + ' / ' + fmtB(man.size); }
+      const file = new File(parts, man.name); sh.close();
+      if (save && Lib.supported) { Dl.copy(file); showModelsTab('lib'); } else await loadModel({ file, label: man.name + ' (demo)' });
+    } catch (e) { sh.close(); toast('Could not load the demo: ' + e.message, 'bad', 6000); }
+  } };
+function demoCard() {
+  if (!Demo.man) return null;
+  return h('div', { class: 'mcard active' }, h('div', { class: 'glyph' }, 'SM'), h('div', {}, h('div', { class: 't' }, 'Built-in demo: SmolLM2 135M'), h('div', { class: 'm' }, chip('good', 'no internet needed'), chip('', fmtB(Demo.man.size))), h('p', { class: 'dim', style: 'font-size:13px;margin-top:6px' }, 'Ships with this page. Small and simple, but it proves the engine runs here.')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn sm primary', onclick: () => Demo.load(false) }, 'Run demo'), Lib.supported ? h('button', { class: 'btn sm', onclick: () => Demo.load(true) }, 'Save') : null));
+}
+
+/* ----- 2T simulation: clearly labelled, no real weights ----- */
+function simPanel() {
+  const cv = h('canvas', { style: 'width:100%;height:190px;border-radius:12px;background:#050810;display:block' }), stat = h('div', { class: 'mono', style: 'font-size:13px' }), btn = h('button', { class: 'btn' }, 'Run simulation');
+  const card = h('div', { class: 'card' }, h('span', { class: 'eyebrow' }, 'Simulation, not a real model'), h('h3', {}, 'Watch a 2-trillion-parameter model stream'),
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'No such model exists, so nothing real is computed. This replays the engine\'s method with the planner numbers above: each word picks experts, cached ones are free, the rest are read from flash at 1.75 GB/s. It shows why speed, not memory, is the limit.'), cv, stat, h('div', { class: 'row' }, btn));
+  let run = false;
+  btn.onclick = () => {
+    if (run) { run = false; btn.textContent = 'Run simulation'; return; }
+    run = true; btn.textContent = 'Stop';
+    const L = 60, E = 64, g = cv.getContext('2d'), W = cv.width = cv.clientWidth * 2, H = cv.height = 380, cached = new Uint8Array(L * E), heat = new Float32Array(L * E);
+    const diskGB = plan.params * plan.bits / 8, actGB = plan.active * plan.bits / 8, perExpGB = actGB / (L * 8), cap = Math.max(8, Math.round(plan.cache / Math.max(perExpGB, 1e-6)));
+    let tok = 0, simT = 0, readGB = 0, hits = 0, picks = 0, cc = 0; const fifo = [];
+    const zipf = () => Math.min(E - 1, Math.floor(E * Math.pow(Math.random(), 2.2)));
+    (function step() {
+      if (!run) return;
+      for (let l = 0; l < L; l++) for (let k = 0; k < 8; k++) { const i = l * E + zipf(); picks++; heat[i] = 1; if (cached[i]) hits++; else { readGB += perExpGB; simT += perExpGB / ENV.flashGBs; cached[i] = 1; fifo.push(i); if (fifo.length > cap) cached[fifo.shift()] = 0; } }
+      simT += actGB / 9.8; tok++;
+      g.clearRect(0, 0, W, H); const cw = W / E, ch = H / L;
+      for (let l = 0; l < L; l++) for (let e = 0; e < E; e++) { const i = l * E + e; heat[i] *= .9; g.fillStyle = heat[i] > .15 ? `rgba(242,201,138,${.3 + heat[i] * .7})` : cached[i] ? 'rgba(57,135,229,.55)' : 'rgba(80,100,140,.18)'; g.fillRect(e * cw + .5, l * ch + .5, cw - 1, ch - 1); }
+      stat.textContent = `word ${tok} · simulated time ${fmtT(simT)} · read from flash ${readGB.toFixed(0)} GB · cache hits ${Math.round(100 * hits / picks)}% · ${(tok / simT).toFixed(3)} words/s`;
+      setTimeout(step, 90);
+    })();
+  };
+  return card;
+}
 
 /* ===== Chat ===== */
 const hist = { list: store.get('hist', []), add(e) { this.list.unshift(e); this.list = this.list.slice(0, 80); store.set('hist', this.list); } };
@@ -1170,7 +1218,7 @@ function chatWelcome() {
       const have = items.filter(i => i.complete);
       box.append(h('div', { class: 'empty' }, h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, html: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>' }), h('h3', {}, 'No model is loaded'),
         h('p', {}, have.length ? 'Load one of your saved models, or get a new one.' : 'Download a small model first (138 MB), then come back. It takes a minute.'),
-        h('div', { class: 'row', style: 'justify-content:center' }, have.slice(0, 2).map(it => h('button', { class: 'btn primary', onclick: () => loadModel({ opfs: it.name, label: it.file || it.name }).catch(() => { }) }, 'Load ' + (it.file || it.name).slice(0, 26))), h('button', { class: 'btn' + (have.length ? '' : ' primary'), onclick: () => go('models') }, 'Get a model'))));
+        h('div', { class: 'row', style: 'justify-content:center' }, have.slice(0, 2).map(it => h('button', { class: 'btn primary', onclick: () => loadModel({ opfs: it.name, label: it.file || it.name }).catch(() => { }) }, 'Load ' + (it.file || it.name).slice(0, 26))), Demo.man ? h('button', { class: 'btn primary', onclick: () => Demo.load(false) }, 'Run built-in demo') : null, h('button', { class: 'btn' + (have.length || Demo.man ? '' : ' primary'), onclick: () => go('models') }, 'Get a model'))));
     });
     return;
   }
@@ -1366,7 +1414,7 @@ function renderStatic() {
   $('#t-native').replaceChildren(trow('Flash, 4 readers, cold', '1.71 GB/s'), trow('8 experts from one layer', '28.9 ms'), trow('2-bit kernel, 4× A78', '9.81 GB/s'), trow('Same, plus 4× A55', '2.86 GB/s'), trow('Memory read', '13.8 GB/s'), trow('OLMoE-1B-7B, answers', '≈ 3.6 tok/s'), trow('Import OLMoE (1,024 experts)', '17 s'));
   $('#t-correct').replaceChildren(trow('Weight decoding, 7 formats', 'exact', 'good'), trow('Import vs original file', 'byte-identical', 'good'), trow('Tokenizer vs llama.cpp (OLMoE)', '11/11', 'good'), trow('Tokenizer Qwen / Llama 3 / SmolLM rules', 'matches llama-tokenize', 'good'), trow('Logits vs float64 reference', '~1e-6', 'good'), trow('Top token vs llama.cpp (OLMoE)', '14/15', 'warn'), trow('Qwen3-30B-A3B answers', 'coherent', 'good'), trow('Qwen3-30B logits vs llama.cpp', VERIFY_Q3, VERIFY_Q3.startsWith('not') ? 'warn' : 'warn'), trow('Browser engine vs native', 'same tokens', 'good'));
 }
-const VERIFY_Q3 = 'top-1 7\/8, corr ≥0.996';
+const VERIFY_Q3 = 'top-1 7/8, corr ≥0.996';
 pageHooks.testing = () => { renderStatic(); renderDoctor(); };
 /* history */
 function renderHistory() {
@@ -1420,6 +1468,7 @@ addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.mes
   Lib.list().then(l => { $('#home-lib').textContent = l.filter(i => i.complete).length; }).catch(() => { });
   const nat = await Brain.detectNative();
   if (nat) toast('Connected to the native engine: ' + nat.model, 'good');
+  Demo.probe();
   renderDoctor();
   if (nat) chatWelcome();
 })();

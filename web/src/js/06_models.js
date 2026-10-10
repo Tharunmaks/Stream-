@@ -63,7 +63,7 @@ async function checkRemote(repo, file, size, btn) {
     acts.push(h('button', { class: 'btn', onclick: () => s.close() }, 'Close'));
     const s = sheet([...verdictBody(sum, a), h('div', { class: 'row' }, acts)]);
     return { sum, a };
-  } catch (e) { toast('Could not read the model header: ' + e.message, 'bad', 5000); }
+  } catch (e) { toast('Could not read the model header: ' + friendlyNet(e.message), 'bad', 9000); }
   finally { if (btn) { btn.disabled = false; btn.textContent = orig; } }
 }
 
@@ -75,6 +75,7 @@ function renderModels() {
   $$('#mseg button').forEach(b => b.setAttribute('aria-selected', b.dataset.m === mtab));
   const body = $('#mbody'); body.replaceChildren();
   ({ lib: renderLib, cat: renderCat, hf: renderHF, dev: renderDev, plan: renderPlan }[mtab])(body);
+  if (mtab === 'lib' || mtab === 'cat') { const d = demoCard(); if (d) body.prepend(d); }
 }
 pageHooks.models = renderModels;
 
@@ -210,6 +211,7 @@ function renderPlan(body) {
   body.append(h('div', { class: 'row' }, presets.map(([n, p, b, a]) => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => setPlan(p, b, a) }, n))),
     h('div', { class: 'card' }, sl('params', 'Total parameters (billions)', 1, 2500, 1, v => v + 'B'), sl('bits', 'Bits per weight', 1, 8, .1, v => (+v).toFixed(1)), sl('active', 'Parameters used per word (billions)', 1, 400, 1, v => v + 'B'), sl('cache', 'Expert cache in RAM (GB)', .2, 4, .1, v => (+v).toFixed(1) + ' GB')), out);
   calc();
+  body.append(simPanel());
 }
 let lastSig = '';
 Dl.on(() => {
@@ -218,3 +220,47 @@ Dl.on(() => {
   if (sig !== lastSig) { lastSig = sig; renderModels(); return; }
   jobs.forEach(j => { if (!j._ui) return; const f = j.total ? j.done / j.total : 0, C = 2 * Math.PI * 19; j._ui.fg.setAttribute('stroke-dashoffset', C * (1 - Math.min(1, f))); j._ui.pct.textContent = Math.round(f * 100) + '%'; const rem = j.bps > 0 && j.total ? (j.total - j.done) / j.bps : 0; j._ui.txt.textContent = `${fmtB(j.done)} / ${fmtB(j.total)}${j.bps ? ' · ' + fmtB(j.bps) + '/s' : ''}${rem ? ' · ' + fmtT(rem) + ' left' : ''}`; });
 });
+
+/* ----- built-in demo model (published next to the page, no internet needed) ----- */
+const Demo = { man: null, async probe() { try { const r = await fetch('demo/manifest.json'); if (r.ok) { this.man = await r.json(); renderModels(); if (typeof chatWelcome === 'function' && !$('#msgs').querySelector('.msg.user')) chatWelcome(); } } catch (e) { } },
+  async load(save) {
+    const man = this.man, prog = h('div', { class: 'bar' }, h('i', { style: 'width:0' })), txt = h('div', { class: 'mono dim' }, '0%');
+    const sh = sheet([h('span', { class: 'eyebrow' }, 'Built-in demo'), h('h2', { style: 'font-size:20px' }, man.name), prog, txt]);
+    try {
+      const parts = []; let got = 0;
+      for (const p of man.parts) { const b = await (await fetch('demo/' + p)).blob(); parts.push(b); got += b.size; prog.firstChild.style.width = (100 * got / man.size) + '%'; txt.textContent = fmtB(got) + ' / ' + fmtB(man.size); }
+      const file = new File(parts, man.name); sh.close();
+      if (save && Lib.supported) { Dl.copy(file); showModelsTab('lib'); } else await loadModel({ file, label: man.name + ' (demo)' });
+    } catch (e) { sh.close(); toast('Could not load the demo: ' + e.message, 'bad', 6000); }
+  } };
+function demoCard() {
+  if (!Demo.man) return null;
+  return h('div', { class: 'mcard active' }, h('div', { class: 'glyph' }, 'SM'), h('div', {}, h('div', { class: 't' }, 'Built-in demo: SmolLM2 135M'), h('div', { class: 'm' }, chip('good', 'no internet needed'), chip('', fmtB(Demo.man.size))), h('p', { class: 'dim', style: 'font-size:13px;margin-top:6px' }, 'Ships with this page. Small and simple, but it proves the engine runs here.')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn sm primary', onclick: () => Demo.load(false) }, 'Run demo'), Lib.supported ? h('button', { class: 'btn sm', onclick: () => Demo.load(true) }, 'Save') : null));
+}
+
+/* ----- 2T simulation: clearly labelled, no real weights ----- */
+function simPanel() {
+  const cv = h('canvas', { style: 'width:100%;height:190px;border-radius:12px;background:#050810;display:block' }), stat = h('div', { class: 'mono', style: 'font-size:13px' }), btn = h('button', { class: 'btn' }, 'Run simulation');
+  const card = h('div', { class: 'card' }, h('span', { class: 'eyebrow' }, 'Simulation, not a real model'), h('h3', {}, 'Watch a 2-trillion-parameter model stream'),
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'No such model exists, so nothing real is computed. This replays the engine\'s method with the planner numbers above: each word picks experts, cached ones are free, the rest are read from flash at 1.75 GB/s. It shows why speed, not memory, is the limit.'), cv, stat, h('div', { class: 'row' }, btn));
+  let run = false;
+  btn.onclick = () => {
+    if (run) { run = false; btn.textContent = 'Run simulation'; return; }
+    run = true; btn.textContent = 'Stop';
+    const L = 60, E = 64, g = cv.getContext('2d'), W = cv.width = cv.clientWidth * 2, H = cv.height = 380, cached = new Uint8Array(L * E), heat = new Float32Array(L * E);
+    const diskGB = plan.params * plan.bits / 8, actGB = plan.active * plan.bits / 8, perExpGB = actGB / (L * 8), cap = Math.max(8, Math.round(plan.cache / Math.max(perExpGB, 1e-6)));
+    let tok = 0, simT = 0, readGB = 0, hits = 0, picks = 0, cc = 0; const fifo = [];
+    const zipf = () => Math.min(E - 1, Math.floor(E * Math.pow(Math.random(), 2.2)));
+    (function step() {
+      if (!run) return;
+      for (let l = 0; l < L; l++) for (let k = 0; k < 8; k++) { const i = l * E + zipf(); picks++; heat[i] = 1; if (cached[i]) hits++; else { readGB += perExpGB; simT += perExpGB / ENV.flashGBs; cached[i] = 1; fifo.push(i); if (fifo.length > cap) cached[fifo.shift()] = 0; } }
+      simT += actGB / 9.8; tok++;
+      g.clearRect(0, 0, W, H); const cw = W / E, ch = H / L;
+      for (let l = 0; l < L; l++) for (let e = 0; e < E; e++) { const i = l * E + e; heat[i] *= .9; g.fillStyle = heat[i] > .15 ? `rgba(242,201,138,${.3 + heat[i] * .7})` : cached[i] ? 'rgba(57,135,229,.55)' : 'rgba(80,100,140,.18)'; g.fillRect(e * cw + .5, l * ch + .5, cw - 1, ch - 1); }
+      stat.textContent = `word ${tok} · simulated time ${fmtT(simT)} · read from flash ${readGB.toFixed(0)} GB · cache hits ${Math.round(100 * hits / picks)}% · ${(tok / simT).toFixed(3)} words/s`;
+      setTimeout(step, 90);
+    })();
+  };
+  return card;
+}

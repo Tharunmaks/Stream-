@@ -1,10 +1,12 @@
+const NET_MSG = 'This page cannot reach huggingface.co ("Failed to fetch"). That happens inside sandboxed viewers such as the claude.ai preview, or when offline. Open the site from GitHub Pages in Chrome, or use the built-in demo model, which needs no internet.';
+const friendlyNet = t => /Failed to fetch|NetworkError|Load failed|network/i.test(t) ? NET_MSG : t;
 /* ===== Hugging Face client + model catalog ===== */
 const HF = {
   base: 'https://huggingface.co',
   headers() { const t = store.get('hftoken', ''); return t ? { Authorization: 'Bearer ' + t } : {}; },
   resolve(repo, file) { return `${this.base}/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`; },
   async json(url) {
-    const r = await fetch(url, { headers: this.headers() });
+    let r; try { r = await fetch(url, { headers: this.headers() }); } catch (e) { throw new Error(NET_MSG); }
     if (!r.ok) throw new Error(r.status === 401 || r.status === 403 ? 'This repo needs a Hugging Face token (Settings in Models).' : 'Hugging Face answered HTTP ' + r.status);
     return r.json();
   },

@@ -8,6 +8,7 @@ addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.mes
   Lib.list().then(l => { $('#home-lib').textContent = l.filter(i => i.complete).length; }).catch(() => { });
   const nat = await Brain.detectNative();
   if (nat) toast('Connected to the native engine: ' + nat.model, 'good');
+  Demo.probe();
   renderDoctor();
   if (nat) chatWelcome();
 })();

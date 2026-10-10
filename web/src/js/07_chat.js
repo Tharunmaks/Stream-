@@ -24,7 +24,7 @@ function chatWelcome() {
       const have = items.filter(i => i.complete);
       box.append(h('div', { class: 'empty' }, h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4, html: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>' }), h('h3', {}, 'No model is loaded'),
         h('p', {}, have.length ? 'Load one of your saved models, or get a new one.' : 'Download a small model first (138 MB), then come back. It takes a minute.'),
-        h('div', { class: 'row', style: 'justify-content:center' }, have.slice(0, 2).map(it => h('button', { class: 'btn primary', onclick: () => loadModel({ opfs: it.name, label: it.file || it.name }).catch(() => { }) }, 'Load ' + (it.file || it.name).slice(0, 26))), h('button', { class: 'btn' + (have.length ? '' : ' primary'), onclick: () => go('models') }, 'Get a model'))));
+        h('div', { class: 'row', style: 'justify-content:center' }, have.slice(0, 2).map(it => h('button', { class: 'btn primary', onclick: () => loadModel({ opfs: it.name, label: it.file || it.name }).catch(() => { }) }, 'Load ' + (it.file || it.name).slice(0, 26))), Demo.man ? h('button', { class: 'btn primary', onclick: () => Demo.load(false) }, 'Run built-in demo') : null, h('button', { class: 'btn' + (have.length || Demo.man ? '' : ' primary'), onclick: () => go('models') }, 'Get a model'))));
     });
     return;
   }

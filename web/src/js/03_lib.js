@@ -34,7 +34,7 @@ const Dl = {
       if (m.type === 'progress') { if (m.total && j.total !== m.total) { j.total = m.total; } j.done = m.done; j.total = m.total; j.bps = m.bps; j.status = 'downloading'; }
       else if (m.type === 'retry') { j.status = 'retrying'; j.note = 'connection dropped, retry ' + m.n; }
       else if (m.type === 'done') { j.status = 'done'; j.done = j.total = m.size; Lib.meta[j.name] = Object.assign(Lib.meta[j.name] || {}, { size: m.size, done: true }); Lib.saveMeta(); toast(j.file + ' is ready', 'good'); afterSave(j.name); }
-      else if (m.type === 'error') { j.status = 'error'; j.note = m.text; toast('Download failed: ' + m.text, 'bad', 6000); }
+      else if (m.type === 'error') { j.status = 'error'; j.note = friendlyNet(m.text); toast('Download failed. ' + friendlyNet(m.text), 'bad', 9000); }
       else if (m.type === 'cancelled') { j.status = 'paused'; j.done = m.done; }
       else if (m.type === 'copied') { j.status = 'done'; j.done = j.total = m.size; Lib.meta[j.name] = Object.assign(Lib.meta[j.name] || {}, { size: m.size, done: true }); Lib.saveMeta(); toast(j.file + ' added to your library', 'good'); afterSave(j.name); }
       this.emit();
