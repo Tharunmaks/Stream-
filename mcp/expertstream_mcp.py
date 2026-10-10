@@ -6,7 +6,9 @@ GGUF language models locally through the ExpertStream engine, with no browser.
 
 Transports: MCP over stdio; or --http PORT for streamable HTTP (POST /mcp) and legacy SSE (GET /sse),
 plus an OpenAI-compatible API (POST /v1/chat/completions, model "agent:<id>") and GET /health.
---host 0.0.0.0 shares it on the network (a token is then required); --model FILE loads a model at start.
+Secure by default: HTTP needs a token (auto-created in ~/.expertstream/token, mode 600), loopback servers reject
+foreign Host/Origin headers, bodies are capped, model paths are confined to the models folder, downloads only
+follow Hugging Face hosts. --host 0.0.0.0 shares it on the network (use --cert/--key for TLS); --no-auth is loopback only.
 250+ agent presets (mcp/agents.json) run on the loaded local model.
 Pure standard library. Environment: ES_MODELS (default ~/models), HF_TOKEN, ES_MAX_PARAMS_B (default 250).
 """
@@ -23,6 +25,35 @@ def cfg():
     try: return json.load(open(CFG))
     except Exception: return {}
 def hf_token(): return os.environ.get('HF_TOKEN') or cfg().get('hf_token', '')
+
+
+# ---------------- security helpers ----------------
+RE_REPO = re.compile(r'^[A-Za-z0-9][\w.-]{0,95}/[A-Za-z0-9][\w.-]{0,95}$')
+RE_FILE = re.compile(r'^[\w][\w.\- /]{0,200}\.gguf$')
+RE_HFTOKEN = re.compile(r'^hf_[A-Za-z0-9]{20,200}$')
+ALLOW_ANY_PATH = os.environ.get('ES_ALLOW_ANY_PATH') == '1'
+MAX_BODY = 4 << 20
+def need_repo(r):
+    if not isinstance(r, str) or not RE_REPO.match(r): raise ValueError('repo must look like owner/name')
+    return r
+def need_file(f):
+    if not isinstance(f, str) or not RE_FILE.match(f) or '..' in f or f.startswith('/'): raise ValueError('file must be a plain .gguf name from the repository')
+    return f
+def under(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root + os.sep)
+def safe_model_path(name):
+    p = os.path.expanduser(name); p = p if os.path.isabs(p) else os.path.join(MODELS, p)
+    if not ALLOW_ANY_PATH and not under(p, MODELS): raise ValueError('model files must be inside %s (set ES_ALLOW_ANY_PATH=1 to allow other places)' % MODELS)
+    if not p.lower().endswith('.gguf'): raise ValueError('only .gguf files can be loaded')
+    return p
+class _HFRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        h = urllib.parse.urlparse(newurl)
+        if h.scheme != 'https' or not (h.hostname == 'huggingface.co' or h.hostname.endswith('.huggingface.co') or h.hostname.endswith('.hf.co') or h.hostname == 'hf.co'):
+            raise urllib.error.URLError('refusing to follow a redirect to %s' % h.hostname)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+HFO = urllib.request.build_opener(_HFRedirect())
 
 # ---------------- GGUF header ----------------
 GT = {0:('F32',1,4),1:('F16',1,2),2:('Q4_0',32,18),3:('Q4_1',32,20),6:('Q5_0',32,22),7:('Q5_1',32,24),8:('Q8_0',32,34),9:('Q8_1',32,36),10:('Q2_K',256,84),11:('Q3_K',256,110),12:('Q4_K',256,144),13:('Q5_K',256,176),14:('Q6_K',256,210),15:('Q8_K',256,292),16:('IQ2_XXS',256,66),17:('IQ2_XS',256,74),18:('IQ3_XXS',256,98),19:('IQ1_S',256,50),20:('IQ4_NL',32,18),21:('IQ3_S',256,110),22:('IQ2_S',256,82),23:('IQ4_XS',256,136),24:('I8',1,1),25:('I16',1,2),26:('I32',1,4),27:('I64',1,8),28:('F64',1,8),29:('IQ1_M',256,56),30:('BF16',1,2)}
@@ -93,7 +124,7 @@ def read_header(path_or_url, headers=None):
         n = mb << 20
         if path_or_url.startswith('http'):
             req = urllib.request.Request(path_or_url, headers=dict(headers or {}, Range='bytes=0-%d' % (n - 1)))
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with HFO.open(req, timeout=60) as r:
                 buf = r.read(); cr = r.headers.get('Content-Range'); size = int(cr.split('/')[1]) if cr else len(buf)
         else:
             size = os.path.getsize(path_or_url)
@@ -125,7 +156,7 @@ def hf(url, **kw):
     h = {'User-Agent': 'expertstream-mcp'}
     if hf_token(): h['Authorization'] = 'Bearer ' + hf_token()
     h.update(kw.get('headers', {}))
-    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=60)
+    return HFO.open(urllib.request.Request(url, headers=h), timeout=60)
 def hf_json(url): return json.load(hf(url))
 JOBS = {}
 def download_job(jid, repo, file, dest):
@@ -135,7 +166,7 @@ def download_job(jid, repo, file, dest):
         while True:
             try:
                 req = urllib.request.Request(url, headers={'User-Agent': 'expertstream-mcp', 'Range': 'bytes=%d-' % have, **({'Authorization': 'Bearer ' + hf_token()} if hf_token() else {})})
-                with urllib.request.urlopen(req, timeout=60) as r:
+                with HFO.open(req, timeout=60) as r:
                     cr = r.headers.get('Content-Range'); total = int(cr.split('/')[1]) if cr else int(r.headers.get('Content-Length', 0)) + (have if r.status == 206 else 0)
                     if r.status == 200 and have: have = 0
                     j['total'] = total; t0 = time.time(); b0 = have
@@ -297,11 +328,11 @@ def t_list_models(a):
             except Exception as e: out.append(dict(file=f, error=str(e)))
     return dict(models_dir=MODELS, models=out)
 def t_search(a):
-    q = urllib.parse.quote(a.get('query', '')); n = min(int(a.get('limit', 10)), 25)
+    q = urllib.parse.quote(str(a.get('query', ''))[:100]); n = min(int(a.get('limit', 10)), 25)
     r = hf_json('https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=%d&expand%%5B%%5D=gguf&expand%%5B%%5D=downloads%s' % (n, '&search=' + q if q else ''))
     return [dict(repo=m['id'], arch=(m.get('gguf') or {}).get('architecture'), params=(m.get('gguf') or {}).get('total'), downloads=m.get('downloads'), supported=(m.get('gguf') or {}).get('architecture') in ARCH) for m in r]
 def t_files(a):
-    out = []
+    need_repo(a['repo']); out = []
     def walk(path, d):
         for f in hf_json('https://huggingface.co/api/models/%s/tree/main%s' % (a['repo'], '/' + path if path else '')):
             if f['type'] == 'file' and f['path'].lower().endswith('.gguf'): out.append(dict(file=f['path'], size_gb=round(((f.get('lfs') or {}).get('size') or f.get('size', 0)) / 1e9, 2)))
@@ -309,17 +340,18 @@ def t_files(a):
     walk('', 0); return sorted(out, key=lambda x: x['size_gb'])
 def t_inspect(a):
     if a.get('repo'):
+        need_repo(a['repo']); need_file(a['file'])
         url = 'https://huggingface.co/%s/resolve/main/%s' % (a['repo'], urllib.parse.quote(a['file']))
         s = read_header(url, {'Authorization': 'Bearer ' + hf_token()} if hf_token() else None)
         name = a['file']
     else:
-        p = a['path'] if os.path.isabs(a['path']) else os.path.join(MODELS, a['path']); s = read_header(p); name = p
+        p = safe_model_path(a['path']); s = read_header(p); name = p
     if s['size'] and s['params']:
         pass
     return dict(summary={k: v for k, v in s.items() if k not in ('types',)}, verdict=assess(s, int(a.get('ctx', 1024)), int(a.get('cache_mb', 384)), meminfo().get('MemAvailable'), name))
 def t_plan(a): return plan(float(a['params_b']), float(a.get('bits', 2.5)), float(a['active_b']) if a.get('active_b') else None, float(a.get('cache_gb', 2)))
 def t_download(a):
-    repo, file = a['repo'], a['file']; os.makedirs(MODELS, exist_ok=True)
+    repo, file = need_repo(a['repo']), need_file(a['file']); os.makedirs(MODELS, exist_ok=True)
     try:
         s = read_header('https://huggingface.co/%s/resolve/main/%s' % (repo, urllib.parse.quote(file)), {'Authorization': 'Bearer ' + hf_token()} if hf_token() else None)
         v = assess(s, file_name=file)
@@ -337,7 +369,7 @@ def t_dl_status(a):
     if not j: return dict(error='unknown job', jobs=list(JOBS))
     return dict(j, percent=round(100 * j.get('done', 0) / max(1, j.get('total', 1)), 1))
 def t_load(a):
-    p = a['model'] if os.path.isabs(a['model']) else os.path.join(MODELS, a['model'])
+    p = safe_model_path(a['model'])
     if not os.path.exists(p): raise RuntimeError('model not found: ' + p)
     s = read_header(p); v = assess(s, int(a.get('ctx', 2048)), int(a.get('cache_mb', 1024)), meminfo().get('MemAvailable'), p)
     if not v['runs']: return dict(loaded=False, verdict=v)
@@ -365,12 +397,14 @@ def t_import(a):
     exe = os.path.join(ROOT, 'es_import')
     if not os.access(exe, os.X_OK): raise RuntimeError('es_import not built; run make')
     out = os.path.expanduser(a.get('out') or '~/packs/' + os.path.splitext(os.path.basename(a['gguf']))[0])
-    p = subprocess.run([exe, '-o', out, a['gguf'] if os.path.isabs(a['gguf']) else os.path.join(MODELS, a['gguf'])], capture_output=True, text=True, timeout=3600)
+    if not under(out, os.path.expanduser('~/packs')): raise ValueError('packs must be created inside ~/packs')
+    p = subprocess.run([exe, '-o', out, safe_model_path(a['gguf'])], capture_output=True, text=True, timeout=3600)
     return dict(ok=p.returncode == 0, pack=out, log=(p.stdout + p.stderr)[-800:])
 def t_serve(a):
     exe = os.path.join(ROOT, 'es_serve'); port = int(a.get('port', 8080))
+    if not 1024 <= port <= 65535: raise ValueError('port must be 1024-65535')
     if not os.access(exe, os.X_OK): raise RuntimeError('es_serve not built; run make')
-    m = a['model'] if os.path.isabs(a['model']) else os.path.join(MODELS, a['model'])
+    m = safe_model_path(a['model'])
     subprocess.Popen([exe, '-g', m, '-p', str(port), '-w', os.path.join(ROOT, 'web')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return dict(started=True, url='http://127.0.0.1:%d' % port)
 def oauth_post(path, data, js=False):
@@ -408,6 +442,7 @@ def t_connect_finish(a):
         time.sleep(5)
     return dict(connected=False, pending=True, hint='the user has not approved yet; call again')
 def t_set_token(a):
+    if not RE_HFTOKEN.match(a.get('token', '')): raise ValueError('that does not look like a Hugging Face token (hf_...)')
     os.makedirs(os.path.dirname(CFG), exist_ok=True); c = cfg(); c['hf_token'] = a['token']; json.dump(c, open(CFG, 'w')); os.chmod(CFG, 0o600)
     try: who = hf_json('https://huggingface.co/api/whoami-v2'); return dict(saved=True, user=who.get('name'))
     except Exception as e: return dict(saved=True, warning='token saved but validation failed: %s' % e)
@@ -468,6 +503,22 @@ def handle(req):
 # ---------------- HTTP: MCP (streamable + legacy SSE), OpenAI-compatible API, health ----------------
 import queue, secrets, socket
 TOKEN = os.environ.get('ES_MCP_TOKEN', '')
+TOKEN_FILE = os.path.expanduser('~/.expertstream/token')
+ALLOWED_HOSTS = None      # set in main(): loopback binds only accept loopback Host headers (DNS-rebinding defence)
+EXTRA_ORIGINS = [o for o in os.environ.get('ES_MCP_ORIGINS', '').split(',') if o]
+FAILS = {}                # ip -> [count, first_time]
+def load_token():
+    try: t = open(TOKEN_FILE).read().strip()
+    except Exception: t = ''
+    if len(t) < 24:
+        t = secrets.token_urlsafe(32); os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+        fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, t.encode()); os.close(fd)
+    return t
+def origin_ok(o):
+    if not o: return True
+    if o == 'https://tharunmaks.github.io' or o in EXTRA_ORIGINS: return True
+    u = urllib.parse.urlparse(o)
+    return u.scheme == 'http' and u.hostname in ('127.0.0.1', 'localhost', '::1')
 SESSIONS = {}   # legacy SSE sessions: id -> queue
 def flat(c):
     if isinstance(c, list): return '\n'.join(x.get('text', '') for x in c if isinstance(x, dict))
@@ -491,33 +542,63 @@ def lan_ips():
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
     def log_message(self, *a): pass
+    timeout = 30
     def _cors(self):
-        self.send_header('Access-Control-Allow-Origin', '*'); self.send_header('Access-Control-Allow-Headers', 'content-type, authorization, mcp-session-id, mcp-protocol-version, accept, last-event-id')
+        o = self.headers.get('Origin', '')
+        if o and origin_ok(o): self.send_header('Access-Control-Allow-Origin', o); self.send_header('Vary', 'Origin')
+        self.send_header('X-Content-Type-Options', 'nosniff'); self.send_header('Cache-Control', 'no-store'); self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('Access-Control-Allow-Headers', 'content-type, authorization, mcp-session-id, mcp-protocol-version, accept, last-event-id')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS'); self.send_header('Access-Control-Allow-Private-Network', 'true'); self.send_header('Access-Control-Expose-Headers', 'Mcp-Session-Id')
     def _send(self, code, obj=None, ctype='application/json', extra=None):
         b = b'' if obj is None else (obj if isinstance(obj, bytes) else json.dumps(obj).encode())
         self.send_response(code); self._cors(); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(b)))
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
-    def _auth(self):
+    def _guard(self):
+        """Host and Origin checks that stop other web pages and DNS-rebinding from reaching a local server."""
+        if ALLOWED_HOSTS is not None:
+            host = self.headers.get('Host', '').rsplit(':', 1)[0].strip('[]') if not self.headers.get('Host', '').startswith('[') else '::1'
+            if host not in ALLOWED_HOSTS: self._send(421, dict(error='unexpected Host header')); return False
+        if not origin_ok(self.headers.get('Origin', '')) and urllib.parse.urlparse(self.path).path != '/health':
+            self._send(403, dict(error='origin not allowed')); return False
+        return True
+    def _auth(self, count=True):
         if not TOKEN: return True
+        ip = self.client_address[0]; f = FAILS.get(ip)
+        if f and time.time() - f[1] > 300: FAILS.pop(ip, None); f = None
+        if f and f[0] >= 10: return False
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        got = (self.headers.get('Authorization', '')[7:] if self.headers.get('Authorization', '').startswith('Bearer ') else '') or (q.get('token') or [''])[0]
-        return secrets.compare_digest(got, TOKEN)
-    def do_OPTIONS(self): self.send_response(204); self._cors(); self.end_headers()
-    def do_DELETE(self): self._send(200, {})
+        hdr = self.headers.get('Authorization', '')
+        got = (hdr[7:] if hdr.startswith('Bearer ') else '') or (q.get('token') or [''])[0]
+        if secrets.compare_digest(got.encode(), TOKEN.encode()): FAILS.pop(ip, None); return True
+        if count:
+            f = FAILS.setdefault(ip, [0, time.time()]); f[0] += 1; time.sleep(0.4)
+        return False
+    def _deny(self):
+        ip = self.client_address[0]
+        if FAILS.get(ip, [0])[0] >= 10: return self._send(429, dict(error='too many wrong tokens; wait 5 minutes'))
+        return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
+    def do_OPTIONS(self):
+        if not self._guard(): return
+        self.send_response(204); self._cors(); self.end_headers()
+    def do_DELETE(self):
+        if not self._guard(): return
+        if not self._auth(): return self._deny()
+        self._send(200, {})
     def do_GET(self):
+        if not self._guard(): return
         u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/') or '/'
         if path == '/health':
             info = dict(ok=True, server='expertstream-mcp', version=VERSION, tools=len(TOOLS), agents=AGENTS['count'], max_params_b=MAX_B, auth=bool(TOKEN))
-            if self._auth(): info['device'] = device(); info['loaded'] = ENG.path
+            if self._auth(count=False): info['device'] = device(); info['loaded'] = ENG.path
             return self._send(200, info)
-        if not self._auth(): return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
+        if not self._auth(): return self._deny()
         if path == '/': return self._send(200, ('ExpertStream MCP %s\n\nMCP (streamable HTTP):  POST /mcp\nMCP (legacy SSE):       GET /sse  +  POST /messages\nOpenAI-compatible API:  POST /v1/chat/completions   GET /v1/models\nAgents:                 GET /agents   (model name "agent:<id>")\nHealth:                 GET /health\n' % VERSION).encode(), 'text/plain')
         if path == '/agents': return self._send(200, dict(total=AGENTS['count'], categories=AGENTS['categories'], agents=[agent_brief(a) for a in AGENTS['agents']]))
         if path == '/v1/models': return self._send(200, dict(object='list', data=[dict(id='expertstream', object='model', owned_by='local')] + [dict(id='agent:' + a['id'], object='model', owned_by='expertstream-agents') for a in AGENTS['agents']]))
         if path == '/sse':
-            sid = secrets.token_hex(8); qu = queue.Queue(); SESSIONS[sid] = qu
+            if len(SESSIONS) >= 32: return self._send(503, dict(error='too many open sessions'))
+            sid = secrets.token_hex(16); qu = queue.Queue(); SESSIONS[sid] = qu
             self.send_response(200); self._cors(); self.send_header('Content-Type', 'text/event-stream'); self.send_header('Cache-Control', 'no-cache'); self.end_headers()
             try:
                 self.wfile.write(('event: endpoint\ndata: /messages?session_id=%s\n\n' % sid).encode()); self.wfile.flush()
@@ -531,15 +612,19 @@ class H(http.server.BaseHTTPRequestHandler):
         if path == '/mcp': return self._send(405, dict(error='use POST'))
         self._send(404, dict(error='not found'))
     def _body(self):
-        n = int(self.headers.get('Content-Length', 0)); return json.loads(self.rfile.read(n) or b'{}')
+        n = int(self.headers.get('Content-Length', 0))
+        if n < 0 or n > MAX_BODY: raise OverflowError('body too large')
+        return json.loads(self.rfile.read(n) or b'{}')
     def do_POST(self):
-        if not self._auth(): return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
+        if not self._guard(): return
+        if not self._auth(): return self._deny()
         u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/')
         try: body = self._body()
+        except OverflowError: return self._send(413, dict(error='request too large (limit 4 MB)'))
         except Exception: return self._send(400, dict(error='bad JSON'))
         if path == '/mcp':
             batch = isinstance(body, list); rs = [r for r in (handle(x) for x in (body if batch else [body])) if r]
-            extra = {'Mcp-Session-Id': secrets.token_hex(8)} if not batch and body.get('method') == 'initialize' else {}
+            extra = {'Mcp-Session-Id': secrets.token_hex(16)} if not batch and body.get('method') == 'initialize' else {}
             if not rs: return self._send(202, None, extra=extra)
             return self._send(200, rs if batch else rs[0], extra=extra)
         if path == '/messages':
@@ -570,19 +655,28 @@ class H(http.server.BaseHTTPRequestHandler):
 def arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 def main():
-    global TOKEN
-    if arg('--token'): TOKEN = arg('--token')
-    host = arg('--host', '127.0.0.1')
-    if host not in ('127.0.0.1', 'localhost') and not TOKEN:
-        TOKEN = secrets.token_urlsafe(18); print('Generated access token (needed by remote clients): %s' % TOKEN, file=sys.stderr)
+    global TOKEN, ALLOWED_HOSTS
+    host = arg('--host', '127.0.0.1'); loop = host in ('127.0.0.1', 'localhost', '::1')
+    if arg('--token'):
+        TOKEN = arg('--token')
+        if len(TOKEN) < 16: sys.exit('--token must be at least 16 characters')
+    elif '--no-auth' in sys.argv:
+        if not loop: sys.exit('--no-auth is only allowed on 127.0.0.1')
+        TOKEN = ''
+    elif not TOKEN: TOKEN = load_token()
+    ALLOWED_HOSTS = {'127.0.0.1', 'localhost', '::1'} if loop else None
     if arg('--model'):
-        try: e = ENG.load(os.path.abspath(os.path.expanduser(arg('--model'))) if os.path.exists(os.path.expanduser(arg('--model'))) else os.path.join(MODELS, arg('--model')), int(arg('--ctx', 4096)), int(arg('--cache', 1024)), float(arg('--temp', 0.7)), int(arg('--max-tokens', 512))); print('Loaded model %s' % e.get('model'), file=sys.stderr)
+        try: e = ENG.load(safe_model_path(arg('--model')), int(arg('--ctx', 4096)), int(arg('--cache', 1024)), float(arg('--temp', 0.7)), int(arg('--max-tokens', 512))); print('Loaded model %s' % e.get('model'), file=sys.stderr)
         except Exception as ex: print('Could not load model: %s' % ex, file=sys.stderr)
     if '--http' in sys.argv:
         port = int(arg('--http')); srv = http.server.ThreadingHTTPServer((host, port), H); srv.daemon_threads = True
-        shown = lan_ips() if host == '0.0.0.0' else [host]
-        for ip in shown:
-            print('ExpertStream MCP  http://%s:%d/mcp   (OpenAI API: http://%s:%d/v1)%s' % (ip, port, ip, port, '   token required' if TOKEN else ''), file=sys.stderr)
+        scheme = 'http'
+        if arg('--cert') and arg('--key'):
+            import ssl; ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.minimum_version = ssl.TLSVersion.TLSv1_2; ctx.load_cert_chain(arg('--cert'), arg('--key')); srv.socket = ctx.wrap_socket(srv.socket, server_side=True); scheme = 'https'
+        elif not loop: print('WARNING: plain http on a network. Anyone on it can read the token. Use --cert/--key, a VPN, or an SSH tunnel.', file=sys.stderr)
+        for ip in (lan_ips() if host == '0.0.0.0' else [host]):
+            print('ExpertStream MCP  %s://%s:%d/mcp   (OpenAI API: %s://%s:%d/v1)' % (scheme, ip, port, scheme, ip, port), file=sys.stderr)
+        if TOKEN: print('Access token is in %s%s (send it as "Authorization: Bearer <token>")' % (TOKEN_FILE, '' if TOKEN == load_token() else ' / your --token'), file=sys.stderr)
         if '--stdio' not in sys.argv: srv.serve_forever(); return
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     for line in sys.stdin:

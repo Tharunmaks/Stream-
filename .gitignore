@@ -8,3 +8,13 @@ es_import
 es_chat
 es_serve
 build/
+
+# never commit secrets or models
+.env
+.env.*
+*.pem
+*.key
+*.p12
+token
+.expertstream/
+*.gguf

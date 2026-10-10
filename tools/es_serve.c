@@ -50,7 +50,8 @@ static void reply(int fd, int code, const char *type, const char *body, size_t n
     char h[512];
     int hl = snprintf(h, sizeof h,
                       "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-                      "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                      "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+                      "X-Frame-Options: DENY\r\nCross-Origin-Resource-Policy: same-origin\r\nConnection: close\r\n\r\n",
                       code, code == 200 ? "OK" : code == 404 ? "Not Found" : "Error", type, n);
     send_all(fd, h, (size_t)hl);
     send_all(fd, body, n);
@@ -94,6 +95,24 @@ static void serve_file(int fd, const char *name, const char *type) {
     free(b);
 }
 
+/* Only the local machine's own pages may talk to this server: a web page from another site (or a
+ * DNS-rebinding trick) must not be able to use the model or read its answers. */
+static int local_name(const char *v) {
+    while (*v == ' ') v++;
+    return !strncmp(v, "127.0.0.1", 9) || !strncmp(v, "localhost", 9) || !strncmp(v, "[::1]", 5);
+}
+static int header_ok(const char *req) {
+    const char *h = strcasestr(req, "\r\nhost:");
+    if (!h || !local_name(h + 7)) return 0;
+    const char *o = strcasestr(req, "\r\norigin:");
+    if (o) {
+        o += 9;
+        while (*o == ' ') o++;
+        if (strncmp(o, "http://", 7) || !local_name(o + 7)) return 0;
+    }
+    return 1;
+}
+
 static void *client(void *arg) {
     int fd = (int)(intptr_t)arg;
     enum { REQ_MAX = 1 << 17 };
@@ -121,6 +140,7 @@ static void *client(void *arg) {
         break;
     }
     if (!body) { close(fd); free(req); free(line); return NULL; }
+    if (!header_ok(req)) { reply(fd, 403, "text/plain", "forbidden\n", 10); close(fd); free(req); free(line); return NULL; }
     char method[8] = "", path[256] = "";
     sscanf(req, "%7s %255s", method, path);
     char *q = strchr(path, '?');
