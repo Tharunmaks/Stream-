@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,23 +93,34 @@ typedef struct { uint32_t type; const void *w; int rows, cols; const es_act *a; 
 static mv_job JOBS[MAXJOBS];
 static int NJOBS;
 
+/* Rows are handed out in small chunks from a shared counter, so a slow core
+ * (an A55, or a thread the OS parked) never holds up the others. */
+static _Atomic long NEXT_ROW;
+static long TOTAL_ROWS;
 static void mv_task(int tid, int n, void *arg) {
-    (void)arg;
-    long total = 0;
-    for (int j = 0; j < NJOBS; j++) total += JOBS[j].rows;
-    long lo = total * tid / n, hi = total * (tid + 1) / n, base = 0;
-    for (int j = 0; j < NJOBS; j++) {
-        long a = lo > base ? lo : base, b = hi < base + JOBS[j].rows ? hi : base + JOBS[j].rows;
-        if (a < b)
-            es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(a - base), (int)(b - base),
+    (void)arg; (void)n;
+    const long CH = 16;
+    int j = 0; long base = 0;
+    for (;;) {
+        long c = atomic_fetch_add(&NEXT_ROW, CH);
+        if (c >= TOTAL_ROWS) break;
+        long e = c + CH < TOTAL_ROWS ? c + CH : TOTAL_ROWS;
+        while (c < e) {
+            while (c >= base + JOBS[j].rows) { base += JOBS[j].rows; j++; }   /* chunks only move forward */
+            long b = e < base + JOBS[j].rows ? e : base + JOBS[j].rows;
+            es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base),
                       JOBS[j].a, JOBS[j].y, SCRATCH[tid]);
-        base += JOBS[j].rows;
+            c = b;
+        }
     }
 }
 static void job(const W *w, const es_act *a, float *y) {
     JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, a, y};
 }
 static void run_jobs(void) {
+    TOTAL_ROWS = 0;
+    for (int j = 0; j < NJOBS; j++) TOTAL_ROWS += JOBS[j].rows;
+    atomic_store(&NEXT_ROW, 0);
     if (NT == 1) mv_task(0, 1, NULL); /* no thread pool (browser build) */
     else es_cpool_run(CP, mv_task, NULL);
     NJOBS = 0;

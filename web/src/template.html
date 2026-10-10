@@ -7,6 +7,20 @@
 <title>ExpertStream</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<script>
+/* Use all CPU cores: a tiny service worker adds the cross-origin isolation headers GitHub Pages can't send. */
+(function () {
+  try {
+    if (window.crossOriginIsolated || !window.isSecureContext || !('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+    navigator.serviceWorker.register('coi-sw.js').then(function (reg) {
+      if (navigator.serviceWorker.controller || sessionStorage.getItem('es-coi')) return;
+      var go = function () { if (sessionStorage.getItem('es-coi')) return; sessionStorage.setItem('es-coi', '1'); location.reload(); };
+      navigator.serviceWorker.addEventListener('controllerchange', go);
+      if (reg.active) go();
+    }).catch(function () {});
+  } catch (e) {}
+})();
+</script>
 <style>
 @@STYLE@@
 </style>
@@ -125,6 +139,7 @@
 
 <script id="dl-src" type="text/plain">@@DLWORKER@@</script>
 <script id="engine-src" type="text/plain">@@ENGINE@@</script>
+<script id="engine-mt-src" type="text/plain">@@ENGINE_MT@@</script>
 <script>
 (() => {
 'use strict';

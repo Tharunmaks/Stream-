@@ -7,7 +7,7 @@ async function renderSettings() {
   const box = $('#set-body'); box.replaceChildren();
   box.append(accountCard(() => { if (!$('#settings').hidden) renderSettings(); }));
   // engine defaults
-  box.append(h('div', { class: 'card' }, h('h3', {}, 'Engine defaults'), h('div', { class: 'grid2' }, slider('temp', 'Creativity (temperature)', 0, 1.5, .05, .7, v => v.toFixed(2), '0 = always the most likely word'), slider('max', 'Longest answer (tokens)', 32, 1024, 32, 256, v => v), slider('ctx', 'Chat memory (tokens)', 256, 4096, 256, 1024, v => v, 'applies when a model loads'), slider('cache', 'Expert cache (MB)', 64, 1024, 32, 384, v => v + ' MB', 'applies when a model loads'))));
+  box.append(h('div', { class: 'card' }, h('h3', {}, 'Engine defaults'), h('div', { class: 'grid2' }, slider('temp', 'Creativity (temperature)', 0, 1.5, .05, .7, v => v.toFixed(2), '0 = always the most likely word'), slider('max', 'Longest answer (tokens)', 32, 1024, 32, 256, v => v), slider('ctx', 'Chat memory (tokens)', 256, 4096, 256, 1024, v => v, 'applies when a model loads'), slider('cache', 'Expert cache (MB)', 64, 1024, 32, 384, v => v + ' MB', 'applies when a model loads'), slider('threads', 'CPU cores for the engine', 0, 8, 1, 0, v => v ? String(v) : 'auto', window.crossOriginIsolated ? 'multi-core is available here · applies when a model loads' : 'this page runs on 1 core (multi-core needs the GitHub Pages site)'))));
   // MCP
   const tokOpt = h('input', { type: 'checkbox', id: 'mcp-tok' }), cmdWrap = h('div', { class: 'stack' });
   const drawCmd = () => {

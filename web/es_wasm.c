@@ -32,9 +32,9 @@ static char ERR[512], JSONBUF[1024], PIECE[512];
 static int32_t IDS[4096];
 static int NIDS;
 
-EMSCRIPTEN_KEEPALIVE int esw_init(double size, int ctx, int cache_mb) {
+EMSCRIPTEN_KEEPALIVE int esw_init(double size, int ctx, int cache_mb, int threads) {
     es_gguf_pread = wasm_pread;
-    es_engine_opts o = {.gguf_fd = 3, .gguf_size = (uint64_t)size, .ctx = ctx, .cache_mb = (size_t)cache_mb, .threads = 1};
+    es_engine_opts o = {.gguf_fd = 3, .gguf_size = (uint64_t)size, .ctx = ctx, .cache_mb = (size_t)cache_mb, .threads = threads > 0 ? threads : 1};
     return es_engine_init(&o, ERR, sizeof ERR);
 }
 EMSCRIPTEN_KEEPALIVE const char *esw_error(void) { return ERR; }

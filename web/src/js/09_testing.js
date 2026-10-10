@@ -9,6 +9,7 @@ async function runDoctor() {
   add('Background worker', worker, worker ? 'can start workers' : 'blocked: the page is sandboxed');
   let opfs = false, msg = 'not available'; try { if (navigator.storage && navigator.storage.getDirectory) { const d = await navigator.storage.getDirectory(); const fh = await d.getFileHandle('probe.tmp', { create: true }); await d.removeEntry('probe.tmp'); opfs = true; msg = 'private file storage works'; } } catch (e) { msg = 'blocked: ' + e.message; }
   add('Model storage (OPFS)', opfs, msg);
+  add('Multi-core engine', !!window.crossOriginIsolated, window.crossOriginIsolated ? 'on: the model runs on several CPU cores' : 'off: 1 core (reload once on the GitHub Pages site to turn it on)', !window.crossOriginIsolated);
   const u = await Lib.usage(); if (u) add('Free storage', u.quota - u.used > 3e9, fmtB(u.quota - u.used) + ' available to this site', u.quota - u.used < 3e9);
   let hf = false, hfmsg = ''; try { const c = new AbortController(); setTimeout(() => c.abort(), 6000); const x = await fetch('https://huggingface.co/api/models?limit=1', { signal: c.signal }); hf = x.ok; hfmsg = hf ? 'reachable' : 'HTTP ' + x.status; } catch (e) { hfmsg = 'blocked: this page cannot reach the internet. Open the site in Chrome (not inside another app).'; }
   add('Hugging Face', hf, hfmsg);

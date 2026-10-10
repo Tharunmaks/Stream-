@@ -7,7 +7,11 @@
 
 #include "es_cpu.h"
 
+#if defined(__EMSCRIPTEN__)
+#define SPIN_ITERS 4000   /* browsers: sleep early, other tabs and the page itself need the cores */
+#else
 #define SPIN_ITERS 200000 /* ~50-100 us of polling before sleeping */
+#endif
 
 static inline void cpu_relax(void) {
 #if defined(__aarch64__)

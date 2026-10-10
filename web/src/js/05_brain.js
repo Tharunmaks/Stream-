@@ -22,7 +22,10 @@ const Brain = {
     if (this.loading) return;
     this.close();
     this.loading = true; this.stage = 'starting'; this.emit();
-    const code = document.getElementById('engine-src').textContent;
+    const mtSrc = document.getElementById('engine-mt-src');
+    const mt = window.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined' && mtSrc && mtSrc.textContent.length > 1000 && store.get('threads', 0) !== 1;
+    const threads = mt ? Math.max(1, Math.min(8, store.get('threads', 0) || (navigator.hardwareConcurrency >= 8 ? 4 : Math.max(1, (navigator.hardwareConcurrency || 2) - 2)))) : 1;
+    const code = (mt ? mtSrc : document.getElementById('engine-src')).textContent;
     let w;
     try { w = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))); }
     catch (e) { this.loading = false; this.emit(); throw new Error('This page cannot start the engine worker (' + e.message + '). Open the site in a normal browser tab, not inside another app.'); }
@@ -35,12 +38,12 @@ const Brain = {
         const m = e.data;
         if (m.type === 'ready') {
           clearTimeout(to); this.loading = false; this.ready = true; this.mode = 'web'; this.info = m.info; this.heap = m.heap_mb;
-          this.name = (src.label || m.info.name || 'model'); this.source = src; this.loadMs = m.ms; this.emit(); resolve(m);
+          this.name = (src.label || m.info.name || 'model'); this.source = src; this.loadMs = m.ms; this.threads = m.threads || 1; this.emit(); resolve(m);
         } else if (m.type === 'error') fail(m.text);
         else if (m.type === 'log') this.lastLog = m.text;
         else this.handler && this.handler(m);
       };
-      w.postMessage(Object.assign({ type: 'open', ctx: opt.ctx || store.get('ctx', 1024), cache: opt.cache || store.get('cache', 384) }, src.opfs ? { opfs: src.opfs } : { file: src.file }));
+      w.postMessage(Object.assign({ type: 'open', threads, ctx: opt.ctx || store.get('ctx', 1024), cache: opt.cache || store.get('cache', 384) }, src.opfs ? { opfs: src.opfs } : { file: src.file }));
     });
   },
   close() {

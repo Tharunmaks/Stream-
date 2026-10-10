@@ -23,7 +23,7 @@ async function loadModel(src, opts = {}) {
     const i = m.info;
     sh.el.replaceChildren(h('span', { class: 'eyebrow' }, 'Brain connected'), h('h2', { style: 'font-size:22px' }, i.name || src.label),
       h('div', { class: 'tiles', style: 'grid-template-columns:repeat(2,1fr)' },
-        tile(Math.round(i.core_mb) + ' MB', 'core in memory'), tile((m.ms / 1000).toFixed(1) + ' s', 'load time'),
+        tile(Math.round(i.core_mb) + ' MB', 'core in memory'), tile((Brain.threads || 1) + (Brain.threads > 1 ? ' cores' : ' core'), 'doing the math · loaded in ' + (m.ms / 1000).toFixed(1) + ' s'),
         tile(i.experts ? i.experts + ' experts' : 'dense', i.experts ? i.used + ' used per word' : 'every weight each word'), tile(i.cache_slots ? i.cache_slots + ' slots' : '—', i.cache_slots ? 'expert cache (' + Math.round(i.cache_mb) + ' MB)' : 'no expert cache')),
       h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: () => { sh.close(); go('chat'); } }, 'Chat now'), h('button', { class: 'btn', onclick: () => { sh.close(); go('terminal'); } }, 'Open CLI')));
     toast('Brain connected: ' + (i.name || src.label), 'good');
