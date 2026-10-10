@@ -13,13 +13,14 @@ follow Hugging Face hosts. --host 0.0.0.0 shares it on the network (use --cert/-
 Pure standard library. Environment: ES_MODELS (default ~/models), HF_TOKEN, ES_MAX_PARAMS_B (default 250).
 """
 import json, os, sys, struct, threading, subprocess, time, shutil, urllib.request, urllib.parse, urllib.error, http.server, re
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MODELS = os.path.expanduser(os.environ.get('ES_MODELS', '~/models'))
 MAX_B = float(os.environ.get('ES_MAX_PARAMS_B', '250'))
 CFG = os.path.expanduser('~/.expertstream/config.json')
-VERSION = '2.0.0'
+VERSION = '3.0.0'
 
 def cfg():
     try: return json.load(open(CFG))
@@ -477,15 +478,179 @@ TOOLS += [
  ('run_pipeline', 'Run agents in sequence; each receives the previous agent\'s output (max 8). Example: planner -> python -> test-writer -> code-reviewer.', S(agent_ids=dict(type='array', items=dict(type='string'), description='agent ids in order'), task=P('string', 'the overall task', req=True)), t_pipeline),
  ('agent_council', 'Ask up to 5 agents the same question and merge their answers with the synthesizer agent.', S(task=P('string', 'question or task', req=True), agent_ids=dict(type='array', items=dict(type='string'), description='optional agent ids; default = best 3 matches')), t_council),
 ]
+# ---------------- model builder: create language models from scratch (1k .. 37B parameters) ----------------
+BUILDS = os.path.expanduser(os.environ.get('ES_BUILDS', '~/builds'))
+BJOBS = {}
+MAX_BUILD_B = 37.0
+RULES = [
+ "R1 SIZE: a model must have between 1,000 and 37,000,000,000 parameters. The tools refuse anything outside this range; do not try to work around it.",
+ "R2 HONESTY: report only numbers returned by tools (loss, perplexity, tokens, seconds, parameters). Never invent results, never call a model 'trained' unless a train_model job finished and evaluate_model shows a lower loss than the untrained baseline.",
+ "R3 LABELS: a model made by create_model is a random initialisation. Call it UNTRAINED. A model that has seen few tokens is 'barely trained'. Say what it can and cannot do.",
+ "R4 DATA: train only on text the user wrote, owns, or has a licence to use. prepare_data needs i_have_the_right_to_use_this_data=true and writes a manifest (files, sizes, hashes). Do not scrape or use private data without consent. Never include secrets or personal data.",
+ "R5 ORDER: design_model -> estimate_training -> prepare_data -> train_model -> evaluate_model -> (grow_model -> train_model again) -> export_model -> load_model + generate to test. Do not skip evaluate_model before export_model.",
+ "R6 COST: before a long job, show estimate_training (time, memory, disk) and get the user's OK. Training uses 6*N*D FLOPs: say plainly when a target is too slow for this device and offer smaller models, growth from a small trained model, or running the same checkpoint on stronger hardware.",
+ "R7 SAFETY: never overwrite a user's files; builds live in ~/builds/<name>; check free disk and RAM first; stop jobs with stop_job when asked.",
+ "R8 PROVENANCE: export_model writes a model card (size, data manifest, steps, loss, date, UNTRAINED/trained status). Keep it with the model and quote it when describing the model.",
+ "R9 NO MISUSE: do not build models intended to deceive, harass, or produce malware; refuse and explain.",
+ "R10 REPORT: finish with a short report listing what was built, the real metrics, what the model is good for, and the next step to improve it.",
+]
+def _np():
+    try: import builder as B
+    except Exception as e: raise RuntimeError('builder module failed to load: %s' % e)
+    if B.np is None: raise RuntimeError('NumPy is needed for training. Termux: pkg install python-numpy   PC: pip install numpy')
+    return B
+def _bdir(name):
+    if not re.match(r'^[A-Za-z0-9][\w.-]{0,63}$', str(name)): raise ValueError('name must be letters, digits, - _ . (max 64)')
+    d = os.path.join(BUILDS, name); os.makedirs(d, exist_ok=True); return d
+def _flops():
+    try:
+        B = _np(); a = B.np.random.rand(512, 512).astype('float32'); t = time.time(); n = 0
+        while time.time() - t < 0.4: a @ a; n += 1
+        return 2 * 512 ** 3 * n / (time.time() - t)
+    except Exception: return 5e10
+def _cfg(a, vocab=None):
+    import builder as B
+    if a.get('config'): c = dict(a['config']); c['params'] = B.count_params(c); return c
+    return B.design_config(int(float(a['target_params'])), vocab=int(vocab or a.get('vocab_size', 4096)), ctx=int(a.get('context', 512)))
+def t_rules(a): return dict(rules=RULES, tools=['design_model', 'estimate_training', 'prepare_data', 'train_model', 'job_status', 'stop_job', 'evaluate_model', 'grow_model', 'create_model', 'export_model'], builder_agents=[x['id'] for x in AGENTS['agents'] if x['category'] == 'builder'], limits=dict(min_params=1000, max_params=37_000_000_000))
+def t_design(a):
+    import builder as B; c = _cfg(a)
+    est = B.estimate(c, int(float(a.get('tokens', 20 * c['params']))), flops=_flops(), ram_gb=(meminfo().get('MemAvailable') or 4000) / 1024, disk_free_gb=device()['disk_free_gb'])
+    return dict(config=c, estimate=est, next='estimate_training / prepare_data / create_model')
+def t_estimate(a):
+    import builder as B; c = _cfg(a); fl = float(a.get('flops') or _flops())
+    return B.estimate(c, int(float(a['tokens'])), flops=fl, ram_gb=(meminfo().get('MemAvailable') or 4000) / 1024, disk_free_gb=device()['disk_free_gb'])
+def t_prepare(a):
+    B = _np()
+    if a.get('i_have_the_right_to_use_this_data') is not True: raise ValueError('Rule R4: set i_have_the_right_to_use_this_data=true only for text the user owns or may use.')
+    d = _bdir(a['name']); texts, man = [], []
+    import hashlib
+    for pth in a['paths'][:200]:
+        p = os.path.realpath(os.path.expanduser(pth))
+        if not (under(p, os.path.expanduser('~')) or ALLOW_ANY_PATH): raise ValueError('data must be inside your home folder')
+        files = [os.path.join(r, f) for r, _, fs in os.walk(p) for f in fs] if os.path.isdir(p) else [p]
+        for f in sorted(files)[:5000]:
+            if os.path.getsize(f) > 200 << 20 or os.path.basename(f).startswith('.'): continue
+            try: t = open(f, encoding='utf-8', errors='ignore').read()
+            except Exception: continue
+            if len(t) < 20: continue
+            texts.append(t); man.append(dict(file=f, bytes=len(t.encode('utf-8', 'ignore')), sha256=hashlib.sha256(t.encode('utf-8', 'ignore')).hexdigest()[:16]))
+    text = '\n'.join(texts)
+    if len(text) < 2000: raise ValueError('need at least 2,000 characters of text')
+    tk = B.train_bpe(text[:int(a.get('tokenizer_sample_chars', 2_000_000))], vocab_size=int(a.get('vocab_size', 1024))); tok = B.Tok(tk)
+    ids = B.np.array(tok.encode(text), dtype=B.np.int32); ids = B.np.concatenate([ids, B.np.array([tok.eos], dtype=B.np.int32)])
+    B.np.save(os.path.join(d, 'data.npy'), ids); json.dump(tk, open(os.path.join(d, 'tokenizer.json'), 'w')); json.dump(dict(files=man, chars=len(text)), open(os.path.join(d, 'data_manifest.json'), 'w'), indent=1)
+    ok = tok.decode(tok.encode(text[:2000])) == text[:2000]
+    return dict(build_dir=d, files=len(man), characters=len(text), vocab=len(tk['tokens']), tokens=int(len(ids)), tokens_per_char=round(len(ids) / len(text), 3), tokenizer_roundtrip_exact=ok, next='train_model(name, target_params, steps)')
+def _train_job(jid, B, name, c, steps, bs, T, lr, minutes, resume):
+    j = BJOBS[jid]; d = os.path.join(BUILDS, name); data = B.np.load(os.path.join(d, 'data.npy')).astype('int64'); tk = json.load(open(os.path.join(d, 'tokenizer.json')))
+    n = int(len(data) * 0.95); tr, va = data[:n], data[n:] if len(data) - n > T + 2 else data
+    try:
+        ck = os.path.join(d, 'ckpt.npz')
+        if resume and os.path.exists(ck): P, c0 = B.load_ckpt(ck); c = {k: v for k, v in c0.items() if k != 'tok'}
+        else: P = B.init_params(c, 1)
+        j['baseline'] = B.evaluate(P, c, va, batches=4, B=4, T=min(T, 64)); t0 = time.time()
+        def log(x): j.update(progress=x)
+        r = B.train(P, c, tr, steps, B=bs, T=T, lr=lr, log=log, ckpt=None, stop=lambda: j.get('stop') or time.time() - t0 > minutes * 60)
+        B.save_ckpt(ck, P, c); j['final'] = B.evaluate(P, c, va, batches=6, B=4, T=min(T, 64)); j['train'] = r
+        json.dump(dict(config=c, steps_done=(j.get('progress') or {}).get('step', 0), tokens_seen=(j.get('progress') or {}).get('tokens', 0), baseline=j['baseline'], final=j['final'], trained_at=time.strftime('%Y-%m-%d %H:%M:%S')), open(os.path.join(d, 'train_state.json'), 'w'), indent=1)
+        j['status'] = 'done'
+    except Exception as e: j['status'] = 'error'; j['error'] = '%s: %s' % (type(e).__name__, e)
+def t_train(a):
+    B = _np(); name = a['name']; d = _bdir(name)
+    if not os.path.exists(os.path.join(d, 'data.npy')): raise ValueError('run prepare_data first (Rule R5)')
+    tk = json.load(open(os.path.join(d, 'tokenizer.json'))); resume = bool(a.get('resume')) and os.path.exists(os.path.join(d, 'ckpt.npz'))
+    c = _cfg(a, vocab=len(tk['tokens'])) if (a.get('target_params') or a.get('config')) else None
+    if c is None and not resume: raise ValueError('give target_params (or config), or resume=true')
+    if c: c['vocab'] = len(tk['tokens']); c['params'] = B.count_params(c)
+    n = c['params'] if c else 0; need_gb = 16 * n / 1e9; free_gb = (meminfo().get('MemAvailable') or 4000) / 1024
+    if need_gb > free_gb * 0.8: raise ValueError('training needs about %.1f GB RAM (weights+gradients+Adam) but only %.1f GB is free. Use a smaller model, grow a smaller trained model, or export a checkpoint to stronger hardware (Rule R6).' % (need_gb, free_gb))
+    bs, T, steps = int(a.get('batch_size', 16)), int(a.get('seq_len', 64)), int(a.get('steps', 300))
+    jid = 'tr%d' % (len(BJOBS) + 1); BJOBS[jid] = dict(status='running', name=name, params=n, started=time.time())
+    threading.Thread(target=_train_job, args=(jid, B, name, c, steps, bs, T, float(a.get('lr', 3e-3)), float(a.get('max_minutes', 20)), resume), daemon=True).start()
+    return dict(started=True, job=jid, params=n, ram_needed_gb=round(need_gb, 2), next='job_status(job) until done, then evaluate_model')
+def t_job(a):
+    j = BJOBS.get(a['job'])
+    if not j: return dict(error='unknown job', jobs=list(BJOBS))
+    return {k: v for k, v in j.items() if k != 'stop'} | dict(elapsed_s=round(time.time() - j.get('started', time.time()), 1))
+def t_stop(a):
+    j = BJOBS.get(a['job']); 
+    if j: j['stop'] = True
+    return dict(stopping=bool(j))
+def _load(name):
+    B = _np(); d = os.path.join(BUILDS, name); P, c = B.load_ckpt(os.path.join(d, 'ckpt.npz')); c = {k: v for k, v in c.items() if k != 'tok'}; return B, d, P, c
+def t_eval(a):
+    B, d, P, c = _load(a['name']); tk = json.load(open(os.path.join(d, 'tokenizer.json'))); tok = B.Tok(tk); data = B.np.load(os.path.join(d, 'data.npy')).astype('int64'); va = data[int(len(data) * 0.95):]
+    va = va if len(va) > 130 else data; ev = B.evaluate(P, c, va, batches=8, B=4, T=min(64, c['ctx']))
+    st = json.load(open(os.path.join(d, 'train_state.json'))) if os.path.exists(os.path.join(d, 'train_state.json')) else {}
+    base = (st.get('baseline') or {}).get('loss'); samples = [B.generate(P, c, tok, p, 40, 0.7, seed=i)[:160] for i, p in list(enumerate(a.get('prompts') or ['The', 'In the']))[:3]]
+    return dict(params=B.count_params(c), heldout_loss=round(ev['loss'], 4), perplexity=round(ev['perplexity'], 2), untrained_baseline_loss=base, improved=(base is not None and ev['loss'] < base - 0.05), tokens_seen=st.get('tokens_seen'), samples=samples)
+def t_grow(a):
+    B, d, P, c = _load(a['name']); new = _bdir(a['new_name']); nl = int(a['new_layers'])
+    if nl <= c['layers']: raise ValueError('new_layers must exceed %d' % c['layers'])
+    Q, nc = B.grow_depth(P, c, nl); nc['params'] = B.count_params(nc)
+    if nc['params'] > MAX_BUILD_B * 1e9: raise ValueError('grown model would exceed 37B parameters')
+    ids = B.np.random.default_rng(0).integers(0, c['vocab'], (1, 16)); diff = float(B.np.abs(B.forward(P, c, ids)[0] - B.forward(Q, nc, ids)[0]).max())
+    B.save_ckpt(os.path.join(new, 'ckpt.npz'), Q, nc)
+    for f in ('tokenizer.json', 'data.npy', 'data_manifest.json'):
+        if os.path.exists(os.path.join(d, f)): shutil.copy(os.path.join(d, f), new)
+    return dict(new_params=nc['params'], layers=nc['layers'], max_logit_change=diff, function_preserved=diff < 1e-4, next='train_model(new_name, resume=true) so the new layers learn')
+def t_create(a):
+    B = _np(); c = _cfg(a, vocab=int(a.get('vocab_size', 32000)))
+    if c['params'] > MAX_BUILD_B * 1e9: raise ValueError('over 37B')
+    dtype = a.get('dtype', 'f16'); sz = c['params'] * (2 if dtype == 'f16' else 4); free = shutil.disk_usage(MODELS if os.path.isdir(MODELS) else os.path.expanduser('~')).free
+    if sz * 1.05 > free: raise ValueError('needs %.1f GB of free disk, only %.1f GB free (Rule R7)' % (sz / 1e9, free / 1e9))
+    name = a['name']; _bdir(name); path = os.path.join(MODELS, name + '.gguf'); os.makedirs(MODELS, exist_ok=True)
+    if os.path.exists(path) and not a.get('overwrite'): raise ValueError('%s exists (Rule R7); choose another name' % path)
+    tk = B_tok(c['vocab']); size = __import__('builder').write_gguf(path, c, tk, None, dtype, name)
+    json.dump(dict(config=c, status='UNTRAINED random initialisation', created=time.strftime('%Y-%m-%d %H:%M:%S')), open(os.path.join(BUILDS, name, 'card.json'), 'w'), indent=1)
+    return dict(path=path, params=c['params'], size_gb=round(size / 1e9, 2), status='UNTRAINED (random weights). It loads and runs but outputs noise until trained.', next='load_model, or prepare_data + train_model on a smaller proxy then grow_model')
+def B_tok(vocab):
+    import builder as B; tk = B.train_bpe('abcdefghijklmnopqrstuvwxyz ' * 40, vocab_size=300); tk['tokens'] = tk['tokens'][:-1] + ['<|endoftext|>']; return tk
+def t_export(a):
+    B, d, P, c = _load(a['name']); st = json.load(open(os.path.join(d, 'train_state.json'))) if os.path.exists(os.path.join(d, 'train_state.json')) else {}
+    dtype = a.get('dtype', 'f16'); tk = json.load(open(os.path.join(d, 'tokenizer.json'))); path = os.path.join(MODELS, a['name'] + '.gguf'); os.makedirs(MODELS, exist_ok=True)
+    if os.path.exists(path) and not a.get('overwrite'): raise ValueError('%s exists (Rule R7)' % path)
+    trained = bool(st.get('steps_done')); size = B.write_gguf(path, c, tk, P, dtype, a['name'])
+    card = '# %s\n\n- parameters: %s\n- status: %s\n- tokens seen: %s\n- baseline loss: %s -> final loss: %s\n- architecture: llama-style, %d layers, dim %d, %d heads, context %d\n- data manifest: %s\n- built with ExpertStream Builder on %s\n' % (a['name'], f"{B.count_params(c):,}", 'TRAINED' if trained else 'UNTRAINED (random)', st.get('tokens_seen'), (st.get('baseline') or {}).get('loss'), (st.get('final') or {}).get('loss'), c['layers'], c['dim'], c['heads'], c['ctx'], os.path.join(d, 'data_manifest.json'), time.strftime('%Y-%m-%d'))
+    open(os.path.join(d, 'MODEL_CARD.md'), 'w').write(card)
+    return dict(path=path, size_mb=round(size / 1e6, 2), trained=trained, model_card=os.path.join(d, 'MODEL_CARD.md'), next='load_model(%s.gguf) then generate (use raw=true for a base model)' % a['name'])
+def t_workflow(a):
+    n = float(a.get('target_params', 5e6)); nm = a.get('name', 'my-model')
+    if not 1000 <= n <= 37e9: raise ValueError('target must be 1e3..37e9 (Rule R1)')
+    steps = [dict(agent='model-architect', tool='design_model', args=dict(target_params=n)), dict(agent='build-safety-reviewer', tool='builder_rules', note='read the rules and confirm data rights'),
+             dict(agent='data-curator', tool='prepare_data', args=dict(name=nm, paths=['<user text files>'], vocab_size=1024, i_have_the_right_to_use_this_data='<true only with consent>')),
+             dict(agent='training-engineer', tool='train_model', args=dict(name=nm, target_params=min(n, 2e7), steps=500)), dict(agent='model-evaluator', tool='evaluate_model', args=dict(name=nm))]
+    if n > 2e7: steps += [dict(agent='model-scaler', tool='grow_model', args=dict(name=nm, new_name=nm + '-big', new_layers='<more layers>')), dict(agent='training-engineer', tool='train_model', args=dict(name=nm + '-big', resume=True))]
+    steps += [dict(agent='model-exporter', tool='export_model', args=dict(name=nm)), dict(agent='build-lead', tool='load_model + generate', note='test it and write the R10 report')]
+    return dict(goal=a.get('goal', ''), target_params=n, steps=steps, rules='call builder_rules; follow R1-R10', honesty=('Training cost ~ 6 x params x tokens FLOPs. For %.2g params at the Chinchilla ratio that is %.2g FLOPs; use estimate_training for this device.' % (n, 6 * n * 20 * n)))
+TOOLS += [
+ ('builder_rules', 'READ FIRST. The rules (R1-R10) an AI must follow when creating a language model from scratch with these tools: size limits 1,000 to 37 billion parameters, honesty about training, data rights, order of steps, reporting.', S(), t_rules),
+ ('build_model_workflow', 'Step-by-step build plan for a target size, naming the builder agent and tool call for every step.', S(target_params=P('number', 'parameters, 1e3..3.7e10', req=True), name=P('string', 'build name'), goal=P('string', 'what the model is for')), t_workflow),
+ ('design_model', 'Design a Llama-style architecture (layers, width, heads, FFN, vocab) for a parameter target between 1,000 and 37 billion, with memory/time estimates for this device.', S(target_params=P('number', 'target parameters', req=True), vocab_size=P('integer', 'default 4096'), context=P('integer', 'default 512'), tokens=P('number', 'training tokens to estimate for')), t_design),
+ ('estimate_training', 'Estimate training time, RAM and disk (6*N*D FLOPs) for a model size and token budget on this device.', S(target_params=P('number', 'parameters'), tokens=P('number', 'training tokens', req=True), flops=P('number', 'override measured FLOP/s')), t_estimate),
+ ('prepare_data', 'Build a training set from text files you have the right to use: trains a byte-level BPE tokenizer, tokenizes, writes a data manifest. Requires i_have_the_right_to_use_this_data=true.', S(name=P('string', 'build name', req=True), paths=dict(type='array', items=dict(type='string'), description='text files or folders inside your home'), vocab_size=P('integer', 'default 1024'), i_have_the_right_to_use_this_data=P('boolean', 'must be true', req=True)), t_prepare),
+ ('train_model', 'Train a model from scratch (real backprop + Adam, runs in the background). Needs NumPy and prepare_data first. Poll with job_status.', S(name=P('string', 'build name', req=True), target_params=P('number', 'size, or use resume'), steps=P('integer', 'default 300'), batch_size=P('integer', 'default 16'), seq_len=P('integer', 'default 64'), lr=P('number', 'default 0.003'), max_minutes=P('number', 'stop after this long, default 20'), resume=P('boolean', 'continue from the checkpoint')), t_train),
+ ('job_status', 'Progress of a training job: step, loss, tokens, seconds, final metrics.', S(job=P('string', 'job id', req=True)), t_job),
+ ('stop_job', 'Stop a running training job (a checkpoint is saved).', S(job=P('string', 'job id', req=True)), t_stop),
+ ('evaluate_model', 'Held-out loss, perplexity, improvement over the untrained baseline, and sample generations.', S(name=P('string', 'build name', req=True), prompts=dict(type='array', items=dict(type='string'))), t_eval),
+ ('grow_model', 'Make a deeper model from a trained one without changing its answers (function-preserving), then continue training it. The practical path to larger models.', S(name=P('string', 'trained build', req=True), new_name=P('string', 'name of the grown build', req=True), new_layers=P('integer', 'total layers, more than now', req=True)), t_grow),
+ ('create_model', 'Create a randomly initialised model of any size from 1,000 up to 37 billion parameters as a loadable GGUF (streamed to disk; checks free space). It is UNTRAINED.', S(target_params=P('number', 'parameters', req=True), name=P('string', 'file name', req=True), dtype=P('string', 'f16 or f32'), vocab_size=P('integer', 'default 32000'), overwrite=P('boolean', 'replace existing')), t_create),
+ ('export_model', 'Export a trained checkpoint to GGUF in the models folder with a model card; load it with load_model.', S(name=P('string', 'build name', req=True), dtype=P('string', 'f16 or f32'), overwrite=P('boolean', 'replace existing')), t_export),
+]
+
 TOOLMAP = {n: f for n, d, s, f in TOOLS}
 
 # ---------------- JSON-RPC ----------------
 def handle(req):
     m, i = req.get('method'), req.get('id'); params = req.get('params') or {}
     if m == 'initialize':
-        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False), prompts=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models.' % MAX_B))
+        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False), prompts=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models. To CREATE a model from scratch (1 thousand to 37 billion parameters) call builder_rules first and follow rules R1-R10.' % MAX_B))
     if m == 'ping': return dict(jsonrpc='2.0', id=i, result={})
-    if m == 'prompts/list': return dict(jsonrpc='2.0', id=i, result=dict(prompts=[dict(name=a['id'], title=a['name'], description=a['description'], arguments=[dict(name='task', description='what you want this agent to do', required=True)]) for a in AGENTS['agents']]))
+    if m == 'prompts/list': return dict(jsonrpc='2.0', id=i, result=dict(prompts=[dict(name='build-a-model', title='Build a language model from scratch', description='Rules and workflow for creating a model with the builder tools (1k to 37B parameters)', arguments=[dict(name='goal', description='what the model is for and its size', required=True)])] + [dict(name=a['id'], title=a['name'], description=a['description'], arguments=[dict(name='task', description='what you want this agent to do', required=True)]) for a in AGENTS['agents']]))
+    if m == 'prompts/get' and params.get('name') == 'build-a-model':
+        g = (params.get('arguments') or {}).get('goal', '')
+        return dict(jsonrpc='2.0', id=i, result=dict(description='Build a model from scratch', messages=[dict(role='user', content=dict(type='text', text='You are the Build Lead. Goal: ' + g + '\n\nYou MUST follow these rules:\n' + '\n'.join(RULES) + '\n\nStart by calling builder_rules, then build_model_workflow, then follow the workflow with the other builder agents (list_agents category=builder). Ask the user before long jobs.'))]))
     if m == 'prompts/get':
         a = AGENT_BY_ID.get(params.get('name'))
         if not a: return dict(jsonrpc='2.0', id=i, error=dict(code=-32602, message='unknown prompt'))

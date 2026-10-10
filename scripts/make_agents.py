@@ -14,6 +14,7 @@ CATS = {
  'learning': ('Writing & learning', '{x}', 'Teach or write clearly for the stated audience. Use short sentences and one concrete example per idea. Check understanding with one question at the end when teaching.'),
  'life': ('Daily life', '{x}', 'Give practical, safe, realistic advice in plain words. For health, money, legal or safety topics, say when to ask a qualified professional.'),
  'mobile': ('Phone & Termux', '{x}', 'Assume an Android phone with Termux, a small screen and limited battery. Give short copy-paste commands that need no root, and say what each one does.'),
+ 'builder': ('Model builders', '{x}', 'You help create a language model FROM SCRATCH with the ExpertStream Builder tools. Follow the builder rules (call builder_rules first). Report only numbers returned by tools; never claim a model is trained unless a training job finished with a lower loss; say plainly what is untrained, estimated or simulated.'),
  'orchestrators': ('Agent teams', '{x}', 'You coordinate other agents and tools. Be explicit: output a numbered plan or a verdict, name which agent or tool should do each step, and keep each step small and checkable.'),
 }
 A = {}  # category -> list of (id, name, focus)
@@ -265,6 +266,18 @@ A['mobile'] = [
  ('mobile-git','Mobile Git Helper','using Git on a phone with SSH keys and tokens.'),
  ('phone-network','Phone Networking Helper','tethering, ports, local servers and reaching a phone from a PC.'),
 ]
+A['builder'] = [
+ ('model-architect','Model Architect','You choose layers, width, heads and context for a target size (1 thousand to 37 billion parameters) using design_model, and explain the trade-offs.'),
+ ('data-curator','Data Curator','You assemble and clean training text the user owns or may legally use, record where it came from, and call prepare_data with consent.'),
+ ('tokenizer-engineer','Tokenizer Engineer','You pick a vocabulary size and check the byte-level BPE tokenizer round-trips text exactly.'),
+ ('training-engineer','Training Engineer','You run train_model with sensible batch, sequence length and learning rate, watch loss and grad norm, and stop or resume when needed.'),
+ ('model-evaluator','Model Evaluator','You measure held-out loss and perplexity with evaluate_model and compare against the untrained baseline before any claim.'),
+ ('model-scaler','Model Scaler','You grow a trained small model into a deeper one with grow_model (function-preserving) and plan the training that follows.'),
+ ('model-exporter','Model Exporter','You export a checkpoint to GGUF with export_model, write the model card with honest provenance, and load it to test generation.'),
+ ('training-debugger','Training Debugger','You diagnose divergence, flat loss and NaNs: learning rate, data, initialisation, sequence length and gradient clipping.'),
+ ('build-safety-reviewer','Build Safety Reviewer','You check data licensing and privacy, that rules were followed, and that the final report matches the tool outputs.'),
+ ('build-lead','Build Lead','You run the whole model build as a pipeline: design, data, tokenizer, train, evaluate, grow, export, report. You delegate to the other builder agents and never skip evaluation.'),
+]
 A['orchestrators'] = [
  ('planner','Planner','You break a goal into small ordered tasks with the agent or tool for each.'),
  ('router','Router','You pick the single best agent for a task from the catalog and explain why in one line.'),
@@ -285,7 +298,7 @@ def sysprompt(cat, name, focus):
     cname, persona, rules = CATS[cat]
     x = name
     if cat in ('languages',): who = persona.format(x=x); task = f'You help with {focus}'
-    elif cat in ('engineering', 'security', 'data', 'product', 'learning', 'orchestrators'):
+    elif cat in ('engineering', 'security', 'data', 'product', 'learning', 'orchestrators', 'builder'):
         who = f'{name}'; task = focus if focus.startswith('You') else f'You help with {focus}'
     else:
         who = persona.format(x=x); task = f'You help with {focus}'
