@@ -9,6 +9,7 @@
  *
  * Listens on 127.0.0.1 only, so other devices on the network can't use it.
  *
+ *   ./es_serve -g ~/models/model.gguf      straight from a GGUF, no import
  *   ./es_serve -m ~/packs/olmoe            then open http://127.0.0.1:8080
  *   ./es_serve -m ~/packs/olmoe -- -C 512  extra options go to es_chat
  */
@@ -154,16 +155,17 @@ static void *client(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    const char *pack = NULL;
+    const char *pack = NULL, *flag = "-m";
     int port = 8080, ai = 1;
     for (; ai < argc; ai++) {
-        if (!strcmp(argv[ai], "-m") && ai + 1 < argc) pack = argv[++ai];
+        if (!strcmp(argv[ai], "-m") && ai + 1 < argc) { pack = argv[++ai]; flag = "-m"; }
+        else if (!strcmp(argv[ai], "-g") && ai + 1 < argc) { pack = argv[++ai]; flag = "-g"; }
         else if (!strcmp(argv[ai], "-p") && ai + 1 < argc) port = atoi(argv[++ai]);
         else if (!strcmp(argv[ai], "-w") && ai + 1 < argc) snprintf(g_web, sizeof g_web, "%s", argv[++ai]);
         else if (!strcmp(argv[ai], "--")) { ai++; break; }
-        else { fprintf(stderr, "usage: es_serve -m PACKDIR [-p port=8080] [-w webdir] [-- es_chat options]\n"); return 2; }
+        else { fprintf(stderr, "usage: es_serve (-m PACKDIR | -g FILE.gguf) [-p port=8080] [-w webdir] [-- es_chat options]\n"); return 2; }
     }
-    if (!pack) { fprintf(stderr, "usage: es_serve -m PACKDIR [-p port=8080] [-w webdir] [-- es_chat options]\n"); return 2; }
+    if (!pack) { fprintf(stderr, "usage: es_serve (-m PACKDIR | -g FILE.gguf) [-p port=8080] [-w webdir] [-- es_chat options]\n"); return 2; }
 
     /* es_chat and web/ live next to this binary */
     char self[PATH_MAX], dir[PATH_MAX], chat[PATH_MAX + 16];
@@ -185,7 +187,7 @@ int main(int argc, char **argv) {
         close(from[0]);
         char *args[64];
         int k = 0;
-        args[k++] = chat; args[k++] = "-m"; args[k++] = (char *)pack; args[k++] = "-J";
+        args[k++] = chat; args[k++] = (char *)flag; args[k++] = (char *)pack; args[k++] = "-J";
         args[k++] = "-n"; args[k++] = "512";   /* room for code answers; later options override */
         for (int i = ai; i < argc && k < 62; i++) args[k++] = argv[i];
         args[k] = NULL;
