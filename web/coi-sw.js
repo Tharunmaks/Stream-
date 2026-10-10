@@ -15,7 +15,7 @@ self.addEventListener('fetch', (e) => {
     h.set('Referrer-Policy', 'no-referrer');
     h.set('Cross-Origin-Resource-Policy', 'same-origin');
     h.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=(), clipboard-read=(), interest-cohort=()');
-    h.set('Content-Security-Policy', "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-Eu57U32kC6G4T3baE6E/SaehzkDdqiilNciFvGJAkH8=' 'sha256-baYLxS6Hmzht3ZobfOr6s+8JZ2+hFg0x04iWBn0BhT0='; worker-src 'self' blob:; style-src 'unsafe-inline'; font-src data:; img-src 'self' data: blob: https://*.huggingface.co https://*.hf.co; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co http://127.0.0.1:* http://localhost:* http://*:8765; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; manifest-src 'none'; media-src 'none'; frame-ancestors 'none'");
+    h.set('Content-Security-Policy', "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' 'sha256-Eu57U32kC6G4T3baE6E/SaehzkDdqiilNciFvGJAkH8=' 'sha256-a8POfpvIQnBDpNWDNEQ1H+2TGl5vsqsbwr3Fpawjijc='; worker-src 'self' blob:; style-src 'unsafe-inline'; font-src data:; img-src 'self' data: blob: https://*.huggingface.co https://*.hf.co; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.trycloudflare.com https://*.lhr.life http://127.0.0.1:* http://localhost:* http://*:8765; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; manifest-src 'none'; media-src 'none'; frame-ancestors 'none'");
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
   }).catch(() => fetch(r)));
 });

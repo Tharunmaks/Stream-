@@ -9,6 +9,7 @@ plus an OpenAI-compatible API (POST /v1/chat/completions, model "agent:<id>") an
 Secure by default: HTTP needs a token (auto-created in ~/.expertstream/token, mode 600), loopback servers reject
 foreign Host/Origin headers, bodies are capped, model paths are confined to the models folder, downloads only
 follow Hugging Face hosts. --host 0.0.0.0 shares it on the network (use --cert/--key for TLS); --no-auth is loopback only.
+--public opens a free https address (cloudflared or ssh) and prints a connector URL for apps that want a URL instead of a config file; --public-url https://your.domain does the same for a domain/proxy you own.
 250+ agent presets (mcp/agents.json) run on the loaded local model.
 Pure standard library. Environment: ES_MODELS (default ~/models), HF_TOKEN, ES_MAX_PARAMS_B (default 250).
 """
@@ -734,6 +735,17 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(code); self._cors(); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(b)))
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
+    def _path_token(self):
+        """Connector-style URLs carry the secret in the path: https://host/s/<token>/mcp (apps that only accept a URL)."""
+        self._pathauth = False
+        if self.path.startswith('/s/'):
+            parts = self.path.split('/', 3)
+            tok = parts[2] if len(parts) > 2 else ''
+            if TOKEN and secrets.compare_digest(tok.encode(), TOKEN.encode()):
+                self._pathauth = True; self.path = '/' + (parts[3] if len(parts) > 3 else '')
+            else:
+                ip = self.client_address[0]; f = FAILS.setdefault(ip, [0, time.time()]); f[0] += 1; time.sleep(0.4)
+                self.path = '/__bad_token__'
     def _guard(self):
         """Host and Origin checks that stop other web pages and DNS-rebinding from reaching a local server."""
         if ALLOWED_HOSTS is not None:
@@ -743,7 +755,7 @@ class H(http.server.BaseHTTPRequestHandler):
             self._send(403, dict(error='origin not allowed')); return False
         return True
     def _auth(self, count=True):
-        if not TOKEN: return True
+        if not TOKEN or getattr(self, '_pathauth', False): return True
         ip = self.client_address[0]; f = FAILS.get(ip)
         if f and time.time() - f[1] > 300: FAILS.pop(ip, None); f = None
         if f and f[0] >= 10: return False
@@ -759,19 +771,23 @@ class H(http.server.BaseHTTPRequestHandler):
         if FAILS.get(ip, [0])[0] >= 10: return self._send(429, dict(error='too many wrong tokens; wait 5 minutes'))
         return self._send(401, dict(error='missing or wrong token (Authorization: Bearer <token>)'))
     def do_OPTIONS(self):
+        self._path_token()
         if not self._guard(): return
         self.send_response(204); self._cors(); self.end_headers()
     def do_DELETE(self):
+        self._path_token()
         if not self._guard(): return
         if not self._auth(): return self._deny()
         self._send(200, {})
     def do_GET(self):
+        self._path_token()
         if not self._guard(): return
         u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/') or '/'
         if path == '/health':
             info = dict(ok=True, server='expertstream-mcp', version=VERSION, tools=len(TOOLS), agents=AGENTS['count'], max_params_b=MAX_B, auth=bool(TOKEN))
             if self._auth(count=False): info['device'] = device(); info['loaded'] = ENG.path
             return self._send(200, info)
+        if path.startswith('/.well-known/'): return self._send(404, dict(error='no OAuth here; the secret is in the connector URL'))
         if not self._auth(): return self._deny()
         if path == '/': return self._send(200, ('ExpertStream MCP %s\n\nMCP (streamable HTTP):  POST /mcp\nMCP (legacy SSE):       GET /sse  +  POST /messages\nOpenAI-compatible API:  POST /v1/chat/completions   GET /v1/models\nAgents:                 GET /agents   (model name "agent:<id>")\nHealth:                 GET /health\n' % VERSION).encode(), 'text/plain')
         if path == '/agents': return self._send(200, dict(total=AGENTS['count'], categories=AGENTS['categories'], agents=[agent_brief(a) for a in AGENTS['agents']]))
@@ -790,12 +806,14 @@ class H(http.server.BaseHTTPRequestHandler):
             finally: SESSIONS.pop(sid, None)
             return
         if path == '/mcp': return self._send(405, dict(error='use POST'))
+        if path.startswith('/.well-known/'): return self._send(404, dict(error='no OAuth here; the secret is in the connector URL'))
         self._send(404, dict(error='not found'))
     def _body(self):
         n = int(self.headers.get('Content-Length', 0))
         if n < 0 or n > MAX_BODY: raise OverflowError('body too large')
         return json.loads(self.rfile.read(n) or b'{}')
     def do_POST(self):
+        self._path_token()
         if not self._guard(): return
         if not self._auth(): return self._deny()
         u = urllib.parse.urlparse(self.path); path = u.path.rstrip('/')
@@ -832,6 +850,19 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception as e: return self._send(500, dict(error=dict(message=str(e))))
         n = st.get('tokens') or 0
         self._send(200, dict(id=cid, object='chat.completion', created=now, model=model, choices=[dict(index=0, message=dict(role='assistant', content=text), finish_reason='stop')], usage=dict(prompt_tokens=0, completion_tokens=n, total_tokens=n)))
+def start_tunnel(port, ready):
+    """Open a public HTTPS address for this server (needed by apps that want a domain, not a config file)."""
+    def reader(proc, rx):
+        for line in proc.stderr if rx[1] else proc.stdout:
+            m = re.search(rx[0], line)
+            if m: ready(m.group(0)); return
+    tries = []
+    if shutil.which('cloudflared'): tries.append((['cloudflared', 'tunnel', '--url', 'http://127.0.0.1:%d' % port, '--no-autoupdate'], (r'https://[a-z0-9-]+\.trycloudflare\.com', True)))
+    if shutil.which('ssh'): tries.append((['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-R', '80:127.0.0.1:%d' % port, 'nokey@localhost.run'], (r'https://[a-z0-9]+\.lhr\.life', False)))
+    if not tries: raise RuntimeError('no tunnel tool found. Termux: pkg install cloudflared   PC: install cloudflared (free) or use ssh')
+    cmd, rx = tries[0]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT if not rx[1] else subprocess.PIPE, text=True)
+    threading.Thread(target=reader, args=(proc, rx), daemon=True).start(); return proc
 def arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 def main():
@@ -844,7 +875,11 @@ def main():
         if not loop: sys.exit('--no-auth is only allowed on 127.0.0.1')
         TOKEN = ''
     elif not TOKEN: TOKEN = load_token()
-    ALLOWED_HOSTS = {'127.0.0.1', 'localhost', '::1'} if loop else None
+    public = '--public' in sys.argv or arg('--public-url')
+    if public:
+        if not re.match(r'^[A-Za-z0-9_-]{16,}$', TOKEN or ''): TOKEN = load_token() if not TOKEN else TOKEN
+        if not re.match(r'^[A-Za-z0-9_-]{16,}$', TOKEN): sys.exit('--public needs a token of letters, digits, - and _ (16+ characters)')
+    ALLOWED_HOSTS = None if (public or not loop) else {'127.0.0.1', 'localhost', '::1'}
     if arg('--model'):
         try: e = ENG.load(safe_model_path(arg('--model')), int(arg('--ctx', 4096)), int(arg('--cache', 1024)), float(arg('--temp', 0.7)), int(arg('--max-tokens', 512))); print('Loaded model %s' % e.get('model'), file=sys.stderr)
         except Exception as ex: print('Could not load model: %s' % ex, file=sys.stderr)
@@ -857,8 +892,18 @@ def main():
         for ip in (lan_ips() if host == '0.0.0.0' else [host]):
             print('ExpertStream MCP  %s://%s:%d/mcp   (OpenAI API: %s://%s:%d/v1)' % (scheme, ip, port, scheme, ip, port), file=sys.stderr)
         if TOKEN: print('Access token is in %s%s (send it as "Authorization: Bearer <token>")' % (TOKEN_FILE, '' if TOKEN == load_token() else ' / your --token'), file=sys.stderr)
+        def show(base):
+            base = base.rstrip('/')
+            print('\n  PASTE THIS INTO YOUR AI APP (custom connector / MCP server URL):\n    %s/s/%s/mcp\n  OpenAI-compatible base URL:\n    %s/s/%s/v1\n  Keep it private: the link contains your access token.\n' % (base, TOKEN, base, TOKEN), file=sys.stderr)
+        if arg('--public-url'): show(arg('--public-url'))
+        elif '--public' in sys.argv:
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try: start_tunnel(port, show)
+            except Exception as ex: sys.exit('Could not open a public address: %s' % ex)
+            if '--stdio' not in sys.argv:
+                while True: time.sleep(3600)
         if '--stdio' not in sys.argv: srv.serve_forever(); return
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        if '--public' not in sys.argv: threading.Thread(target=srv.serve_forever, daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
         if not line: continue

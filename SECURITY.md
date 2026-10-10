@@ -25,6 +25,8 @@ Include steps to reproduce. We aim to answer within a few days.
 
 **Native app server (`es_serve`)**: binds 127.0.0.1 only and rejects foreign `Host` and `Origin` headers.
 
+- `--public` links carry the secret in the URL path (apps only accept a URL). Treat the whole link as a password; delete `~/.expertstream/token` to rotate. Public mode refuses connections without the secret and locks out guessers.
+
 ## Things to know
 - Anyone who has your MCP token can use your model. Keep it private; delete the token file to rotate it.
 - Model files are data, but a malicious GGUF could try to crash the engine; load files you trust.

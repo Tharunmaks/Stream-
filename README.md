@@ -21,6 +21,12 @@ curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstr
 website's Settings). 24 tools: search/download/inspect/load/run models up to 250B parameters, plus
 251 ready-made agents (`mcp/agents.json`, rebuilt by `scripts/make_agents.py`) that run on the loaded
 local model: `list_agents`, `recommend_agents`, `run_agent`, `run_pipeline`, `agent_council`.
+**Apps that ask for a URL (Claude app, ChatGPT, mobile AI apps):** run
+`python3 mcp/expertstream_mcp.py --http 8765 --public --model FILE.gguf`. It opens a free https address
+(cloudflared: `pkg install cloudflared`, or ssh) and prints `https://<address>/s/<secret>/mcp`: paste that single link
+into the app's "add connector / MCP server" box. The secret is inside the link, so keep it private. With your own
+domain or proxy use `--public-url https://your.domain`.
+
 Remote mode: `python3 mcp/expertstream_mcp.py --http 8765 --host 0.0.0.0 --model FILE.gguf` serves MCP
 (`/mcp`, legacy `/sse`) and an OpenAI-compatible API (`/v1/chat/completions`, model `agent:<id>`) with a
 token, so a phone's coding AI can use a PC's models and the other way round.

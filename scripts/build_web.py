@@ -23,7 +23,7 @@ import hashlib, base64
 page = page.replace('@@FONTS@@', rd('web/src/fonts.css'))
 hashes = ["'sha256-" + base64.b64encode(hashlib.sha256(m.encode('utf-8')).digest()).decode() + "'" for m in re.findall(r'<script>(.*?)</script>', page, re.S)]
 CSP = "; ".join(["default-src 'none'", "script-src 'self' 'wasm-unsafe-eval' " + ' '.join(hashes), "worker-src 'self' blob:", "style-src 'unsafe-inline'", "font-src data:",
-  "img-src 'self' data: blob: https://*.huggingface.co https://*.hf.co", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co http://127.0.0.1:* http://localhost:* http://*:8765",
+  "img-src 'self' data: blob: https://*.huggingface.co https://*.hf.co", "connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.trycloudflare.com https://*.lhr.life http://127.0.0.1:* http://localhost:* http://*:8765",
   "base-uri 'none'", "form-action 'none'", "object-src 'none'", "frame-src 'none'", "manifest-src 'none'", "media-src 'none'"])
 assert '"' not in CSP
 page = page.replace('@@CSP@@', CSP)
