@@ -27,6 +27,7 @@ typedef struct {
     int         lookahead;   /* 1 = predict the next layer's experts and load them while computing */
     int         warm;        /* 1 = preload the experts this model used most last time */
     int         io_threads;  /* parallel expert readers (0 = 4) */
+    int         spec;        /* Turbo: guess up to this many next tokens from the text so far and check them together (-1 = default 7, 0 = off) */
 } es_engine_opts;
 
 typedef struct {
@@ -38,7 +39,7 @@ typedef struct {
 typedef struct {
     int prompt_tokens, gen_tokens, ctx_reset;
     double prompt_s, gen_s, hit_pct, flash_mb, wait_s;
-    unsigned long long pf_issued, pf_used, skipped;
+    unsigned long long pf_issued, pf_used, skipped, spec_steps, spec_accepted;
 } es_turn_stats;
 
 /* 0 on success, else writes a message to err */

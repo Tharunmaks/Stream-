@@ -90,7 +90,7 @@ static es_cpool *CP;
 static int NT;
 static float *SCRATCH[ES_MAX_CPUS];
 
-typedef struct { uint32_t type; const void *w; int rows, cols; const es_act *a; float *y; } mv_job;
+typedef struct { uint32_t type; const void *w; int rows, cols; const es_act *a; float *y; int nb; size_t ys; } mv_job;
 static mv_job JOBS[MAXJOBS];
 static int NJOBS;
 
@@ -109,14 +109,19 @@ static void mv_task(int tid, int n, void *arg) {
         while (c < e) {
             while (c >= base + JOBS[j].rows) { base += JOBS[j].rows; j++; }   /* chunks only move forward */
             long b = e < base + JOBS[j].rows ? e : base + JOBS[j].rows;
-            es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base),
-                      JOBS[j].a, JOBS[j].y, SCRATCH[tid]);
+            /* nb > 1: several activations share this chunk of weight rows, so the weights are read from memory once */
+            for (int q = 0; q < JOBS[j].nb; q++)
+                es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base),
+                          JOBS[j].a + q, JOBS[j].y + (size_t)q * JOBS[j].ys, SCRATCH[tid]);
             c = b;
         }
     }
 }
 static void job(const W *w, const es_act *a, float *y) {
-    JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, a, y};
+    JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, a, y, 1, 0};
+}
+static void jobn(const W *w, const es_act *acts, float *y, size_t ystride, int nb) {
+    JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, acts, y, nb, ystride};
 }
 static void run_jobs(void) {
     TOTAL_ROWS = 0;
@@ -573,34 +578,113 @@ static void forward(int32_t tok, int pos, int want_logits) {
     run_jobs();
 }
 
+
+/* ================= batched forward (prompt reading and speculative verification) =================
+ * N tokens go through the model together: every weight matrix is read from memory once for all N
+ * (dense models; MoE models keep the one-token path). */
+#define BMAX 16
+static int BATCH_OK;
+static float *BX, *BXN, *BQ, *BK, *BV, *BATTN, *BTMP, *BGU, *BH, *BLOG;
+static es_block_q8_K *BQ8; static size_t BQ8STR;
+static es_act BACT[BMAX];
+static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
+    const int n = M.n_embd, hd = M.head_dim, kvd = M.n_head_kv * hd, qd_ = M.n_head * hd;
+    for (int i = 0; i < N; i++) es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)toks[i], BX + (size_t)i * n, n);
+#define PREP(src, cols, i) es_act_prepare(&BACT[i], (src), (cols), (cols) % 256 ? NULL : BQ8 + (size_t)(i) * BQ8STR)
+    for (int l = 0; l < M.n_layer; l++) {
+        layer *L = &M.L[l];
+        es_act_arena_reset();
+        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); PREP(BXN + (size_t)i * n, n, i); }
+        jobn(&L->q, BACT, BQ, (size_t)qd_, N); jobn(&L->k, BACT, BK, (size_t)kvd, N); jobn(&L->v, BACT, BV, (size_t)kvd, N);
+        run_jobs();
+        for (int i = 0; i < N; i++) {
+            float *q = BQ + (size_t)i * qd_, *k = BK + (size_t)i * kvd, *v = BV + (size_t)i * kvd;
+            if (L->bq.data) {
+                for (int j = 0; j < qd_; j++) q[j] += ((const float *)L->bq.data)[j];
+                for (int j = 0; j < kvd; j++) { k[j] += ((const float *)L->bk.data)[j]; v[j] += ((const float *)L->bv.data)[j]; }
+            }
+            if (L->q_norm.data) {
+                if (L->q_norm.cols == n) rmsnorm(q, q, L->q_norm.data, M.n_head * hd, M.eps);
+                else for (int h = 0; h < M.n_head; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm.data, hd, M.eps);
+            }
+            if (L->k_norm.data) {
+                if (L->k_norm.cols == kvd && kvd != hd) rmsnorm(k, k, L->k_norm.data, kvd, M.eps);
+                else for (int h = 0; h < M.n_head_kv; h++) rmsnorm(k + h * hd, k + h * hd, L->k_norm.data, hd, M.eps);
+            }
+            rope(q, M.n_head, hd, pos0 + i); rope(k, M.n_head_kv, hd, pos0 + i);
+            memcpy(KC + ((size_t)l * M.ctx + pos0 + i) * kvd, k, sizeof(float) * (size_t)kvd);
+            memcpy(VC + ((size_t)l * M.ctx + pos0 + i) * kvd, v, sizeof(float) * (size_t)kvd);
+        }
+        for (int i = 0; i < N; i++) {   /* causal: token i sees positions <= pos0 + i, all already written */
+            memcpy(Q, BQ + (size_t)i * qd_, sizeof(float) * (size_t)qd_);
+            att_arg aa = {l, pos0 + i};
+            if (NT == 1) att_task(0, 1, &aa); else es_cpool_run(CP, att_task, &aa);
+            memcpy(BATTN + (size_t)i * qd_, ATT, sizeof(float) * (size_t)qd_);
+        }
+        es_act_arena_reset();
+        for (int i = 0; i < N; i++) PREP(BATTN + (size_t)i * qd_, qd_, i);
+        jobn(&L->o, BACT, BTMP, (size_t)n, N); run_jobs();
+        for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+        es_act_arena_reset();
+        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); PREP(BXN + (size_t)i * n, n, i); }
+        const int ff = L->ffn_gate.rows;
+        jobn(&L->ffn_gate, BACT, BGU, (size_t)2 * ff, N); jobn(&L->ffn_up, BACT, BGU + ff, (size_t)2 * ff, N); run_jobs();
+        for (int i = 0; i < N; i++) { const float *g = BGU + (size_t)i * 2 * ff; float *h = BH + (size_t)i * ff; for (int j = 0; j < ff; j++) h[j] = g[j] / (1.0f + expf(-g[j])) * g[ff + j]; }
+        es_act_arena_reset();
+        for (int i = 0; i < N; i++) PREP(BH + (size_t)i * ff, ff, i);
+        jobn(&L->ffn_down, BACT, BTMP, (size_t)n, N); run_jobs();
+        for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+    }
+    if (logits_from >= N) return;
+    es_act_arena_reset();
+    const int cnt = N - logits_from;
+    for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(logits_from + j) * n, M.output_norm.data, n, M.eps); PREP(BXN + (size_t)j * n, n, j); }
+    jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt); run_jobs();
+#undef PREP
+}
+
 /* ---------------- sampling ---------------- */
 static uint64_t RNG = 42;
-static int sample(float temp, int top_k, float top_p) {
+/* the k largest logits, sorted: one pass over the vocabulary, insertion only when a value beats the current k-th */
+static int topk_select(const float *lg, int nv, int k, int *idx) {
+    int m = 0;
+    for (int i = 0; i < nv; i++) {
+        const float v = lg[i];
+        if (m == k && v <= lg[idx[m - 1]]) continue;
+        int j = m < k ? m++ : m - 1;
+        while (j > 0 && lg[idx[j - 1]] < v) { idx[j] = idx[j - 1]; j--; }
+        idx[j] = i;
+    }
+    return m;
+}
+static int S_IDX[1 << 18]; static float S_PR[1 << 18]; static int S_KEEP; static float S_CUM;
+/* the distribution sample() draws from: temperature, top-k, then the smallest set whose mass reaches top-p */
+static void build_dist(const float *lg, float temp, int top_k, float top_p) {
     const int nv = M.n_vocab;
-    if (temp <= 0) {
-        int best = 0;
-        for (int i = 1; i < nv; i++) if (LOGITS[i] > LOGITS[best]) best = i;
-        return best;
-    }
-    static int idx[1 << 18];
-    static float pr[1 << 18];
-    int n = 0;
-    for (int i = 0; i < nv; i++) idx[n++] = i;
     if (top_k <= 0 || top_k > nv) top_k = nv;
-    /* partial selection sort for the top_k logits */
-    for (int i = 0; i < top_k; i++) {
-        int b = i;
-        for (int j = i + 1; j < n; j++) if (LOGITS[idx[j]] > LOGITS[idx[b]]) b = j;
-        int t = idx[i]; idx[i] = idx[b]; idx[b] = t;
-    }
-    float mx = LOGITS[idx[0]], sum = 0;
-    for (int i = 0; i < top_k; i++) { pr[i] = expf((LOGITS[idx[i]] - mx) / temp); sum += pr[i]; }
-    float cum = 0;
-    int keep = top_k;
-    for (int i = 0; i < top_k; i++) { pr[i] /= sum; cum += pr[i]; if (cum >= top_p) { keep = i + 1; break; } }
-    float r = (float)((es_rng_next(&RNG) >> 11) * (1.0 / 9007199254740992.0)) * cum, acc = 0;
-    for (int i = 0; i < keep; i++) { acc += pr[i]; if (r <= acc) return idx[i]; }
-    return idx[keep - 1];
+    const int n = topk_select(lg, nv, top_k, S_IDX);
+    float mx = lg[S_IDX[0]], sum = 0;
+    for (int i = 0; i < n; i++) { S_PR[i] = expf((lg[S_IDX[i]] - mx) / temp); sum += S_PR[i]; }
+    float cum = 0; int keep = n;
+    for (int i = 0; i < n; i++) { S_PR[i] /= sum; cum += S_PR[i]; if (cum >= top_p) { keep = i + 1; break; } }
+    S_KEEP = keep; S_CUM = cum;
+}
+static float dist_prob(int tok) {
+    for (int i = 0; i < S_KEEP; i++) if (S_IDX[i] == tok) return S_PR[i] / S_CUM;
+    return 0.0f;
+}
+static float rng_unit(void) { return (float)((es_rng_next(&RNG) >> 11) * (1.0 / 9007199254740992.0)); }
+static int argmax_of(const float *lg) {
+    int best = 0;
+    for (int i = 1; i < M.n_vocab; i++) if (lg[i] > lg[best]) best = i;
+    return best;
+}
+static int sample(float temp, int top_k, float top_p) {
+    if (temp <= 0) return argmax_of(LOGITS);
+    build_dist(LOGITS, temp, top_k, top_p);
+    float r = rng_unit() * S_CUM, acc = 0;
+    for (int i = 0; i < S_KEEP; i++) { acc += S_PR[i]; if (r <= acc) return S_IDX[i]; }
+    return S_IDX[S_KEEP - 1];
 }
 
 /* ---------------- prompt formatting ---------------- */
@@ -625,6 +709,10 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
 
 /* ---------------- public API ---------------- */
 static int POS, FIRST = 1, GEN, MAX_NEW = 256, TOP_K = 40, DONE;
+static int32_t *HIST;                /* every token of the conversation, by position */
+static int SPEC_MAX = 7;             /* longest guess per step (0 = off) */
+static int32_t ACCQ[BMAX + 1]; static int ACCP[BMAX + 1], ACCN, ACCI;
+static unsigned long long STAT_SPEC_STEPS, STAT_SPEC_OK;
 static float TEMP = 0.7f, TOP_P = 0.9f;
 static es_engine_info INFO;
 static es_turn_stats ST;
@@ -642,6 +730,7 @@ void es_engine_turn_stats(es_turn_stats *s) {
     s->hit_pct = 100.0 * hits / (hits + miss ? hits + miss : 1);
     s->flash_mb = STAT_READ_MB - R0;
     s->wait_s = STAT_WAIT_S - W0;
+    s->spec_steps = STAT_SPEC_STEPS; s->spec_accepted = STAT_SPEC_OK;
 #ifndef __EMSCRIPTEN__
     s->pf_issued = STAT_PF_ISSUED; s->pf_used = STAT_PF_USED; s->skipped = STAT_SKIPPED;
 #endif
@@ -828,6 +917,22 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     es_act_arena_init(sizeof(es_blk_q80) * ((size_t)(n + qd + 2 * ffmax * MAXK + 4096) / 32 + 64));
     Q8A = malloc(sizeof(es_block_q8_K) * (size_t)(n / 256 + 1 + qd / 256 + 1));
     Q8H = malloc(sizeof(es_block_q8_K) * (size_t)((ffmax / 256 + 1) * MAXK + qd / 256 + 1));
+    HIST = calloc((size_t)M.ctx + 64, sizeof(int32_t));
+    { const char *ev = getenv("ES_SPEC"); SPEC_MAX = ev ? atoi(ev) : (o->spec == -2 ? 0 : o->spec > 0 ? o->spec : 7); }
+    BATCH_OK = !any_moe && !getenv("ES_NO_BATCH");
+    if (BATCH_OK) {
+        for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe || M.L[l].sh_gate.data) BATCH_OK = 0;
+        const int ffm = M.L[0].ffn_gate.rows > 0 ? M.L[0].ffn_gate.rows : ffmax;
+        int mx = n > qd ? n : qd; if (ffm > mx) mx = ffm;
+        BQ8STR = (size_t)(mx / 256 + 2);
+        BQ8 = malloc(sizeof(es_block_q8_K) * BQ8STR * BMAX);
+        BX = malloc(sizeof(float) * (size_t)n * BMAX); BXN = malloc(sizeof(float) * (size_t)n * BMAX); BTMP = malloc(sizeof(float) * (size_t)n * BMAX);
+        BQ = malloc(sizeof(float) * (size_t)qd * BMAX); BATTN = malloc(sizeof(float) * (size_t)qd * BMAX);
+        BK = malloc(sizeof(float) * (size_t)kvd * BMAX); BV = malloc(sizeof(float) * (size_t)kvd * BMAX);
+        BGU = malloc(sizeof(float) * 2 * (size_t)ffm * BMAX); BH = malloc(sizeof(float) * (size_t)ffm * BMAX);
+        BLOG = malloc(sizeof(float) * (size_t)M.n_vocab * BMAX);
+        es_act_arena_init(sizeof(es_blk_q80) * ((size_t)BMAX * (mx + 64) / 32 + 4096));
+    }
     size_t kv_bytes = sizeof(float) * (size_t)M.n_layer * M.ctx * kvd;
     KC = malloc(kv_bytes);
     VC = malloc(kv_bytes);
@@ -867,6 +972,17 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
     H0 = STAT_HITS; M0 = STAT_MISS; R0 = STAT_READ_MB; W0 = STAT_WAIT_S;
     if (progress) progress(0, nt, ud);   /* ids are ready: report them before the slow part */
     uint64_t tp = es_now_ns();
+    for (int i = 0; i < nt; i++) HIST[POS + i] = toks[i];
+    ACCN = ACCI = 0;
+    if (BATCH_OK) {
+        for (int i = 0; i < nt; i += BMAX) {
+            const int cnt = nt - i < BMAX ? nt - i : BMAX, last = i + cnt == nt;
+            forward_n(toks + i, cnt, POS, last ? cnt - 1 : cnt);
+            POS += cnt;
+            if (last) memcpy(LOGITS, BLOG, sizeof(float) * (size_t)M.n_vocab);
+            if (progress) progress(i + cnt, nt, ud);
+        }
+    } else
     for (int i = 0; i < nt; i++) {
         TRACE_TOKEN = POS;
         forward(toks[i], POS++, i == nt - 1);
@@ -881,15 +997,85 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
     return nt;
 }
 
+/* Turbo: guess the next tokens by finding the latest earlier place where the last few tokens occurred and
+ * copying what followed ("prompt lookup"). All guesses are checked in ONE batched pass, so the weights are read
+ * once for several tokens. A wrong guess costs nothing but a little compute; the output is the same as without it
+ * (exactly, when temperature is 0). */
+static double SPEC_T1; static int SPEC_N1;      /* measured seconds per token of a plain step */
+static int SPEC_COOL, SPEC_BACKOFF = 8;   /* after a useless guess, stop guessing for a while (grows while guesses keep failing) */
+static int draft_tokens(int32_t *out, int max) {
+    const int len = POS + 1;   /* HIST[POS] is the token about to be emitted */
+    if (SPEC_COOL > 0) { SPEC_COOL--; return 0; }
+    if (SPEC_N1 < 4) return 0;   /* learn the plain speed first */
+    for (int g = 5; g >= 3; g--) {
+        if (len < g + 1) continue;
+        const int32_t *suf = HIST + len - g;
+        for (int j = len - g - 1; j >= 0; j--) {
+            int ok = 1;
+            for (int t = 0; t < g; t++) if (HIST[j + t] != suf[t]) { ok = 0; break; }
+            if (!ok) continue;
+            int n = 0;
+            const int lim = g >= 5 ? max : g == 4 ? (max < 5 ? max : 5) : (max < 3 ? max : 3);   /* longer match, bolder guess */
+            while (n < lim && j + g + n < len) { out[n] = HIST[j + g + n]; n++; }
+            if (n > 0) return n;
+        }
+    }
+    return 0;
+}
+
+static int emit_piece(int tok, int tokpos, char *buf, int cap) {
+    if (es_tok_is_eog(T, tok) || (tok == USER_TOK && USER_TOK >= 0)) { POS = tokpos; DONE = 1; return -1; }
+    GEN++;
+    return es_tok_piece(T, tok, 0, buf, cap);
+}
+
 int es_engine_next(char *buf, int cap) {
+    if (ACCI < ACCN) {                              /* tokens accepted by an earlier check */
+        if (GEN >= MAX_NEW) { DONE = 1; return -1; }
+        const int k = ACCI++;
+        return emit_piece(ACCQ[k], ACCP[k], buf, cap);
+    }
     if (DONE || GEN >= MAX_NEW || POS >= M.ctx) { DONE = 1; return -1; }
     int next = sample(TEMP, TOP_K, TOP_P);
     if (es_tok_is_eog(T, next) || (next == USER_TOK && USER_TOK >= 0)) { DONE = 1; return -1; }
-    int pl = es_tok_piece(T, next, 0, buf, cap);
-    TRACE_TOKEN = POS;
-    forward(next, POS++, 1);
+    HIST[POS] = next;
+    int32_t draft[BMAX];
+    int nd = 0;
+    if (BATCH_OK && SPEC_MAX > 0 && POS + SPEC_MAX + 2 < M.ctx) nd = draft_tokens(draft, SPEC_MAX < BMAX - 1 ? SPEC_MAX : BMAX - 1);
+    if (nd == 0) {
+        int pl = es_tok_piece(T, next, 0, buf, cap);
+        TRACE_TOKEN = POS;
+        const uint64_t t0 = es_now_ns();
+        forward(next, POS++, 1);
+        const double dt = (es_now_ns() - t0) / 1e9;
+        SPEC_T1 = SPEC_N1 == 0 ? dt : 0.8 * SPEC_T1 + 0.2 * dt; if (SPEC_N1 < 1000) SPEC_N1++;
+        GEN++;
+        return pl;
+    }
+    int32_t batch[BMAX];
+    batch[0] = next;
+    for (int i = 0; i < nd; i++) batch[i + 1] = draft[i];
+    const uint64_t ts0 = es_now_ns();
+    forward_n(batch, nd + 1, POS, 0);
+    const double tstep = (es_now_ns() - ts0) / 1e9;
+    int m = 0;
+    for (; m < nd; m++) {                           /* does the model agree with guess m+1? */
+        float *row = BLOG + (size_t)m * M.n_vocab;
+        if (TEMP <= 0) { if (argmax_of(row) != draft[m]) break; }
+        else {
+            build_dist(row, TEMP, TOP_K, TOP_P);
+            if (rng_unit() >= dist_prob(draft[m])) { row[draft[m]] = -INFINITY; break; }   /* next draw excludes the rejected guess */
+        }
+    }
+    memcpy(LOGITS, BLOG + (size_t)m * M.n_vocab, sizeof(float) * (size_t)M.n_vocab);
+    STAT_SPEC_STEPS++; STAT_SPEC_OK += (unsigned long long)m;
+    /* keep guessing only while it is really faster per token than plain steps */
+    if (tstep / (m + 1) > 0.9 * SPEC_T1) { SPEC_COOL = SPEC_BACKOFF; if (SPEC_BACKOFF < 128) SPEC_BACKOFF *= 2; } else SPEC_BACKOFF = 8;
+    ACCN = ACCI = 0;
+    for (int i = 1; i <= m; i++) { ACCQ[ACCN] = batch[i]; ACCP[ACCN] = POS + i; HIST[POS + i] = batch[i]; ACCN++; }
+    POS += m + 1;
     GEN++;
-    return pl;
+    return es_tok_piece(T, next, 0, buf, cap);
 }
 
 int es_engine_dump_logits(const int32_t *ids, int n, FILE *f) {

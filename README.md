@@ -38,6 +38,14 @@ backprop and a byte-level BPE tokenizer; models it trains match the engine's log
 6 x parameters x tokens FLOPs, so large models need `grow_model` (function-preserving depth growth) and long runs;
 the tools print honest estimates. Needs NumPy (`pkg install python-numpy`).
 
+**Speed (measured, 4-core x86 test PC, SmolLM2-135M, greedy, `es_chat -j 4`, default build, no `-march=native`)**:
+Q4_K_M 107-111 tok/s, Q4_0 103-114 tok/s (127-138 with Turbo on), Q8_0 about 90 tok/s (memory-bandwidth bound).
+The same file in the browser (WebAssembly, 2-4 threads) runs at about 22-25 tok/s. Numbers on a phone differ.
+How: runtime-dispatched AVX2/FMA integer kernels (Q8_0/Q4_0/Q5_0/Q4_K/Q6_K, 4 rows per pass; `ES_NO_AVX2=1` turns
+them off), NEON SDOT on ARM, batched prompt processing, and **Turbo** (prompt-lookup speculative decoding: the engine
+guesses the next few words from the text so far and checks them in one batched pass; greedy output stays identical,
+`-S 0` or `ES_SPEC=0` turns it off, it switches itself off when it does not help).
+
 **ExpertStream Lookahead** (native engine): big mixture-of-experts models stream experts from storage, and
 plain streaming waits for storage on every layer. Lookahead (default on in `es_chat`/`es_serve`/MCP) loads all
 missing experts of a layer in parallel, runs the next layer's router early to guess and preload its experts while the

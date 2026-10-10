@@ -30,6 +30,7 @@ const HF = {
 };
 /* Catalog. status: ready = verified in-page; native = needs Termux (too big for a page) ; planned = architecture work needed; no = not possible on a phone */
 const CATALOG = [
+  { id: 'smol135q4', name: 'SmolLM2 135M Q4_0', kind: 'Fastest demo', repo: 'bartowski/SmolLM2-135M-Instruct-GGUF', file: 'SmolLM2-135M-Instruct-Q4_0.gguf', size: 92e6, params: '135M', status: 'ready', blurb: 'The fastest file here: 4-bit, 92 MB. Over 100 tok/s with the native engine on a 4-core PC (measured), about 25 tok/s in the browser.' },
   { id: 'smol135', name: 'SmolLM2 135M', kind: 'Instant demo', repo: 'bartowski/SmolLM2-135M-Instruct-GGUF', file: 'SmolLM2-135M-Instruct-Q8_0.gguf', size: 138e6, params: '135M', status: 'ready', blurb: 'Tiny and fast. Proves the whole pipeline works in seconds. Not smart.' },
   { id: 'smol360', name: 'SmolLM2 360M', kind: 'Small', repo: 'bartowski/SmolLM2-360M-Instruct-GGUF', file: 'SmolLM2-360M-Instruct-Q4_K_M.gguf', size: 258e6, params: '360M', status: 'ready', blurb: 'Small chat model with basic answers.' },
   { id: 'qw05', name: 'Qwen2.5 0.5B Instruct', kind: 'Small', repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF', file: 'qwen2.5-0.5b-instruct-q4_k_m.gguf', size: 468e6, params: '0.5B', status: 'ready', blurb: 'Good little assistant, multilingual.' },

@@ -72,7 +72,7 @@ static void usage(void) {
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
             "               [-c context=2048] [-C cache_mb=1024] [-j threads=4] [-s seed]\n"
             "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n"
-            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n");
+            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on]\n");
     exit(2);
 }
 
@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     int max_new = 256, raw = 0, top_k = 40, opt;
     float temp = 0.7f, top_p = 0.9f;
     uint64_t seed = 42;
-    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:")) != -1) {
+    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:S:")) != -1) {
         switch (opt) {
         case 'm': o.pack = optarg; break;
         case 'g': o.gguf = optarg; break;
@@ -105,6 +105,7 @@ int main(int argc, char **argv) {
         case 'L': o.lookahead = atoi(optarg); break;         /* 1 = predict + preload next layer */
         case 'W': o.warm = atoi(optarg); break;             /* 1 = preload last run's hot experts */
         case 'i': o.io_threads = atoi(optarg); break;
+        case 'S': o.spec = atoi(optarg); if (o.spec == 0) o.spec = -2; break;   /* Turbo: longest guess per step, -S 0 = off */
         default: usage();
         }
     }
@@ -183,8 +184,8 @@ int main(int argc, char **argv) {
         es_engine_turn_stats(&s);
         double tps = s.gen_tokens / (s.gen_s > 0 ? s.gen_s : 1);
         if (JSON)
-            printf("{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld,\"pf_issued\":%llu,\"pf_used\":%llu,\"skipped\":%llu}\n",
-                   s.gen_tokens, s.gen_s, tps, s.prompt_s, s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb(), s.pf_issued, s.pf_used, s.skipped);
+            printf("{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld,\"pf_issued\":%llu,\"pf_used\":%llu,\"skipped\":%llu,\"spec_steps\":%llu,\"spec_ok\":%llu}\n",
+                   s.gen_tokens, s.gen_s, tps, s.prompt_s, s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb(), s.pf_issued, s.pf_used, s.skipped, s.spec_steps, s.spec_accepted);
         else
             printf("\n");
         fflush(stdout);
