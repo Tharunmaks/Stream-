@@ -355,9 +355,12 @@ static void mv_q5_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80
         for (int b = 0; b < nb; b++) {
             uint32_t qh; memcpy(&qh, x[b].qh, 4);
 #ifdef __wasm_simd128__
-            int8_t w5[32];
-            for (int j = 0; j < 16; j++) { w5[j] = (int8_t)(((x[b].qs[j] & 15) | (int)(((qh >> j) << 4) & 0x10)) - 16); w5[j + 16] = (int8_t)(((x[b].qs[j] >> 4) | (int)((qh >> (j + 12)) & 0x10)) - 16); }
-            const int a = dot8(w5, y[b].qs, 32);
+            const v128_t qv = wasm_v128_load32_splat(x[b].qh), q = LD(x[b].qs), m15 = wasm_i8x16_splat(15), b16 = wasm_i8x16_splat(16), z = wasm_i8x16_splat(0);
+            const v128_t bits = wasm_i8x16_make(1, 2, 4, 8, 16, 32, 64, (int8_t)128, 1, 2, 4, 8, 16, 32, 64, (int8_t)128);
+            const v128_t h0 = wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(wasm_i8x16_swizzle(qv, wasm_i8x16_make(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1)), bits), z), b16);
+            const v128_t h1 = wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(wasm_i8x16_swizzle(qv, wasm_i8x16_make(2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3)), bits), z), b16);
+            const v128_t lo = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(q, m15), h0), b16), hi = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(q, 4), h1), b16);
+            const int a = whsum(wasm_i32x4_add(wdot16(lo, LD(y[b].qs)), wdot16(hi, LD(y[b].qs + 16))));
 #else
             int a = 0;
             for (int j = 0; j < 16; j++) {
@@ -433,12 +436,77 @@ static void mv_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q
     }
 }
 
+
+static void mv_q3_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 110;
+    for (int r = r0; r < r1; r++) {
+        const blk_q3_K *x = (const blk_q3_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint32_t aux[4]; memcpy(aux, x[b].scales, 12);
+            const uint32_t tmp = aux[2], k1 = 0x03030303, k2 = 0x0f0f0f0f;
+            aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4); aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
+            aux[0] = (aux[0] & k2) | (((tmp >> 0) & k1) << 4); aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
+            const int8_t *sc = (const int8_t *)aux; const uint8_t *q = x[b].qs, *hm = x[b].hmask; const int8_t *q8 = y[b].qs;
+            int tot = 0, is = 0; uint8_t m = 1;
+            for (int n = 0; n < 2; n++, q += 32) {
+                for (int j = 0; j < 4; j++, m <<= 1) {
+                    const int shift = 2 * j;
+                    for (int half = 0; half < 2; half++, q8 += 16) {
+                        const uint8_t *lq = q + half * 16, *lh = hm + half * 16; int s16;
+#ifdef __wasm_simd128__
+                        const v128_t t = wasm_v128_and(wasm_u8x16_shr(LD(lq), shift), wasm_i8x16_splat(3));
+                        const v128_t no = wasm_i8x16_eq(wasm_v128_and(LD(lh), wasm_i8x16_splat((int8_t)m)), wasm_i8x16_splat(0));
+                        s16 = whsum(wdot16(wasm_i8x16_sub(t, wasm_v128_and(no, wasm_i8x16_splat(4))), LD(q8)));
+#else
+                        s16 = 0;
+                        for (int l = 0; l < 16; l++) s16 += (((lq[l] >> shift) & 3) - ((lh[l] & m) ? 0 : 4)) * q8[l];
+#endif
+                        tot += (sc[is++] - 32) * s16;
+                    }
+                }
+            }
+            s += y[b].d * fp16f(x[b].d) * (float)tot;
+        }
+        out[r] = s;
+    }
+}
+static void mv_q5_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 176;
+    for (int r = r0; r < r1; r++) {
+        const blk_q5_K *x = (const blk_q5_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint8_t sc[8], mn[8];
+            for (int j = 0; j < 8; j++) scale_min_k4(j, x[b].scales, &sc[j], &mn[j]);
+            int dot = 0, mins = 0; const uint8_t *ql = x[b].qs, *qh = x[b].qh; const int8_t *q8 = y[b].qs; uint8_t u1 = 1, u2 = 2;
+            for (int c = 0; c < 4; c++, ql += 32, q8 += 64, u1 <<= 2, u2 <<= 2) {
+                int lo = 0, hi = 0;
+#ifdef __wasm_simd128__
+                for (int h = 0; h < 32; h += 16) {
+                    const v128_t qa = LD(ql + h), qq = LD(qh + h), m15 = wasm_i8x16_splat(15), b16 = wasm_i8x16_splat(16);
+                    const v128_t l5 = wasm_v128_or(wasm_v128_and(qa, m15), wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(qq, wasm_i8x16_splat((int8_t)u1)), wasm_i8x16_splat(0)), b16));
+                    const v128_t h5 = wasm_v128_or(wasm_u8x16_shr(qa, 4), wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(qq, wasm_i8x16_splat((int8_t)u2)), wasm_i8x16_splat(0)), b16));
+                    lo += whsum(wdot16(l5, LD(q8 + h))); hi += whsum(wdot16(h5, LD(q8 + 32 + h)));
+                }
+#else
+                for (int l = 0; l < 32; l++) { lo += ((ql[l] & 15) + ((qh[l] & u1) ? 16 : 0)) * q8[l]; hi += ((ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0)) * q8[l + 32]; }
+#endif
+                dot += sc[2 * c] * lo + sc[2 * c + 1] * hi;
+                mins += mn[2 * c] * (y[b].bsums[4 * c] + y[b].bsums[4 * c + 1]) + mn[2 * c + 1] * (y[b].bsums[4 * c + 2] + y[b].bsums[4 * c + 3]);
+            }
+            s += y[b].d * (fp16f(x[b].d) * (float)dot - fp16f(x[b].dmin) * (float)mins);
+        }
+        out[r] = s;
+    }
+}
+
 #if defined(__aarch64__)
 void es_mv_q8_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
 void es_mv_q4_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
 void es_mv_q5_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
 void es_mv_q4_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 void es_mv_q6_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+void es_mv_q3_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+void es_mv_q5_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 static int HAVE_DOT = -1;
 #endif
 
@@ -461,6 +529,8 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
         if (a->q8) {
             if (t == GGML_Q4_K) { es_mv_q4_K_neon(w, cols, r0, r1, a->q8, y); return; }
             if (t == GGML_Q6_K) { es_mv_q6_K_neon(w, cols, r0, r1, a->q8, y); return; }
+            if (t == GGML_Q3_K) { es_mv_q3_K_neon(w, cols, r0, r1, a->q8, y); return; }
+            if (t == GGML_Q5_K) { es_mv_q5_K_neon(w, cols, r0, r1, a->q8, y); return; }
         }
     }
 #endif
@@ -475,6 +545,8 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
     if (a->q8) {
         if (t == GGML_Q4_K) { mv_q4_K(w, cols, r0, r1, a->q8, y); return; }
         if (t == GGML_Q6_K) { mv_q6_K(w, cols, r0, r1, a->q8, y); return; }
+        if (t == GGML_Q3_K) { mv_q3_K(w, cols, r0, r1, a->q8, y); return; }
+        if (t == GGML_Q5_K) { mv_q5_K(w, cols, r0, r1, a->q8, y); return; }
     }
     if (t == GGML_F32) {
         for (int r = r0; r < r1; r++) y[r] = dot_f32((const float *)(w + rb * r), a->x, cols);

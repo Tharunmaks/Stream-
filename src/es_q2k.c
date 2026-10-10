@@ -149,6 +149,14 @@ float es_dot_q2_K_q8_K_ref(int n, const es_block_q2_K *x, const es_block_q8_K *y
 
 /* Portable fast path (same math as the reference, ggml loop order): used
  * when there is no NEON dot product, e.g. in the WebAssembly build. */
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+static inline v128_t wd16(v128_t a, v128_t b) {
+    return wasm_i32x4_add(wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(a), wasm_i16x8_extend_low_i8x16(b)),
+                          wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(a), wasm_i16x8_extend_high_i8x16(b)));
+}
+static inline int wsum4(v128_t v) { return wasm_i32x4_extract_lane(v, 0) + wasm_i32x4_extract_lane(v, 1) + wasm_i32x4_extract_lane(v, 2) + wasm_i32x4_extract_lane(v, 3); }
+#endif
 static float dot_q2_K_portable(int n, const es_block_q2_K *x, const es_block_q8_K *y) {
     float sumf = 0;
     for (int b = 0; b < n / ES_QK_K; b++) {
@@ -159,9 +167,15 @@ static float dot_q2_K_portable(int n, const es_block_q2_K *x, const es_block_q8_
         int isum = 0, is = 0;
         for (int half = 0; half < 2; half++) {
             for (int shift = 0; shift < 8; shift += 2) {
+#ifdef __wasm_simd128__
+                const v128_t m3 = wasm_i8x16_splat(3);
+                const int s0 = wsum4(wd16(wasm_v128_and(wasm_u8x16_shr(wasm_v128_load(q2), shift), m3), wasm_v128_load(q8)));
+                const int s1 = wsum4(wd16(wasm_v128_and(wasm_u8x16_shr(wasm_v128_load(q2 + 16), shift), m3), wasm_v128_load(q8 + 16)));
+#else
                 int s0 = 0, s1 = 0;
                 for (int l = 0; l < 16; l++) s0 += q8[l] * ((q2[l] >> shift) & 3);
                 for (int l = 0; l < 16; l++) s1 += q8[l + 16] * ((q2[l + 16] >> shift) & 3);
+#endif
                 isum += (sc[is] & 15) * s0 + (sc[is + 1] & 15) * s1;
                 is += 2;
                 q8 += 32;

@@ -135,12 +135,18 @@ static void rmsnorm(float *o, const float *x, const float *w, int n, float eps) 
     for (int i = 0; i < n; i++) o[i] = x[i] * s * (w ? w[i] : 1.0f);
 }
 
+/* cos/sin of the rotation angles are the same for every head and layer at one position: compute once per token */
+static float *RC, *RS; static int RPOS = -1, RHD;
 static void rope(float *v, int n_heads, int hd, int pos) {
+    if (pos != RPOS || hd != RHD) {
+        if (hd != RHD) { free(RC); free(RS); RC = malloc(sizeof(float) * (size_t)(hd / 2)); RS = malloc(sizeof(float) * (size_t)(hd / 2)); RHD = hd; }
+        for (int i = 0; i < hd / 2; i++) { const float theta = pos * powf(M.rope_base, -2.0f * i / hd); RC[i] = cosf(theta); RS[i] = sinf(theta); }
+        RPOS = pos;
+    }
     for (int h = 0; h < n_heads; h++) {
         float *x = v + h * hd;
         for (int i = 0; i < hd / 2; i++) {
-            const float theta = pos * powf(M.rope_base, -2.0f * i / hd);
-            const float c = cosf(theta), s = sinf(theta);
+            const float c = RC[i], s = RS[i];
             const int a = M.rope_neox ? i : 2 * i, b = M.rope_neox ? i + hd / 2 : 2 * i + 1;
             const float x0 = x[a], x1 = x[b];
             x[a] = x0 * c - x1 * s;
@@ -676,6 +682,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     } else {
         if (es_gguf_open_fd(&G, o->gguf_fd, o->gguf_size, &e)) ERR("model file: %s", e);
     }
+    (void)es_q2k_kernel_name();   /* pick the Q2_K kernel once, before worker threads exist */
     M.arch = es_gguf_str(&G, "general.architecture");
     if (!M.arch) ERR("not a model file (no general.architecture)");
 #define HPI(nm, def) (snprintf(key, sizeof key, "%s." nm, M.arch), es_gguf_int(&G, key, def))

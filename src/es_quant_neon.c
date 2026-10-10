@@ -13,6 +13,8 @@ typedef struct { uint16_t d; uint8_t qs[16]; } nb_q4_0;
 typedef struct { uint16_t d; uint8_t qh[4]; uint8_t qs[16]; } nb_q5_0;
 typedef struct { uint16_t d, dmin; uint8_t scales[12]; uint8_t qs[128]; } nb_q4_K;
 typedef struct { uint8_t ql[128]; uint8_t qh[64]; int8_t scales[16]; uint16_t d; } nb_q6_K;
+typedef struct { uint8_t hmask[32]; uint8_t qs[64]; uint8_t scales[12]; uint16_t d; } nb_q3_K;
+typedef struct { uint16_t d, dmin; uint8_t scales[12]; uint8_t qh[32]; uint8_t qs[128]; } nb_q5_K;
 
 static inline int hsum(int32x4_t v) { return vaddvq_s32(v); }
 static inline void scale_min(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
@@ -51,13 +53,14 @@ void es_mv_q5_0_neon(const uint8_t *w, int cols, int r0, int r1, const es_blk_q8
     for (int r = r0; r < r1; r++) {
         const nb_q5_0 *x = (const nb_q5_0 *)(w + rb * r); float s = 0;
         for (int b = 0; b < nb; b++) {
-            uint32_t qh; memcpy(&qh, x[b].qh, 4); int8_t w5[32];
-            for (int j = 0; j < 16; j++) {
-                w5[j] = (int8_t)(((x[b].qs[j] & 15) | (int)(((qh >> j) << 4) & 0x10)) - 16);
-                w5[j + 16] = (int8_t)(((x[b].qs[j] >> 4) | (int)((qh >> (j + 12)) & 0x10)) - 16);
-            }
-            int32x4_t a = vdotq_s32(vdupq_n_s32(0), vld1q_s8(w5), vld1q_s8(y[b].qs));
-            a = vdotq_s32(a, vld1q_s8(w5 + 16), vld1q_s8(y[b].qs + 16));
+            uint32x4_t qv32 = vdupq_n_u32(0); qv32 = vld1q_lane_u32((const uint32_t *)x[b].qh, qv32, 0);
+            const uint8x16_t qv = vreinterpretq_u8_u32(qv32), q = vld1q_u8(x[b].qs), m15 = vdupq_n_u8(15), b16 = vdupq_n_u8(16);
+            static const uint8_t BITS[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128}, I0[16] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1}, I1[16] = {2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3};
+            const uint8x16_t bits = vld1q_u8(BITS);
+            const uint8x16_t h0 = vandq_u8(vtstq_u8(vqtbl1q_u8(qv, vld1q_u8(I0)), bits), b16), h1 = vandq_u8(vtstq_u8(vqtbl1q_u8(qv, vld1q_u8(I1)), bits), b16);
+            const int8x16_t lo = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(vandq_u8(q, m15), h0), b16)), hi = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(vshrq_n_u8(q, 4), h1), b16));
+            int32x4_t a = vdotq_s32(vdupq_n_s32(0), lo, vld1q_s8(y[b].qs));
+            a = vdotq_s32(a, hi, vld1q_s8(y[b].qs + 16));
             s += es_fp16_to_fp32(x[b].d) * y[b].d * (float)hsum(a);
         }
         out[r] = s;
@@ -105,6 +108,58 @@ void es_mv_q6_K_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_
                 }
             }
             s += y[b].d * es_fp16_to_fp32(x[b].d) * (float)tot;
+        }
+        out[r] = s;
+    }
+}
+
+void es_mv_q3_K_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 110; const uint8x16_t m3 = vdupq_n_u8(3), four = vdupq_n_u8(4);
+    for (int r = r0; r < r1; r++) {
+        const nb_q3_K *x = (const nb_q3_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint32_t aux[4]; memcpy(aux, x[b].scales, 12);
+            const uint32_t tmp = aux[2], k1 = 0x03030303, k2 = 0x0f0f0f0f;
+            aux[2] = ((aux[0] >> 4) & k2) | (((tmp >> 4) & k1) << 4); aux[3] = ((aux[1] >> 4) & k2) | (((tmp >> 6) & k1) << 4);
+            aux[0] = (aux[0] & k2) | (((tmp >> 0) & k1) << 4); aux[1] = (aux[1] & k2) | (((tmp >> 2) & k1) << 4);
+            const int8_t *sc = (const int8_t *)aux; const uint8_t *q = x[b].qs, *hm = x[b].hmask; const int8_t *q8 = y[b].qs;
+            int tot = 0, is = 0; uint8_t m = 1;
+            for (int n = 0; n < 2; n++, q += 32) {
+                for (int j = 0; j < 4; j++, m <<= 1) {
+                    const int8x16_t sh = vdupq_n_s8((int8_t)(-2 * j));
+                    for (int half = 0; half < 2; half++, q8 += 16) {
+                        const uint8x16_t t = vandq_u8(vshlq_u8(vld1q_u8(q + half * 16), sh), m3);
+                        const uint8x16_t has = vtstq_u8(vld1q_u8(hm + half * 16), vdupq_n_u8(m));
+                        const int8x16_t v = vreinterpretq_s8_u8(vsubq_u8(t, vbicq_u8(four, has)));
+                        tot += (sc[is++] - 32) * hsum(vdotq_s32(vdupq_n_s32(0), v, vld1q_s8(q8)));
+                    }
+                }
+            }
+            s += y[b].d * es_fp16_to_fp32(x[b].d) * (float)tot;
+        }
+        out[r] = s;
+    }
+}
+void es_mv_q5_K_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 176; const uint8x16_t m15 = vdupq_n_u8(15), b16 = vdupq_n_u8(16);
+    for (int r = r0; r < r1; r++) {
+        const nb_q5_K *x = (const nb_q5_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint8_t sc[8], mn[8];
+            for (int j = 0; j < 8; j++) scale_min(j, x[b].scales, &sc[j], &mn[j]);
+            int dot = 0, mins = 0; const uint8_t *ql = x[b].qs, *qh = x[b].qh; const int8_t *q8 = y[b].qs; uint8_t u1 = 1, u2 = 2;
+            for (int c = 0; c < 4; c++, ql += 32, q8 += 64, u1 <<= 2, u2 <<= 2) {
+                int32x4_t lo = vdupq_n_s32(0), hi = vdupq_n_s32(0);
+                for (int h = 0; h < 32; h += 16) {
+                    const uint8x16_t qa = vld1q_u8(ql + h), qq = vld1q_u8(qh + h);
+                    const uint8x16_t l5 = vorrq_u8(vandq_u8(qa, m15), vandq_u8(vtstq_u8(qq, vdupq_n_u8(u1)), b16));
+                    const uint8x16_t h5 = vorrq_u8(vshrq_n_u8(qa, 4), vandq_u8(vtstq_u8(qq, vdupq_n_u8(u2)), b16));
+                    lo = vdotq_s32(lo, vreinterpretq_s8_u8(l5), vld1q_s8(q8 + h)); hi = vdotq_s32(hi, vreinterpretq_s8_u8(h5), vld1q_s8(q8 + 32 + h));
+                }
+                dot += sc[2 * c] * hsum(lo) + sc[2 * c + 1] * hsum(hi);
+                mins += mn[2 * c] * (y[b].bsums[4 * c] + y[b].bsums[4 * c + 1]) + mn[2 * c + 1] * (y[b].bsums[4 * c + 2] + y[b].bsums[4 * c + 3]);
+            }
+            s += y[b].d * (es_fp16_to_fp32(x[b].d) * (float)dot - es_fp16_to_fp32(x[b].dmin) * (float)mins);
         }
         out[r] = s;
     }
