@@ -233,6 +233,10 @@ details.think summary { cursor: pointer; color: var(--ink-3); font-size: 12.5px;
 .hitem .p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 footer.foot { text-align: center; color: var(--ink-3); font-size: 12.5px; padding: 8px 16px 90px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+@media (max-width: 640px) { .hero { min-height: 470px; } .hero::after { background: linear-gradient(0deg, rgba(7,11,20,.96) 25%, rgba(7,11,20,.6) 65%, rgba(7,11,20,.15)); } .hero-in { padding: 22px; } }
+#term-state { max-width: 38%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.hitem > summary::-webkit-details-marker { display: none; }
+.table-box { display: grid; }
 
 </style>
 </head>

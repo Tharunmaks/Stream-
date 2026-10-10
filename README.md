@@ -1,16 +1,27 @@
 # ExpertStream
 
-**Quick start (no install):** open the website, go to **Terminal**
-(ExpertStream CLI), type `download`, then `open`, then ask anything. The
-engine runs in the page as WebAssembly and reads the model file from your
-device. Website: `docs/index.html` (GitHub Pages) or `web/index.html`.
+**Website (no install):** open `docs/index.html` on GitHub Pages
+(Settings → Pages → Branch `claude/expertstream-moe-android-oegt59`, folder `/docs`),
+or open `web/index.html` from `http://127.0.0.1` / any normal browser tab. In **Models**
+search Hugging Face, download a GGUF (saved on the device, resumable), or pick a file from the
+phone; then **Chat** or use the **CLI** tab. The engine runs in the page as WebAssembly.
+It needs a normal browser tab: pages inside other apps (sandboxed viewers) block downloads
+and workers; **Testing → Can this page run models?** says exactly what is blocked.
 
 **Faster, native (Termux):** one command installs everything, downloads a
-model and opens the same app backed by the native engine:
+model and opens the same app backed by the native engine
+(`es_serve -g model.gguf` or `-m pack`):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
 ```
+
+Rebuild the site: `source emsdk_env.sh && bash scripts/build_web.sh` (`UI_ONLY=1` reuses the last
+WebAssembly build). Sources: `web/src/{template.html,style.css,js/,workers/}`.
+
+Supported model families: OLMoE, Qwen3 / Qwen3-MoE, Qwen2/2.5, Llama 3-style (byte-level BPE),
+quantisations F32/F16/Q4_0–Q8_0/Q2_K–Q6_K. Not yet: SentencePiece tokenizers (Mistral, Llama 2,
+Gemma), IQ/BF16/MXFP4 quants, MLA attention (DeepSeek, Kimi), split GGUF inside the page.
 
 CPU-only inference for very large Mixture-of-Experts models on an Android
 phone (Termux, aarch64, no root, no GPU). The expert weights are streamed
@@ -60,11 +71,9 @@ src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
 tools/es_chat.c       text generation: core in RAM, experts streamed + cached
 tools/es_qtest.c      dumps dequantized tensors for checking
 tools/es_serve.c      local web server: the app + live chat API (127.0.0.1 only)
-web/index.html        the app: Home, Terminal (ExpertStream CLI), Chat, Convert,
-                      Testing, History; self-contained (engine embedded)
-web/app_template.html the app source; scripts/build_web.sh embeds the engine
+web/index.html        the app (generated, self-contained, engine embedded)
+web/src/              app source: template.html, style.css, js/ modules, workers/
 web/es_wasm.c         WebAssembly entry points (Emscripten, runs in a Worker)
-web/worker_driver.js  worker side: reads the user's GGUF with FileReaderSync
 src/es_engine.{h,c}   the engine shared by es_chat, es_serve and the browser
 docs/index.html       copy of web/index.html for GitHub Pages
 scripts/setup.sh      install, build, download, import, start the app
