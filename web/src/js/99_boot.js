@@ -4,6 +4,7 @@ addEventListener('hashchange', () => go(location.hash.slice(1), false));
 addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message; if (m && !/AbortError/.test(m)) toast(m, 'bad', 5000); });
 (async () => {
   chatChipUpdate();
+  OAuth.finish();
   go((location.hash || '#home').slice(1), false);
   Lib.list().then(l => { $('#home-lib').textContent = l.filter(i => i.complete).length; }).catch(() => { });
   const nat = await Brain.detectNative();

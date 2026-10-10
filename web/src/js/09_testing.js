@@ -23,7 +23,7 @@ async function renderDoctor() {
   box.replaceChildren(...r.map(x => h('div', { class: 'trow' }, h('span', { class: 'tick ' + (x.ok ? 'ok' : x.warn ? 'wait' : 'no') }, x.ok ? '✓' : x.warn ? '!' : '✗'), h('div', {}, h('b', {}, x.name), h('div', { class: 'dim', style: 'font-size:12.5px' }, x.msg)), h('span'))));
   const bad = r.filter(x => !x.ok && !x.warn && x.name !== 'Native engine (Termux)');
   const hb = $('#home-banner'); hb.replaceChildren();
-  if (bad.length) hb.append(h('div', { class: 'note bad' }, h('b', {}, 'This page is restricted here: '), bad.map(x => x.name).join(', '), '. Downloads and the in-page engine need a normal browser tab. Open the site address in Chrome, or use Termux (see Testing).', h('button', { class: 'btn sm', onclick: () => go('testing') }, 'Details')));
+  if (bad.length) hb.append(h('div', { class: 'note bad' }, h('b', {}, 'This page is restricted here: '), bad.map(x => x.name).join(', '), '. This preview window blocks downloads and Hugging Face sign-in.', h('div', { class: 'row', style: 'margin-top:6px' }, h('a', { class: 'btn sm primary', href: APP_URL, target: '_blank', rel: 'noopener' }, 'Open the full app'), Demo.man ? h('button', { class: 'btn sm', onclick: () => Demo.load(false) }, 'Run the built-in demo here') : null, h('button', { class: 'btn sm', onclick: () => go('testing') }, 'Details'))));
 }
 $('#doc-run').addEventListener('click', renderDoctor);
 $('#bench-run').addEventListener('click', async () => {

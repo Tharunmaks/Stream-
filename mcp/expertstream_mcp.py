@@ -301,6 +301,40 @@ def t_serve(a):
     m = a['model'] if os.path.isabs(a['model']) else os.path.join(MODELS, a['model'])
     subprocess.Popen([exe, '-g', m, '-p', str(port), '-w', os.path.join(ROOT, 'web')], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return dict(started=True, url='http://127.0.0.1:%d' % port)
+def oauth_post(path, data, js=False):
+    body = json.dumps(data).encode() if js else urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request('https://huggingface.co' + path, data=body, headers={'Content-Type': 'application/json' if js else 'application/x-www-form-urlencoded', 'User-Agent': 'expertstream-mcp'})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r: return json.load(r)
+    except urllib.error.HTTPError as e:
+        try: return json.load(e)
+        except Exception: return dict(error='HTTP %d' % e.code)
+DEVICE = {}
+def t_connect(a):
+    if a.get('token'): return t_set_token(a)
+    c = cfg(); cid = c.get('oauth_client')
+    if not cid:
+        r = oauth_post('/oauth/register', dict(client_name='ExpertStream MCP', redirect_uris=['http://127.0.0.1/callback'], grant_types=['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'], token_endpoint_auth_method='none', scope='openid profile read-repos'), js=True)
+        cid = r.get('client_id')
+        if not cid: raise RuntimeError('Hugging Face did not register the client: %s' % r)
+        c['oauth_client'] = cid; os.makedirs(os.path.dirname(CFG), exist_ok=True); json.dump(c, open(CFG, 'w')); os.chmod(CFG, 0o600)
+    d = oauth_post('/oauth/device', dict(client_id=cid, scope='openid profile read-repos'))
+    if 'device_code' not in d: raise RuntimeError('device sign-in failed: %s' % d)
+    DEVICE.update(d, client_id=cid, t=time.time())
+    return dict(step='Tell the user: open %s and enter the code %s, then click Allow. Then call connect_huggingface_finish.' % (d.get('verification_uri', 'https://hf.co/oauth/device'), d['user_code']), url=d.get('verification_uri'), code=d['user_code'], expires_in_s=d.get('expires_in'))
+def t_connect_finish(a):
+    if not DEVICE: return dict(error='call connect_huggingface first')
+    deadline = time.time() + float(a.get('wait_s', 60))
+    while time.time() < deadline:
+        r = oauth_post('/oauth/token', dict(grant_type='urn:ietf:params:oauth:grant-type:device_code', device_code=DEVICE['device_code'], client_id=DEVICE['client_id']))
+        if r.get('access_token'):
+            c = cfg(); c['hf_token'] = r['access_token']; c['hf_refresh'] = r.get('refresh_token'); json.dump(c, open(CFG, 'w')); os.chmod(CFG, 0o600); DEVICE.clear()
+            try: who = hf_json('https://huggingface.co/api/whoami-v2').get('name')
+            except Exception: who = None
+            return dict(connected=True, user=who)
+        if r.get('error') not in ('authorization_pending', 'slow_down'): return dict(connected=False, error=r)
+        time.sleep(5)
+    return dict(connected=False, pending=True, hint='the user has not approved yet; call again')
 def t_set_token(a):
     os.makedirs(os.path.dirname(CFG), exist_ok=True); c = cfg(); c['hf_token'] = a['token']; json.dump(c, open(CFG, 'w')); os.chmod(CFG, 0o600)
     try: who = hf_json('https://huggingface.co/api/whoami-v2'); return dict(saved=True, user=who.get('name'))
@@ -325,7 +359,8 @@ TOOLS = [
  ('unload_model', 'Free the loaded model\'s memory.', S(), t_unload),
  ('import_pack', 'Convert a (split) GGUF MoE into an ExpertStream pack for very large models.', S(gguf=P('string', 'gguf file', req=True), out=P('string', 'output folder')), t_import),
  ('open_web_ui', 'Start the ExpertStream website backed by a local model (es_serve) and return its URL.', S(model=P('string', 'gguf file', req=True), port=P('integer', 'default 8080')), t_serve),
- ('connect_huggingface', 'Save a Hugging Face read token (stored in ~/.expertstream/config.json, mode 600) so gated/private models can be downloaded.', S(token=P('string', 'hf_... token', req=True)), t_set_token),
+ ('connect_huggingface', 'Link the user\'s Hugging Face account (for private/gated models). Without arguments it starts a one-step sign-in: give the user the URL and code it returns, then call connect_huggingface_finish. Or pass a token directly.', S(token=P('string', 'optional hf_... token')), t_connect),
+ ('connect_huggingface_finish', 'Wait for the user to approve the Hugging Face sign-in started by connect_huggingface and save the access.', S(wait_s=P('number', 'seconds to wait, default 60')), t_connect_finish),
 ]
 TOOLMAP = {n: f for n, d, s, f in TOOLS}
 
