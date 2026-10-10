@@ -31,6 +31,11 @@ Remote mode: `python3 mcp/expertstream_mcp.py --http 8765 --host 0.0.0.0 --model
 (`/mcp`, legacy `/sse`) and an OpenAI-compatible API (`/v1/chat/completions`, model `agent:<id>`) with a
 token, so a phone's coding AI can use a PC's models and the other way round.
 
+**Expert Craft: build your own AI model from scratch (1 million to 70 billion parameters, free compute):**
+`claude mcp add expertcraft -- python3 ~/Stream-/craft/expertcraft_mcp.py`. An MCP server that designs the model,
+gets free training data, trains a BPE tokenizer, writes PyTorch code with multi-GPU FSDP, and trains on free
+Colab/Kaggle GPUs (notebooks included) or your phone. Website: `docs/craft.html`; details in [`craft/README.md`](craft/README.md).
+
 **Create a model from scratch (1 thousand to 37 billion parameters):** the MCP server has builder tools
 (`builder_rules`, `design_model`, `prepare_data`, `train_model`, `evaluate_model`, `grow_model`, `create_model`,
 `export_model`, ...) and rules R1-R10 that an AI must follow. `mcp/builder.py` is a NumPy trainer with verified

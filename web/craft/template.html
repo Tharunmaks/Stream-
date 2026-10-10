@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="@@CSP@@">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Expert Craft: an MCP server that lets Claude, ChatGPT or any AI build a language model from scratch, 1 million to 70 billion parameters, on free compute.">
+<title>Expert Craft</title>
+<style>
+@@FONTS@@
+:root {
+  color-scheme: dark;
+  --bg: #070b14; --bg-2: #0c1322; --panel: rgba(17,26,44,.78); --panel-solid: #111a2c; --raise: #16213a;
+  --line: #1f2d47; --line-2: #2b3d5f;
+  --ink: #eef2f8; --ink-2: #aebad0; --ink-3: #75839c;
+  --warm: #f2c98a; --blue: #3987e5; --green: #19b07d; --orange: #e8683a;
+  --good: #3fb37f; --warn: #e0a43a; --bad: #e66767;
+  --f-display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.2,.8,.2,1);
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { background: var(--bg); color: var(--ink); margin: 0; }
+body { font-family: var(--f-body); font-size: 15px; line-height: 1.55; overflow-x: hidden; min-height: 100vh;
+  background-image: radial-gradient(70% 50% at 85% -10%, rgba(242,201,138,.12), transparent 60%), radial-gradient(60% 40% at -10% 10%, rgba(57,135,229,.12), transparent 60%); background-attachment: fixed; }
+h1, h2, h3 { font-family: var(--f-display); margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--warm); }
+.mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+p .mono, li .mono { overflow-wrap: anywhere; }
+.muted { color: var(--ink-2); } .dim { color: var(--ink-3); }
+.top { position: sticky; top: 0; z-index: 30; background: rgba(7,11,20,.82); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--line); }
+.top-in { max-width: 1080px; margin: 0 auto; padding: 0 16px; height: 56px; display: flex; align-items: center; gap: 14px; }
+.logo { font-family: var(--f-display); font-weight: 800; font-size: 20px; letter-spacing: -.02em; display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); white-space: nowrap; }
+.logo b { color: var(--warm); }
+.logo i { width: 22px; height: 22px; border-radius: 7px; background: conic-gradient(from 30deg, var(--warm), var(--orange), var(--blue), var(--green), var(--warm)); position: relative; }
+.logo i::after { content: ""; position: absolute; inset: 5px; border-radius: 3px; background: var(--bg); }
+.grow { flex: 1; }
+.nav a { color: var(--ink-2); text-decoration: none; font-size: 14px; padding: 6px 10px; border-radius: 10px; }
+.nav a:hover { color: var(--ink); background: var(--raise); }
+main { max-width: 1080px; margin: 0 auto; padding: 26px 16px 70px; display: grid; gap: 22px; }
+.hero { border-radius: 22px; border: 1px solid var(--line); padding: clamp(22px, 5vw, 52px); display: grid; gap: 16px;
+  background: radial-gradient(90% 120% at 90% 0%, rgba(232,104,58,.18), transparent 55%), radial-gradient(80% 90% at 10% 100%, rgba(57,135,229,.18), transparent 60%), var(--bg-2); }
+.eyebrow { font-family: var(--f-mono); font-size: 11.5px; letter-spacing: .15em; text-transform: uppercase; color: var(--warm); }
+.hero h1 { font-size: clamp(34px, 7vw, 64px); font-weight: 800; line-height: 1; }
+.hero h1 em { font-style: normal; background: linear-gradient(90deg, var(--warm), var(--orange)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero p { font-size: 17px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.btn { border: 1px solid var(--line-2); background: var(--raise); border-radius: 12px; padding: 10px 16px; cursor: pointer; font: inherit; font-weight: 500; color: var(--ink); text-decoration: none; display: inline-flex; gap: 8px; align-items: center; transition: transform .15s var(--ease), border-color .15s; }
+.btn:hover { border-color: var(--warm); transform: translateY(-1px); }
+.btn.primary { background: linear-gradient(135deg, var(--warm), var(--orange)); color: #1b1006; border-color: transparent; font-weight: 600; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.card > * { min-width: 0; }
+.card.hot { background: linear-gradient(var(--panel-solid), var(--panel-solid)) padding-box, linear-gradient(135deg, var(--warm), var(--orange) 50%, var(--blue)) border-box; border: 1px solid transparent; }
+h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 800; }
+h3 { font-size: 17px; font-weight: 700; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 860px) { .grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .grid2 { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 520px) { .grid4 { grid-template-columns: minmax(0, 1fr); } }
+.num { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; font-family: var(--f-display); font-weight: 800; background: rgba(242,201,138,.12); color: var(--warm); border: 1px solid rgba(242,201,138,.3); }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile { background: rgba(255,255,255,.025); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 1px; }
+.tile .v { font-family: var(--f-display); font-size: 24px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.15; overflow-wrap: anywhere; }
+.tile .k { font-size: 12.5px; color: var(--ink-3); }
+input[type=range] { width: 100%; accent-color: var(--warm); height: 28px; }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.presets button { border: 1px solid var(--line); background: var(--bg-2); color: var(--ink-2); border-radius: 999px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 13px; }
+.presets button[aria-pressed=true] { border-color: var(--warm); color: var(--ink); background: rgba(242,201,138,.1); }
+.big { font-family: var(--f-display); font-weight: 800; font-size: clamp(40px, 8vw, 64px); line-height: 1; font-variant-numeric: tabular-nums; }
+.verdict { padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg-2); }
+.verdict.good { border-color: rgba(63,179,127,.5); } .verdict.warn { border-color: rgba(224,164,58,.5); } .verdict.bad { border-color: rgba(230,103,103,.5); }
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12.5px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.tbl td { padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl td.r, .tbl th.r { text-align: right; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+.yes { color: var(--good); } .no { color: var(--bad); }
+pre { margin: 0; background: #050810; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; overflow-x: auto; font-family: var(--f-mono); font-size: 13px; line-height: 1.55; white-space: pre; }
+.code { position: relative; }
+.code .copy { position: absolute; top: 7px; right: 7px; font-size: 12px; padding: 4px 9px; border-radius: 8px; }
+.seg { display: inline-flex; flex-wrap: wrap; background: var(--bg-2); border: 1px solid var(--line); border-radius: 14px; padding: 4px; gap: 2px; }
+.seg button { border: 0; background: none; color: var(--ink-2); padding: 7px 12px; border-radius: 10px; cursor: pointer; font: inherit; font-size: 14px; }
+.seg button[aria-selected=true] { background: var(--raise); color: var(--ink); }
+ul.clean { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--ink-2); }
+footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 40px; color: var(--ink-3); font-size: 13px; }
+:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+  <a class="logo" href="#"><i></i><span>Expert<b>Craft</b></span></a>
+  <span class="grow"></span>
+  <nav class="nav row" aria-label="Links">
+    <a href="./">ExpertStream</a>
+    <a href="https://github.com/Tharunmaks/Stream-/tree/claude/expertstream-moe-android-oegt59/craft" rel="noopener">GitHub</a>
+  </nav>
+</div></header>
+
+<main>
+  <section class="hero">
+    <span class="eyebrow">MCP server · free · phone and PC</span>
+    <h1>Expert<em>Craft</em></h1>
+    <p class="muted">Let Claude, ChatGPT, Cursor or any AI that speaks MCP build a language model from scratch, from 1 million up to 70 billion parameters. It designs the model, gets free training data, trains a BPE tokenizer, writes the PyTorch code, and trains on free GPUs (Google Colab, Kaggle) or your own machine.</p>
+    <div class="row">
+      <a class="btn primary" href="#connect">Connect it to your AI</a>
+      <a class="btn" href="#plan">Plan a model</a>
+      <a class="btn" href="https://github.com/Tharunmaks/Stream-/tree/claude/expertstream-moe-android-oegt59/craft" rel="noopener">Source on GitHub</a>
+    </div>
+  </section>
+
+  <section class="grid4" aria-label="How it works">
+    <div class="card"><div class="num">1</div><h3>Design</h3><p class="muted">Pick a size. It chooses layers, width, heads and shows the exact parameter count, memory and training time.</p></div>
+    <div class="card"><div class="num">2</div><h3>Data</h3><p class="muted">Streams free datasets (TinyStories, FineWeb-Edu, Wikipedia) or your own text, and trains a BPE tokenizer on it.</p></div>
+    <div class="card"><div class="num">3</div><h3>Train</h3><p class="muted">One device, or many GPUs with FSDP. Saves often and resumes by itself when a free session ends.</p></div>
+    <div class="card"><div class="num">4</div><h3>Talk to it</h3><p class="muted">Export to one weights file and chat with the model you made.</p></div>
+  </section>
+
+  <section class="card hot" id="plan">
+    <span class="eyebrow">Planner</span>
+    <h2>How big, and can you train it for free?</h2>
+    <div class="row" style="align-items:flex-end;justify-content:space-between">
+      <div><div class="big" id="p-size">30M</div><div class="dim">parameters</div></div>
+      <div class="presets" id="presets"></div>
+    </div>
+    <input type="range" id="p-range" min="0" max="1000" step="1" aria-label="Model size">
+    <div class="tiles">
+      <div class="tile"><span class="v" id="t-shape">-</span><span class="k">layers × width</span></div>
+      <div class="tile"><span class="v" id="t-tokens">-</span><span class="k">training tokens (20 per parameter)</span></div>
+      <div class="tile"><span class="v" id="t-mem">-</span><span class="k">training memory (weights, grads, Adam)</span></div>
+      <div class="tile"><span class="v" id="t-run">-</span><span class="k">to run it, 4-bit</span></div>
+    </div>
+    <div class="verdict" id="verdict" role="status"></div>
+    <div class="scroll"><table class="tbl" id="hw"><thead><tr><th>Where</th><th>Fits</th><th class="r">Time</th><th class="r">Largest it can train</th></tr></thead><tbody></tbody></table></div>
+    <p class="dim" style="font-size:13px">Estimates: training costs 6 × parameters × tokens FLOPs. Effective speed assumed: phone 0.02, T4 15, H100 400 TFLOPS per device. Memory: 16 bytes per parameter (split across GPUs with FSDP) plus activations. The MCP server's <span class="mono">free_compute_plan</span> tool gives the same numbers.</p>
+    <div class="code"><pre id="p-cmd"></pre><button class="btn copy" data-copy="p-cmd">Copy</button></div>
+  </section>
+
+  <section class="card" id="connect">
+    <span class="eyebrow">Connect</span>
+    <h2>Add Expert Craft to your AI</h2>
+    <p class="muted">Get the code once: <span class="mono">git clone https://github.com/Tharunmaks/Stream-.git</span>. It needs only Python 3; training needs PyTorch.</p>
+    <div class="seg" role="tablist" id="seg"></div>
+    <div class="code"><pre id="conn"></pre><button class="btn copy" data-copy="conn">Copy</button></div>
+    <p class="dim" id="conn-note"></p>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <span class="eyebrow">Free compute</span>
+      <h3>Where training happens</h3>
+      <ul class="clean">
+        <li><b>Your phone (Termux):</b> tiny models and testing the pipeline. Slow but always available.</li>
+        <li><b>Google Colab free:</b> 1× T4 GPU. Every project includes <span class="mono">colab.ipynb</span>, saving to Google Drive so it resumes.</li>
+        <li><b>Kaggle free:</b> 2× T4 GPUs, about 30 GPU-hours a week. Every project includes <span class="mono">kaggle.ipynb</span>, which shards the model over both GPUs.</li>
+        <li><b>Rented GPUs:</b> the same <span class="mono">torchrun … --fsdp</span> command scales to many GPUs for billions of parameters.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <span class="eyebrow">Straight answer</span>
+      <h3>About 70 billion parameters</h3>
+      <p class="muted">Expert Craft designs, writes and can run training code for a 70B model (FSDP, sharded checkpoints, meta-device init, activation checkpointing). Training one properly needs about 1.1 TB of GPU memory and around 400,000 H100-hours, so no free service can do it. The free path: build and test the pipeline small, train 30M–1B models on Colab or Kaggle, and scale up when you have GPUs.</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <span class="eyebrow">Tools</span>
+    <h2>What the AI gets</h2>
+    <div class="scroll"><table class="tbl">
+      <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">craft_guide</td><td>Workflow and rules (honest estimates, start small, check loss).</td></tr>
+        <tr><td class="mono">design_model</td><td>Config for any size from 1M to 70B, with cost.</td></tr>
+        <tr><td class="mono">estimate_model</td><td>Exact params, memory, FLOPs and hours for a config.</td></tr>
+        <tr><td class="mono">free_compute_plan</td><td>Phone vs Colab vs Kaggle: fits, hours, largest model.</td></tr>
+        <tr><td class="mono">scaffold_project</td><td>Writes model, data, trainer, export, sampler, Colab and Kaggle notebooks.</td></tr>
+        <tr><td class="mono">run_step</td><td>Runs data / train / export / sample, in the background for long jobs.</td></tr>
+        <tr><td class="mono">job_status</td><td>Running or not, loss trend, best validation loss, checkpoints.</td></tr>
+        <tr><td class="mono">stop_job</td><td>Stops training after saving a checkpoint.</td></tr>
+        <tr><td class="mono">connect_guide</td><td>Setup snippets for every AI app.</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+</main>
+<footer>Expert Craft is part of <a href="./">ExpertStream</a> · <a href="https://github.com/Tharunmaks/Stream-" rel="noopener">github.com/Tharunmaks/Stream-</a> · open source</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var MIN = 1e6, MAX = 70e9;
+  function fmt(n) { var u = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "K"]]; for (var i = 0; i < u.length; i++) if (n >= u[i][0]) { var v = n / u[i][0]; return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + u[i][1]; } return String(Math.round(n)); }
+  function gb(b) { b = b / 1e9; return b >= 1000 ? (b / 1000).toFixed(2) + " TB" : b >= 10 ? b.toFixed(0) + " GB" : b.toFixed(1) + " GB"; }
+  function hrs(h) { if (h < 1) return Math.max(1, Math.round(h * 60)) + " min"; if (h < 48) return h.toFixed(1) + " h"; if (h < 24 * 365) return (h / 24).toFixed(0) + " days"; return (h / 24 / 365).toFixed(0) + " years"; }
+  function count(c) {
+    var hd = c.d / c.h, per = 2 * c.d * c.h * hd + 2 * c.d * c.kv * hd + 3 * c.d * c.ff + 2 * c.d;
+    return c.L * per + c.V * c.d + (c.tie ? 0 : c.V * c.d) + c.d;
+  }
+  var cache = {};
+  function design(target) {
+    var key = target.toPrecision(3); if (cache[key]) return cache[key];
+    var V = target < 1e7 ? 4096 : target < 5e8 ? 8192 : 32000, tie = target < 2e9, best = null;
+    for (var d = 64; d <= 16384; d += 64) {
+      var hd = d < 256 ? 32 : d < 2048 ? 64 : 128; if (d % hd) continue;
+      var h = d / hd; if (h >= 8 && h % 4) continue;
+      var kv = h >= 8 ? h / 4 : h; if (h >= 32 && h % 8 === 0) kv = 8;
+      var ff = Math.max(128, Math.round(8 * d / 3 / 128) * 128), pref = d < 1024 ? 64 : 100;
+      for (var L = 2; L <= 128; L++) {
+        var c = { V: V, d: d, L: L, h: h, kv: kv, ff: ff, tie: tie }, n = count(c);
+        if (n > target * 1.3) break;
+        var s = Math.abs(n - target) / target + 0.15 * Math.abs(Math.log((d / L) / pref));
+        if (!best || s < best[0]) best = [s, c];
+      }
+    }
+    return (cache[key] = best[1]);
+  }
+  var HW = [
+    { name: "Your phone (CPU, Termux)", free: true, g: 1, mem: 3, tf: 0.02 },
+    { name: "Google Colab free · 1× T4", free: true, g: 1, mem: 15, tf: 15 },
+    { name: "Kaggle free · 2× T4", free: true, g: 2, mem: 15, tf: 15 },
+    { name: "Rented 8× H100 (paid, reference)", free: false, g: 8, mem: 80, tf: 400 }
+  ];
+  function memNeed(n, g, d, L, ckpt) { return 16 * n / g / 1e9 + 1024 * d * L * (ckpt ? 4 : 34) / 1e9 + 1; }
+  var largest = HW.map(function (hw) {
+    var lo = MIN, hi = MAX;
+    for (var i = 0; i < 30; i++) { var mid = Math.sqrt(lo * hi), c = design(mid); if (memNeed(count(c), hw.g, c.d, c.L, true) <= hw.mem * 0.9) lo = mid; else hi = mid; }
+    return lo;
+  });
+  var toT = function (v) { return Math.exp(Math.log(MIN) + (Math.log(MAX) - Math.log(MIN)) * v / 1000); };
+  var toV = function (t) { return Math.round(1000 * (Math.log(t) - Math.log(MIN)) / (Math.log(MAX) - Math.log(MIN))); };
+  var PRE = [["5M", 5e6], ["30M", 30e6], ["125M", 125e6], ["1B", 1e9], ["7B", 7e9], ["13B", 13e9], ["70B", 70e9]];
+  PRE.forEach(function (p) { var b = document.createElement("button"); b.textContent = p[0]; b.dataset.t = p[1]; b.onclick = function () { set(p[1]); }; $("presets").appendChild(b); });
+  function set(t) {
+    $("p-range").value = toV(t);
+    var c = design(t), n = count(c), tok = 20 * n, flops = 6 * n * tok;
+    $("p-size").textContent = fmt(n);
+    $("t-shape").textContent = c.L + " × " + c.d;
+    $("t-tokens").textContent = fmt(tok);
+    $("t-mem").textContent = gb(16 * n);
+    $("t-run").textContent = gb(0.5 * n);
+    [].forEach.call($("presets").children, function (b) { b.setAttribute("aria-pressed", Math.abs(Math.log(+b.dataset.t / t)) < 0.05 ? "true" : "false"); });
+    var tb = $("hw").tBodies[0]; tb.textContent = "";
+    var best = null;
+    HW.forEach(function (hw, i) {
+      var fits = memNeed(n, hw.g, c.d, c.L, n > 3e8) <= hw.mem * 0.9, h = flops / (hw.tf * 1e12 * hw.g) / 3600;
+      if (hw.free && fits && (!best || h < best.h)) best = { h: h, name: hw.name };
+      var tr = tb.insertRow();
+      tr.insertCell().textContent = hw.name;
+      var f = tr.insertCell(); f.textContent = fits ? "yes" : "no"; f.className = fits ? "yes" : "no";
+      var tc = tr.insertCell(); tc.className = "r"; tc.textContent = fits ? hrs(h) : "–";
+      var lc = tr.insertCell(); lc.className = "r"; lc.textContent = fmt(largest[i]);
+    });
+    var v = $("verdict");
+    if (best && best.h <= 60) { v.className = "verdict good"; v.textContent = "Trainable for free: about " + hrs(best.h) + " on " + best.name + "."; }
+    else if (best) { v.className = "verdict warn"; v.textContent = "Fits on " + best.name + " but full training takes about " + hrs(best.h) + " (" + (best.h / 30).toFixed(1) + " weeks of Kaggle quota). Train on fewer tokens, or go smaller."; }
+    else { v.className = "verdict bad"; v.textContent = fmt(n) + " parameters need " + gb(16 * n) + " to train, more than any free service has. Expert Craft can still design it, write the multi-GPU code and test it small for free; full training needs rented GPUs or a research grant such as Google's TPU Research Cloud."; }
+    $("p-cmd").textContent = "# ask your AI: \"use expertcraft to build a " + fmt(n) + " model\"\n# or by hand:\npython3 craft/expertcraft_mcp.py scaffold " + t.toPrecision(2).replace("+", "") + " my-model\ncd ~/expertcraft/my-model && python data.py --dataset tinystories && python train.py --out run";
+  }
+  $("p-range").addEventListener("input", function () { set(toT(+this.value)); });
+  set(30e6);
+
+  var P = "~/Stream-/craft/expertcraft_mcp.py";
+  var CONN = [
+    ["Claude Code", "claude mcp add expertcraft -- python3 " + P, "Works on PC and in Termux on Android. Then ask: \"use expertcraft to build a 30M model\"."],
+    ["Claude Desktop", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Settings > Developer > Edit config, add this, restart. On Windows use the full path and \"python\"."],
+    ["Cursor / Windsurf / Cline", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Paste into the app's MCP settings file (mcp.json)."],
+    ["VS Code", JSON.stringify({ servers: { expertcraft: { type: "stdio", command: "python3", args: [P] } } }, null, 2), ".vscode/mcp.json in your workspace."],
+    ["Codex CLI", "[mcp_servers.expertcraft]\ncommand = \"python3\"\nargs = [\"" + P + "\"]", "Add to ~/.codex/config.toml."],
+    ["Gemini CLI", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Add to ~/.gemini/settings.json."],
+    ["Phone apps (URL)", "pkg install python cloudflared\npython3 " + P + " --http 8766 --public\n# prints: https://<name>.trycloudflare.com/s/<secret>/mcp", "For apps that ask for a server URL: paste the printed link where the app lets you add a custom connector. The secret inside the link is the password, so keep it private."]
+  ];
+  CONN.forEach(function (c, i) {
+    var b = document.createElement("button"); b.setAttribute("role", "tab"); b.textContent = c[0];
+    b.onclick = function () { [].forEach.call($("seg").children, function (x) { x.setAttribute("aria-selected", "false"); }); b.setAttribute("aria-selected", "true"); $("conn").textContent = c[1]; $("conn-note").textContent = c[2]; };
+    $("seg").appendChild(b); if (!i) b.onclick();
+  });
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-copy]"); if (!b) return;
+    var txt = $(b.dataset.copy).textContent;
+    var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1200); };
+    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done, function () {});
+  });
+})();
+</script>
+</body>
+</html>
