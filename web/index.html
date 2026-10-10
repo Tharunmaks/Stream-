@@ -238,6 +238,36 @@ footer.foot { text-align: center; color: var(--ink-3); font-size: 12.5px; paddin
 details.hitem > summary::-webkit-details-marker { display: none; }
 .table-box { display: grid; }
 
+.strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 760px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.sc { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; display: grid; gap: 2px; cursor: pointer; text-align: left; color: inherit; transition: border-color .2s, transform .2s var(--ease); min-width: 0; }
+.sc:hover { border-color: var(--warm); transform: translateY(-2px); }
+.sc .k { font-size: 11.5px; color: var(--ink-3); letter-spacing: .08em; text-transform: uppercase; font-family: var(--f-mono); }
+.sc .v { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; gap: 7px; align-items: center; }
+.sc .v i { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); flex: none; } .sc .v i.on { background: var(--green); box-shadow: 0 0 0 4px rgba(25,176,125,.18); }
+.avatar { width: 44px; height: 44px; border-radius: 50%; background: var(--raise); border: 1px solid var(--line-2); object-fit: cover; display: grid; place-items: center; font-weight: 700; }
+.pal-in { font-size: 17px; }
+.pal-list { display: grid; gap: 4px; max-height: 50vh; overflow-y: auto; }
+.pal-item { text-align: left; background: none; border: 0; border-radius: 10px; padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 10px; color: var(--ink-2); }
+.pal-item:hover, .pal-item.sel { background: var(--raise); color: var(--ink); }
+.tl-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+.tl-row:last-child { border-bottom: 0; }
+.tl-row .d { font-size: 12.5px; color: var(--ink-3); }
+.tick.run { background: rgba(57,135,229,.2); color: var(--blue); animation: pulse 1s infinite; }
+.tick.warn { background: rgba(224,164,58,.2); color: var(--warn); }
+.step { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; align-items: start; }
+.step > b { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(242,201,138,.12); color: var(--warm); font-family: var(--f-mono); font-size: 13px; }
+.toolgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } @media (max-width: 640px) { .toolgrid { grid-template-columns: minmax(0, 1fr); } }
+.tool { border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; background: rgba(255,255,255,.02); } .tool b { font-family: var(--f-mono); font-size: 13px; color: var(--warm); } .tool p { font-size: 12.5px; color: var(--ink-3); margin: 2px 0 0; max-width: none; }
+@keyframes glowline { from { background-position: 0 0; } to { background-position: 200% 0; } }
+.top::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; background: linear-gradient(90deg, transparent, var(--blue), var(--green), var(--warm), transparent); background-size: 200% 100%; animation: glowline 6s linear infinite; opacity: .6; }
+.top { position: sticky; }
+@media (max-width: 760px) { .top { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(7,11,20,.96); } }
+.stack { grid-template-columns: minmax(0, 1fr); }
+.step > div { min-width: 0; }
+pre.cmd { max-width: 100%; }
+html, body { max-width: 100vw; overflow-x: hidden; }
+
 </style>
 </head>
 <body>
@@ -254,6 +284,8 @@ details.hitem > summary::-webkit-details-marker { display: none; }
     <button class="tab" role="tab" data-page="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>History</button>
   </nav>
   <span class="grow"></span>
+  <button class="icon-btn" id="palette-btn" aria-label="Search and commands (press /)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+  <button class="icon-btn" data-goto="settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   <button class="pill" id="pill" aria-label="Current model"><i></i><span id="pill-t">No model</span></button>
 </div></header>
 
@@ -270,6 +302,7 @@ details.hitem > summary::-webkit-details-marker { display: none; }
       </div>
     </div>
     <div id="home-banner"></div>
+    <div class="strip" id="strip"></div>
     <div class="grid3">
       <button class="go" data-goto="models"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg></div><h3>1 · Get a model</h3><p class="muted">Pick from the catalog, search Hugging Face, or load a .gguf from your phone. It's saved on the device.</p></button>
       <button class="go" data-goto="chat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg></div><h3>2 · Chat</h3><p class="muted">Watch your words become numbers, the brain load, and experts stream in.</p></button>
@@ -324,6 +357,7 @@ details.hitem > summary::-webkit-details-marker { display: none; }
       <div class="card"><div class="row" style="justify-content:space-between"><h3>Can this page run models?</h3><button class="btn sm" id="doc-run">Re-check</button></div><div id="doctor"></div></div>
       <div class="card"><h3>Speed test</h3><p class="muted">Loads nothing new: runs a fixed prompt on the model that is open now and reports the speed this device really gets.</p><div id="bench"></div><div class="row"><button class="btn primary" id="bench-run">Run speed test</button></div></div>
     </div>
+    <div class="card" id="lab"><div class="row" style="justify-content:space-between"><div><span class="eyebrow">Test lab</span><h3>Run any test, or all of them</h3></div><div class="row"><button class="btn" id="lab-copy">Copy report</button><button class="btn primary" id="lab-all">Run all</button></div></div><div id="lab-list"></div></div>
     <div class="grid2">
       <div class="card"><h3>Your phone (native engine)</h3><div id="t-native"></div></div>
       <div class="card"><h3>Correctness checks</h3><div id="t-correct"></div></div>
@@ -337,6 +371,12 @@ details.hitem > summary::-webkit-details-marker { display: none; }
       <div class="card"><div class="row" style="justify-content:space-between"><h3>Your prompts</h3><button class="btn sm" id="hist-clear">Clear</button></div><div id="hist" class="stack"></div></div>
       <div class="card"><h3>This device</h3><div id="hist-stats"></div><h3 style="margin-top:8px">Where the project is</h3><div id="hist-time"></div></div>
     </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="page" id="settings" role="tabpanel" hidden>
+    <div class="head"><span class="eyebrow">Accounts · engine · AI coders</span><h1>Settings</h1></div>
+    <div id="set-body" class="stack"></div>
   </section>
 </main>
 <footer class="foot">ExpertStream · free and open source · speed numbers measured on a 4× A78 + 4× A55 phone with 7.3 GB RAM</footer>
@@ -564,7 +604,7 @@ document.addEventListener('click', e => {
 });
 
 /* router: one page at a time, hash based */
-const PAGES = ['home', 'models', 'chat', 'terminal', 'testing', 'history'];
+const PAGES = ['home', 'models', 'chat', 'terminal', 'testing', 'history', 'settings'];
 const pageHooks = {};
 function go(page, push = true) {
   if (!PAGES.includes(page)) page = 'home';
@@ -698,10 +738,10 @@ async function inspectFile(file) {
 }
 async function inspectUrl(url, size) {
   for (const mb of [4, 16, 48]) {
-    const r = await fetch(url, { headers: { Range: `bytes=0-${(mb << 20) - 1}` } });
-    if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
-    const buf = await r.arrayBuffer();
-    try { return summarize(parseGGUF(buf), size); } catch (e) { if (!(e instanceof NeedMore) || mb === 48) throw e; }
+    let r; try { r = await fetch(url, { headers: Object.assign({ Range: `bytes=0-${(mb << 20) - 1}` }, HF.headers()) }); } catch (e) { throw new Error(NET_MSG); }
+    if (!r.ok && r.status !== 206) throw new Error(r.status === 401 || r.status === 403 ? 'This model is private or gated. Connect your Hugging Face account (Settings) and accept its license on huggingface.co.' : 'HTTP ' + r.status);
+    const buf = await r.arrayBuffer(), cr = r.headers.get('content-range'), total = size || (cr ? +cr.split('/')[1] : buf.byteLength);
+    try { return summarize(parseGGUF(buf), total); } catch (e) { if (!(e instanceof NeedMore) || mb === 48) throw e; }
   }
 }
 
@@ -1080,6 +1120,11 @@ async function openRepo(repo) {
 function renderHF(body) {
   const inp = h('input', { type: 'search', placeholder: 'Search models: qwen, olmoe, llama, smol…', value: hfState.q, enterkeyhint: 'search' });
   const form = h('form', { class: 'row', style: 'flex-wrap:nowrap', onsubmit: e => { e.preventDefault(); hfSearch(inp.value.trim()); } }, inp, h('button', { class: 'btn primary', type: 'submit' }, 'Search'));
+  const imp = h('input', { type: 'text', placeholder: 'Paste a Hugging Face link or owner/name…', enterkeyhint: 'go' });
+  const impForm = h('form', { class: 'row', style: 'flex-wrap:nowrap', onsubmit: e => { e.preventDefault(); importFromText(imp.value); } }, imp, h('button', { class: 'btn', type: 'submit' }, 'Import'));
+  const mine = h('div', { class: 'stack' });
+  body.append(accountCard(() => { if (mtab === 'hf') renderModels(); }), h('div', { class: 'card' }, h('h3', {}, 'Import from a link'), impForm));
+  if (HFAcct.user) { const btnMine = h('button', { class: 'btn', onclick: async () => { btnMine.textContent = 'Loading…'; const l = await HFAcct.myRepos(); mine.replaceChildren(...(l.length ? l.map(m => h('div', { class: 'mcard', style: 'cursor:pointer', onclick: () => openRepo(m.id) }, h('div', { class: 'glyph' }, glyphOf(m.id.split('/')[1])), h('div', {}, h('div', { class: 't' }, m.id), h('div', { class: 'm' }, m.private ? chip('warn', 'private') : null, m.arch ? chip(ENGINE_ARCH[m.arch] ? 'good' : 'bad', m.arch) : null, m.total ? chip('', fmtN(m.total) + ' params') : null)), h('div', { class: 'acts' }, h('button', { class: 'btn sm' }, 'Files')))) : [h('div', { class: 'note' }, 'No GGUF repositories found under your account or organisations.')])); btnMine.remove(); } }, 'Show my GGUF repositories'); body.append(btnMine, mine); }
   body.append(form, h('div', { class: 'row' }, ['qwen3', 'olmoe', 'smollm2', 'llama 3.2', 'qwen2.5', 'mixtral'].map(q => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => { inp.value = q; hfSearch(q); } }, q))));
   if (hfState.openRepo) { const r = hfState.openRepo; hfState.openRepo = null; setTimeout(() => openRepo(r), 50); }
   if (hfState.loading) { body.append(...[1, 2, 3, 4].map(() => h('div', { class: 'skel', style: 'height:64px' }))); return; }
@@ -1092,7 +1137,6 @@ function renderHF(body) {
       h('div', { class: 'acts' }, h('button', { class: 'btn sm' }, 'Files'))));
   });
   if (hfState.results && !hfState.results.length && !hfState.error) body.append(h('div', { class: 'card empty' }, h('p', {}, 'Nothing found. Try a shorter search.')));
-  body.append(h('details', { class: 'think' }, h('summary', {}, 'Private or gated models'), h('p', { class: 'dim' }, 'Paste a Hugging Face read token to access gated repos. It is stored only in this browser and sent only to huggingface.co.'), h('input', { type: 'password', placeholder: 'hf_…', value: store.get('hftoken', ''), onchange: e => { store.set('hftoken', e.target.value.trim()); toast('Token saved on this device'); } })));
 }
 
 /* ----- From device ----- */
@@ -1472,6 +1516,179 @@ addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.mes
   renderDoctor();
   if (nat) chatWelcome();
 })();
+
+/* ===== Hugging Face account connector + import by link ===== */
+const HFAcct = {
+  user: store.get('hfuser', null), subs: new Set(),
+  on(f) { this.subs.add(f); }, emit() { this.subs.forEach(f => { try { f(); } catch (e) { } }); },
+  get token() { return store.get('hftoken', ''); },
+  async connect(token) {
+    let r; try { r = await fetch(HF.base + '/api/whoami-v2', { headers: { Authorization: 'Bearer ' + token } }); } catch (e) { throw new Error(NET_MSG); }
+    if (r.status === 401) throw new Error('Hugging Face rejected that token. Make a new one at huggingface.co/settings/tokens (type "Read") and paste it again.');
+    if (!r.ok) throw new Error('Hugging Face answered HTTP ' + r.status);
+    const j = await r.json();
+    store.set('hftoken', token);
+    this.user = { name: j.name, fullname: j.fullname || j.name, avatar: j.avatarUrl, orgs: (j.orgs || []).map(o => o.name), role: j.auth && j.auth.accessToken && j.auth.accessToken.role };
+    store.set('hfuser', this.user); this.emit(); return this.user;
+  },
+  disconnect() { store.set('hftoken', ''); store.set('hfuser', null); this.user = null; this.emit(); },
+  async myRepos() {
+    if (!this.user) return [];
+    const seen = new Set(), out = [];
+    for (const a of [this.user.name, ...this.user.orgs]) {
+      try { const l = await HF.json(`${HF.base}/api/models?author=${encodeURIComponent(a)}&filter=gguf&limit=40&expand%5B%5D=gguf&expand%5B%5D=downloads&expand%5B%5D=private`); for (const m of l) if (!seen.has(m.id)) { seen.add(m.id); out.push({ id: m.id, arch: m.gguf && m.gguf.architecture, total: m.gguf && m.gguf.total, downloads: m.downloads || 0, private: !!m.private }); } } catch (e) { }
+    }
+    return out;
+  },
+};
+function accountCard(onChange) {
+  const box = h('div', { class: 'card' });
+  const draw = () => {
+    const u = HFAcct.user;
+    if (u) {
+      box.replaceChildren(h('div', { class: 'row', style: 'flex-wrap:nowrap' }, u.avatar ? h('img', { class: 'avatar', src: u.avatar, alt: '', referrerpolicy: 'no-referrer' }) : h('div', { class: 'avatar' }, glyphOf(u.name)), h('div', { class: 'grow' }, h('b', {}, u.fullname), h('div', { class: 'dim', style: 'font-size:13px' }, '@' + u.name + (u.orgs.length ? ' · ' + u.orgs.length + ' orgs' : '') + (u.role ? ' · token: ' + u.role : '')), ), chip('good', 'connected')),
+        h('p', { class: 'muted', style: 'font-size:14px' }, 'Private and gated models in your account can now be searched and downloaded here. For gated models, accept the license once on huggingface.co.'),
+        h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => { go('models'); showModelsTab('hf'); } }, 'Browse my models'), h('button', { class: 'btn sm danger', onclick: () => { HFAcct.disconnect(); toast('Disconnected. The token was removed from this browser.'); } }, 'Disconnect')));
+    } else {
+      const inp = h('input', { type: 'password', placeholder: 'hf_xxxxxxxxxxxxxxxx', autocomplete: 'off', id: 'hf-token-' + Math.random().toString(36).slice(2, 6) }), msg = h('div', { class: 'note bad', hidden: true });
+      const go1 = async () => { const t = inp.value.trim(); if (!t) return; btn.disabled = true; btn.textContent = 'Checking…'; msg.hidden = true; try { const u = await HFAcct.connect(t); toast('Connected as @' + u.name, 'good'); } catch (e) { msg.hidden = false; msg.textContent = e.message; } btn.disabled = false; btn.textContent = 'Connect'; };
+      const btn = h('button', { class: 'btn primary', onclick: go1 }, 'Connect');
+      box.replaceChildren(h('div', { class: 'row', style: 'justify-content:space-between' }, h('h3', {}, 'Connect your Hugging Face account'), chip('', 'not connected')),
+        h('div', { class: 'step' }, h('b', {}, '1'), h('div', {}, 'Open ', h('a', { href: 'https://huggingface.co/settings/tokens/new?tokenType=read', target: '_blank', rel: 'noopener' }, 'huggingface.co/settings/tokens'), ' and create a token of type ', h('b', {}, 'Read'), '.')),
+        h('div', { class: 'step' }, h('b', {}, '2'), h('div', {}, 'Paste it here. It is checked with Hugging Face and stored only in this browser.')),
+        h('div', { class: 'row', style: 'flex-wrap:nowrap' }, inp, btn), msg);
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') go1(); });
+    }
+  };
+  draw(); HFAcct.on(() => { draw(); onChange && onChange(); });
+  return box;
+}
+/* "paste a link or owner/name" */
+function parseHF(text) {
+  text = (text || '').trim(); if (!text) return null;
+  let m = text.match(/huggingface\.co\/([^\/\s]+\/[^\/\s?#]+)(?:\/(?:blob|resolve)\/[^\/]+\/([^?#\s]+))?/i);
+  if (m) return { repo: m[1], file: m[2] ? decodeURIComponent(m[2]) : null };
+  m = text.match(/^([\w.\-]+\/[\w.\-]+?)(?:\s+(\S+\.gguf))?$/); if (m) return { repo: m[1], file: m[2] || null };
+  return null;
+}
+async function importFromText(text) {
+  const t = parseHF(text); if (!t) return toast('Paste a Hugging Face link or owner/name, like Qwen/Qwen3-0.6B-GGUF', 'bad', 5000);
+  if (t.file && /\.gguf$/i.test(t.file)) { showModelsTab('hf'); return checkRemote(t.repo, t.file, 0, null); }
+  openRepo(t.repo);
+}
+
+/* ===== Settings: account, engine defaults, MCP server for AI coders, storage ===== */
+const MCP_TOOLS = [['expertstream_status', 'RAM, disk, CPU, engine, loaded model'], ['recommend_models', 'rank models that fit this device (up to 250B) and give the setup steps'], ['plan_capacity', 'will a model of this size fit, and how fast would it run'], ['list_local_models', 'models on the device with a can-it-run verdict'], ['search_huggingface', 'search GGUF models, flags supported architectures'], ['list_repo_files', 'list the GGUF files of a repository'], ['inspect_model', 'read a model header without downloading it'], ['download_model', 'resumable download from Hugging Face'], ['download_status', 'progress of a download'], ['load_model', 'load a model into the engine'], ['generate', 'ask the loaded model'], ['chat_reset', 'start a new conversation'], ['benchmark', 'measure tokens per second'], ['unload_model', 'free memory'], ['import_pack', 'convert a split GGUF MoE for very large models'], ['open_web_ui', 'start this website on the device'], ['connect_huggingface', 'save a Hugging Face token for private/gated models']];
+const REPO = 'https://github.com/Tharunmaks/Stream-.git', BRANCH = 'claude/expertstream-moe-android-oegt59';
+function cmdBlock(text) { return h('div', { style: 'position:relative' }, h('pre', { class: 'cmd' }, text), h('button', { class: 'btn sm', style: 'position:absolute;top:6px;right:6px', onclick: () => copyText(text) }, 'Copy')); }
+function slider(key, label, min, max, step, def, fmt, note) { const v = h('b', { class: 'mono' }, fmt(store.get(key, def))); return h('label', { class: 'field' }, h('span', { class: 'row', style: 'justify-content:space-between' }, label, v), h('input', { type: 'range', min, max, step, value: store.get(key, def), oninput: e => { store.set(key, +e.target.value); v.textContent = fmt(+e.target.value); } }), note ? h('span', { class: 'dim', style: 'font-size:12px' }, note) : null); }
+async function renderSettings() {
+  const box = $('#set-body'); box.replaceChildren();
+  box.append(accountCard(() => { if (!$('#settings').hidden) renderSettings(); }));
+  // engine defaults
+  box.append(h('div', { class: 'card' }, h('h3', {}, 'Engine defaults'), h('div', { class: 'grid2' }, slider('temp', 'Creativity (temperature)', 0, 1.5, .05, .7, v => v.toFixed(2), '0 = always the most likely word'), slider('max', 'Longest answer (tokens)', 32, 1024, 32, 256, v => v), slider('ctx', 'Chat memory (tokens)', 256, 4096, 256, 1024, v => v, 'applies when a model loads'), slider('cache', 'Expert cache (MB)', 64, 1024, 32, 384, v => v + ' MB', 'applies when a model loads'))));
+  // MCP
+  const tokOpt = h('input', { type: 'checkbox', id: 'mcp-tok' }), cmdWrap = h('div', { class: 'stack' });
+  const drawCmd = () => {
+    const withTok = tokOpt.checked && HFAcct.token, env = withTok ? ` -e HF_TOKEN=${HFAcct.token}` : '';
+    cmdWrap.replaceChildren(
+      h('div', { class: 'step' }, h('b', {}, '1'), h('div', { class: 'stack' }, h('div', {}, h('b', {}, 'Install the engine'), h('span', { class: 'dim' }, '  (Termux, Linux or macOS; needs git, make, a C compiler, Python 3)')), cmdBlock(`git clone -b ${BRANCH} ${REPO}\ncd Stream- && make`))),
+      h('div', { class: 'step' }, h('b', {}, '2'), h('div', { class: 'stack' }, h('div', {}, h('b', {}, 'Add it to Claude Code')), cmdBlock(`claude mcp add expertstream${env} -- python3 ~/Stream-/mcp/expertstream_mcp.py --http 8765 --stdio`), h('p', { class: 'dim', style: 'font-size:12.5px' }, '--http 8765 lets this page show the connection status. Remove it if you do not need that.'))),
+      h('div', { class: 'step' }, h('b', {}, '3'), h('div', { class: 'stack' }, h('div', {}, h('b', {}, 'Or any other MCP client'), h('span', { class: 'dim' }, '  (.mcp.json / settings)')), cmdBlock(JSON.stringify({ mcpServers: { expertstream: Object.assign({ command: 'python3', args: ['~/Stream-/mcp/expertstream_mcp.py', '--http', '8765', '--stdio'] }, withTok ? { env: { HF_TOKEN: HFAcct.token } } : {}) } }, null, 2)))),
+      h('div', { class: 'step' }, h('b', {}, '4'), h('div', { class: 'stack' }, h('div', {}, h('b', {}, 'Ask your AI coder')), cmdBlock('Use expertstream to find the best model that fits this device, download it, load it, and ask it to summarize my README.'))));
+  };
+  tokOpt.addEventListener('change', drawCmd); drawCmd();
+  const stat = h('div', { class: 'note' }, 'Not checked yet.'), chk = h('button', { class: 'btn', onclick: async () => { chk.textContent = 'Checking…'; stat.className = 'note'; try { const r = await fetch('http://127.0.0.1:8765/health', { cache: 'no-store' }); const j = await r.json(); stat.className = 'note ok'; stat.replaceChildren(h('b', {}, 'Connected. '), `${j.tools} tools · RAM free ${j.device.ram_free_mb} MB · disk free ${j.device.disk_free_gb} GB · engine ${j.device.engine ? 'built' : 'NOT built (run make)'} · limit ${j.max_params_b}B parameters`); store.set('mcp', Date.now()); } catch (e) { stat.className = 'note bad'; stat.replaceChildren(h('b', {}, 'Not reachable. '), 'Start it with the command in step 2 (with --http 8765), keep Termux open, and use the same device. Pages opened from claude.ai or another phone cannot see it.'); } chk.textContent = 'Check connection'; stripDraw(); } }, 'Check connection');
+  box.append(h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'For AI coders'), h('h3', {}, 'MCP server: run models from Claude Code'),
+    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Connect an AI coder such as Claude Code and it can search Hugging Face, download, load and run models on this device, and plan on-device AI systems up to 250 billion parameters. No browser needed.'),
+    HFAcct.token ? h('label', { class: 'row', style: 'gap:8px;font-size:13.5px' }, tokOpt, 'Include my Hugging Face token in the commands (they will contain a secret)') : null,
+    cmdWrap, h('div', { class: 'row' }, chk), stat,
+    h('details', { class: 'think' }, h('summary', {}, MCP_TOOLS.length + ' tools the AI gets'), h('div', { class: 'toolgrid', style: 'margin-top:8px' }, MCP_TOOLS.map(([n, d]) => h('div', { class: 'tool' }, h('b', {}, n), h('p', {}, d))))),
+    h('p', { class: 'dim', style: 'font-size:12.5px' }, 'Limits: one loaded model at a time; models above 250B parameters are refused; speed depends on your device (see the capacity planner). The server runs only on this device and the status port listens on 127.0.0.1.')));
+  // storage
+  const usage = await Lib.usage(); let items = []; try { items = await Lib.list(); } catch (e) { }
+  box.append(h('div', { class: 'card' }, h('h3', {}, 'Storage and data'), h('div', { class: 'table-box' }, trow('Models saved', String(items.filter(i => i.complete).length)), trow('Used by this site', usage ? fmtB(usage.used) : '?'), trow('Available', usage ? fmtB(usage.quota - usage.used) : '?'), trow('Prompts in history', String(hist.list.length))),
+    h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => { hist.list = []; store.set('hist', []); toast('History cleared'); renderSettings(); } }, 'Clear history'), h('button', { class: 'btn sm danger', onclick: async () => { Brain.close(); for (const i of items) await Lib.remove(i.name); toast('All models deleted'); renderSettings(); } }, 'Delete all models'), h('button', { class: 'btn sm danger', onclick: () => { try { Object.keys(localStorage).filter(k => k.startsWith('es2.')).forEach(k => localStorage.removeItem(k)); } catch (e) { } location.reload(); } }, 'Reset everything'))));
+  box.append(h('p', { class: 'dim', style: 'font-size:12.5px;text-align:center' }, 'ExpertStream web 2.2 · engine: ' + (Brain.mode || 'idle') + ' · ' + (Brain.native ? 'native server connected' : 'WebAssembly')));
+}
+pageHooks.settings = renderSettings;
+
+/* ===== Test lab: environment, network, storage and model behaviour tests ===== */
+async function labAsk(text, o = {}) {
+  let out = '', done = null, ids = 0;
+  await Brain.ask(text, Object.assign({ temp: 0, max: 48 }, o), e => { if (e.ev === 'tok') out += e.t; else if (e.ev === 'done') done = e; else if (e.ev === 'tokens') ids = e.n; if (o.on) o.on(e); });
+  return { text: out.trim(), done, ids };
+}
+const need = () => { if (!Brain.ready) return { status: 'skip', detail: 'load a model first' }; };
+const LAB = [
+  { group: 'This browser', id: 'wasm', name: 'WebAssembly + SIMD', run: async () => { const r = await runDoctor(); const w = r.find(x => x.name === 'WebAssembly'), s = r.find(x => x.name === 'WASM SIMD'); return { status: w.ok && s.ok ? 'ok' : 'bad', detail: s.msg }; } },
+  { group: 'This browser', id: 'worker', name: 'Background worker', run: async () => { const r = (await runDoctor()).find(x => x.name === 'Background worker'); return { status: r.ok ? 'ok' : 'bad', detail: r.msg }; } },
+  { group: 'This browser', id: 'mem', name: 'Can allocate 1 GB of engine memory', run: async () => { try { const m = new WebAssembly.Memory({ initial: 16384 }); const n = m.buffer.byteLength; return { status: 'ok', detail: fmtB(n) + ' allocated' }; } catch (e) { try { const m = new WebAssembly.Memory({ initial: 8192 }); return { status: 'warn', detail: '1 GB failed, 512 MB works: use smaller models' }; } catch (x) { return { status: 'bad', detail: String(x.message) }; } } } },
+  { group: 'Storage', id: 'opfs', name: 'Model storage read/write speed', run: async () => {
+    if (!Lib.supported) return { status: 'bad', detail: 'no private file storage in this browser' };
+    const root = await navigator.storage.getDirectory(), fh = await root.getFileHandle('speedtest.tmp', { create: true });
+    const w = await fh.createWritable(); const chunk = new Uint8Array(4 << 20); const t0 = performance.now(); for (let i = 0; i < 8; i++) await w.write(chunk); await w.close();
+    const t1 = performance.now(), f = await fh.getFile(); await f.arrayBuffer(); const t2 = performance.now(); await root.removeEntry('speedtest.tmp');
+    const wr = 32 / ((t1 - t0) / 1000), rd = 32 / ((t2 - t1) / 1000); return { status: rd > 100 ? 'ok' : 'warn', detail: `write ${wr.toFixed(0)} MB/s · read ${rd.toFixed(0)} MB/s` }; } },
+  { group: 'Storage', id: 'quota', name: 'Free space for models', run: async () => { const u = await Lib.usage(); if (!u) return { status: 'warn', detail: 'browser does not report it' }; const free = u.quota - u.used; return { status: free > 3e9 ? 'ok' : free > 5e8 ? 'warn' : 'bad', detail: fmtB(free) + ' available' }; } },
+  { group: 'Network', id: 'hfapi', name: 'Reach Hugging Face', run: async () => { const t0 = performance.now(); try { const r = await fetch(HF.base + '/api/models?limit=1'); return { status: r.ok ? 'ok' : 'bad', detail: `HTTP ${r.status} in ${Math.round(performance.now() - t0)} ms` }; } catch (e) { return { status: 'bad', detail: NET_MSG }; } } },
+  { group: 'Network', id: 'hfspeed', name: 'Download speed from Hugging Face', run: async () => { try { const t0 = performance.now(); const r = await fetch(HF.resolve('bartowski/SmolLM2-135M-Instruct-GGUF', 'SmolLM2-135M-Instruct-Q8_0.gguf'), { headers: { Range: 'bytes=0-8388607' } }); const b = await r.arrayBuffer(); const mbps = b.byteLength / 1e6 / ((performance.now() - t0) / 1000); return { status: mbps > 3 ? 'ok' : 'warn', detail: mbps.toFixed(1) + ' MB/s  (' + fmtT(2.5e9 / 1e6 / mbps) + ' for a 2.5 GB model)' }; } catch (e) { return { status: 'bad', detail: NET_MSG }; } } },
+  { group: 'Network', id: 'hfauth', name: 'Hugging Face account', run: async () => { if (!HFAcct.token) return { status: 'skip', detail: 'not connected (optional)' }; try { const u = await HFAcct.connect(HFAcct.token); return { status: 'ok', detail: '@' + u.name }; } catch (e) { return { status: 'bad', detail: e.message }; } } },
+  { group: 'Network', id: 'mcp', name: 'MCP server on this device', run: async () => { try { const j = await (await fetch('http://127.0.0.1:8765/health', { cache: 'no-store' })).json(); return { status: 'ok', detail: j.tools + ' tools' }; } catch (e) { return { status: 'skip', detail: 'not running (optional, see Settings)' }; } } },
+  { group: 'Model', id: 'tok', name: 'Words become token numbers', run: async () => need() || (async () => { const r = await labAsk('Hello there, how are you today?', { max: 1 }); return { status: r.ids > 3 ? 'ok' : 'bad', detail: r.ids + ' tokens for 6 words' }; })() },
+  { group: 'Model', id: 'speed', name: 'Speed (48 tokens)', run: async () => need() || (async () => { await Brain.reset(); const r = await labAsk('Write a short story about a robot who learns to paint.', { max: 48 }); const t = r.done ? +r.done.tps : 0; return { status: t > 1 ? 'ok' : t > .15 ? 'warn' : 'bad', detail: t.toFixed(2) + ' tok/s · prompt ' + (+r.done.prompt_secs).toFixed(1) + ' s' }; })() },
+  { group: 'Model', id: 'greedy', name: 'Same question, same answer (temperature 0)', run: async () => need() || (async () => { await Brain.reset(); const a = await labAsk('Name three fruits.', { max: 24 }); await Brain.reset(); const b = await labAsk('Name three fruits.', { max: 24 }); return { status: a.text === b.text ? 'ok' : 'bad', detail: a.text === b.text ? 'identical' : 'answers differ' }; })() },
+  { group: 'Model', id: 'qa', name: 'Knows the capital of France', run: async () => need() || (async () => { await Brain.reset(); const r = await labAsk('What is the capital of France? Answer in one sentence.', { max: 32 }); return { status: /paris/i.test(r.text) ? 'ok' : 'warn', detail: r.text.slice(0, 70) }; })() },
+  { group: 'Model', id: 'math', name: 'Simple arithmetic', run: async () => need() || (async () => { await Brain.reset(); const r = await labAsk('What is 7 times 8? Reply with just the number.', { max: 12 }); return { status: /56/.test(r.text) ? 'ok' : 'warn', detail: r.text.slice(0, 50) || '(empty)' }; })() },
+  { group: 'Model', id: 'json', name: 'Follows a format (JSON)', run: async () => need() || (async () => { await Brain.reset(); const r = await labAsk('Reply with only JSON: {"city": "Paris", "country": "France"}', { max: 40 }); const m = r.text.match(/\{[\s\S]*\}/); let ok = false; try { ok = !!(m && JSON.parse(m[0])); } catch (e) { } return { status: ok ? 'ok' : 'warn', detail: r.text.slice(0, 60) }; })() },
+  { group: 'Model', id: 'memory', name: 'Remembers the conversation', run: async () => need() || (async () => { await Brain.reset(); await labAsk('My name is Zephyr. Remember it.', { max: 16 }); const r = await labAsk('What is my name?', { max: 16 }); await Brain.reset(); return { status: /zephyr/i.test(r.text) ? 'ok' : 'warn', detail: r.text.slice(0, 60) }; })() },
+  { group: 'Model', id: 'long', name: 'Long prompt (about 250 words)', run: async () => need() || (async () => { await Brain.reset(); const para = 'The quick brown fox jumps over the lazy dog near the river bank. '.repeat(20); const r = await labAsk(para + '\nSummarize the text above in five words.', { max: 16 }); return { status: r.done ? 'ok' : 'bad', detail: `prompt took ${(+r.done.prompt_secs).toFixed(1)} s` }; })() },
+  { group: 'Model', id: 'stop', name: 'Stop button works', run: async () => need() || (async () => { await Brain.reset(); let n = 0; const t0 = performance.now(); await Brain.ask('Count from 1 to 200 slowly.', { temp: 0, max: 200 }, e => { if (e.ev === 'tok' && ++n === 3) Brain.stop(); }).catch(() => { }); const ms = performance.now() - t0; return { status: n < 40 ? 'ok' : 'bad', detail: `stopped after ${n} tokens` }; })() },
+  { group: 'Model', id: 'reset', name: 'New chat clears memory', run: async () => need() || (async () => { await Brain.reset(); await labAsk('The secret word is banana.', { max: 8 }); await Brain.reset(); const r = await labAsk('What is the secret word?', { max: 20 }); return { status: /banana/i.test(r.text) ? 'warn' : 'ok', detail: r.text.slice(0, 60) }; })() },
+];
+const labState = {};
+function labDraw() {
+  const list = $('#lab-list'); list.replaceChildren(); let g = '';
+  for (const t of LAB) {
+    if (t.group !== g) { g = t.group; list.append(h('div', { class: 'eyebrow', style: 'margin:14px 0 2px' }, g)); }
+    const s = labState[t.id] || {}, cls = { ok: 'ok', warn: 'warn', bad: 'no', run: 'run', skip: 'wait' }[s.status] || 'wait', ic = { ok: '✓', warn: '!', bad: '✗', run: '…', skip: '–' }[s.status] || '·';
+    list.append(h('div', { class: 'tl-row' }, h('span', { class: 'tick ' + cls }, ic), h('div', {}, h('div', {}, t.name), s.detail ? h('div', { class: 'd' }, s.detail) : null), h('span', { class: 'd mono' }, s.ms ? (s.ms / 1000).toFixed(1) + ' s' : ''), h('button', { class: 'btn sm', disabled: labBusy, onclick: () => labRun(t) }, 'Run')));
+  }
+}
+let labBusy = false;
+async function labRun(t) {
+  if (labBusy) return; labBusy = true; labState[t.id] = { status: 'run', detail: 'running…' }; labDraw(); const t0 = performance.now();
+  try { const r = await t.run(); labState[t.id] = Object.assign({ ms: performance.now() - t0 }, r); } catch (e) { labState[t.id] = { status: 'bad', detail: String(e.message || e), ms: performance.now() - t0 }; }
+  labBusy = false; labDraw();
+}
+async function labAll() { for (const t of LAB) { await labRun(t); } const v = Object.values(labState); toast(`${v.filter(x => x.status === 'ok').length} passed · ${v.filter(x => x.status === 'warn').length} warnings · ${v.filter(x => x.status === 'bad').length} failed`, v.some(x => x.status === 'bad') ? 'bad' : 'good', 5000); }
+$('#lab-all').addEventListener('click', labAll);
+$('#lab-copy').addEventListener('click', () => copyText('ExpertStream test report · ' + new Date().toISOString() + '\nModel: ' + (Brain.ready ? Brain.name + ' (' + Brain.mode + ')' : 'none') + '\n' + LAB.map(t => { const s = labState[t.id] || {}; return `[${(s.status || 'not run').toUpperCase()}] ${t.name}${s.detail ? ' — ' + s.detail : ''}`; }).join('\n')));
+const _th = pageHooks.testing; pageHooks.testing = () => { _th(); labDraw(); };
+
+/* ===== Home status strip + command palette ===== */
+function stripDraw() {
+  const s = $('#strip'); if (!s) return;
+  const card = (k, v, on, to) => h('button', { class: 'sc', onclick: () => go(to) }, h('span', { class: 'k' }, k), h('span', { class: 'v' }, h('i', { class: on ? 'on' : '' }), v));
+  s.replaceChildren(card('Model', Brain.loading ? 'loading…' : Brain.ready ? Brain.name : 'none loaded', Brain.ready, Brain.ready ? 'chat' : 'models'), card('Hugging Face', HFAcct.user ? '@' + HFAcct.user.name : 'not connected', !!HFAcct.user, 'settings'),
+    card('AI coder (MCP)', store.get('mcp') ? 'seen on this device' : 'set up', !!store.get('mcp'), 'settings'), card('Engine', Brain.mode === 'native' ? 'native (fast)' : 'in this page', Brain.mode === 'native', 'testing'));
+}
+Brain.on(stripDraw); HFAcct.on(stripDraw); pageHooks.home = stripDraw;
+/* command palette */
+async function openPalette() {
+  const items = [['Home', () => go('home')], ['Models', () => go('models')], ['Chat', () => go('chat')], ['ExpertStream CLI', () => go('terminal')], ['Testing', () => go('testing')], ['History', () => go('history')], ['Settings', () => go('settings')],
+    ['Run all tests', () => { go('testing'); labAll(); }], ['Connect Hugging Face account', () => go('settings')], ['Set up Claude Code (MCP server)', () => go('settings')], ['Search Hugging Face', () => { go('models'); showModelsTab('hf'); }], ['Capacity planner', () => { go('models'); showModelsTab('plan'); }], ['New chat', async () => { await Brain.reset(); go('chat'); chatWelcome(); }], ['Unload model', () => { Brain.close(); toast('Model unloaded'); }]];
+  if (Demo.man) items.push(['Run built-in demo model', () => Demo.load(false)]);
+  try { (await Lib.list()).filter(i => i.complete).forEach(i => items.push(['Load ' + (i.file || i.name), () => loadModel({ opfs: i.name, label: i.file || i.name }).catch(() => { })])); } catch (e) { }
+  const inp = h('input', { class: 'pal-in', type: 'text', placeholder: 'Type a page or action…', autocomplete: 'off' }), list = h('div', { class: 'pal-list' }); let sel = 0, cur = items;
+  const sh = sheet([inp, list]);
+  const draw = () => { list.replaceChildren(...cur.map(([n, f], i) => h('button', { class: 'pal-item' + (i === sel ? ' sel' : ''), onclick: () => { sh.close(); f(); } }, n))); };
+  inp.addEventListener('input', () => { const q = inp.value.toLowerCase(); cur = items.filter(([n]) => n.toLowerCase().includes(q)); sel = 0; draw(); });
+  inp.addEventListener('keydown', e => { if (e.key === 'ArrowDown') { sel = Math.min(cur.length - 1, sel + 1); draw(); e.preventDefault(); } else if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); draw(); e.preventDefault(); } else if (e.key === 'Enter' && cur[sel]) { sh.close(); cur[sel][1](); } else if (e.key === 'Escape') sh.close(); });
+  draw(); setTimeout(() => inp.focus(), 50);
+}
+$('#palette-btn').addEventListener('click', openPalette);
+addEventListener('keydown', e => { const typing = /INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || ''); if ((e.key === '/' && !typing) || (e.key.toLowerCase() === 'k' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); openPalette(); } });
 
 })();
 </script>

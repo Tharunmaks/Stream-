@@ -16,6 +16,11 @@ model and opens the same app backed by the native engine
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
 ```
 
+**AI coders (MCP):** `claude mcp add expertstream -- python3 ~/Stream-/mcp/expertstream_mcp.py`
+lets Claude Code (or any MCP client) search Hugging Face, download, inspect, load and run models
+on the device, and plan on-device systems up to 250B parameters (17 tools, see Settings in the
+website). Standard library only; add `--http 8765 --stdio` to let the website show its status.
+
 Rebuild the site: `source emsdk_env.sh && bash scripts/build_web.sh` (`UI_ONLY=1` reuses the last
 WebAssembly build). Sources: `web/src/{template.html,style.css,js/,workers/}`.
 

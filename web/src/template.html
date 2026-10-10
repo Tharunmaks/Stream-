@@ -25,6 +25,8 @@
     <button class="tab" role="tab" data-page="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>History</button>
   </nav>
   <span class="grow"></span>
+  <button class="icon-btn" id="palette-btn" aria-label="Search and commands (press /)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></button>
+  <button class="icon-btn" data-goto="settings" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   <button class="pill" id="pill" aria-label="Current model"><i></i><span id="pill-t">No model</span></button>
 </div></header>
 
@@ -41,6 +43,7 @@
       </div>
     </div>
     <div id="home-banner"></div>
+    <div class="strip" id="strip"></div>
     <div class="grid3">
       <button class="go" data-goto="models"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg></div><h3>1 · Get a model</h3><p class="muted">Pick from the catalog, search Hugging Face, or load a .gguf from your phone. It's saved on the device.</p></button>
       <button class="go" data-goto="chat"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg></div><h3>2 · Chat</h3><p class="muted">Watch your words become numbers, the brain load, and experts stream in.</p></button>
@@ -95,6 +98,7 @@
       <div class="card"><div class="row" style="justify-content:space-between"><h3>Can this page run models?</h3><button class="btn sm" id="doc-run">Re-check</button></div><div id="doctor"></div></div>
       <div class="card"><h3>Speed test</h3><p class="muted">Loads nothing new: runs a fixed prompt on the model that is open now and reports the speed this device really gets.</p><div id="bench"></div><div class="row"><button class="btn primary" id="bench-run">Run speed test</button></div></div>
     </div>
+    <div class="card" id="lab"><div class="row" style="justify-content:space-between"><div><span class="eyebrow">Test lab</span><h3>Run any test, or all of them</h3></div><div class="row"><button class="btn" id="lab-copy">Copy report</button><button class="btn primary" id="lab-all">Run all</button></div></div><div id="lab-list"></div></div>
     <div class="grid2">
       <div class="card"><h3>Your phone (native engine)</h3><div id="t-native"></div></div>
       <div class="card"><h3>Correctness checks</h3><div id="t-correct"></div></div>
@@ -108,6 +112,12 @@
       <div class="card"><div class="row" style="justify-content:space-between"><h3>Your prompts</h3><button class="btn sm" id="hist-clear">Clear</button></div><div id="hist" class="stack"></div></div>
       <div class="card"><h3>This device</h3><div id="hist-stats"></div><h3 style="margin-top:8px">Where the project is</h3><div id="hist-time"></div></div>
     </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="page" id="settings" role="tabpanel" hidden>
+    <div class="head"><span class="eyebrow">Accounts · engine · AI coders</span><h1>Settings</h1></div>
+    <div id="set-body" class="stack"></div>
   </section>
 </main>
 <footer class="foot">ExpertStream · free and open source · speed numbers measured on a 4× A78 + 4× A55 phone with 7.3 GB RAM</footer>

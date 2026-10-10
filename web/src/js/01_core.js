@@ -60,7 +60,7 @@ document.addEventListener('click', e => {
 });
 
 /* router: one page at a time, hash based */
-const PAGES = ['home', 'models', 'chat', 'terminal', 'testing', 'history'];
+const PAGES = ['home', 'models', 'chat', 'terminal', 'testing', 'history', 'settings'];
 const pageHooks = {};
 function go(page, push = true) {
   if (!PAGES.includes(page)) page = 'home';

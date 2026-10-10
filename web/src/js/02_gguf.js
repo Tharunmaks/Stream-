@@ -116,9 +116,9 @@ async function inspectFile(file) {
 }
 async function inspectUrl(url, size) {
   for (const mb of [4, 16, 48]) {
-    const r = await fetch(url, { headers: { Range: `bytes=0-${(mb << 20) - 1}` } });
-    if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
-    const buf = await r.arrayBuffer();
-    try { return summarize(parseGGUF(buf), size); } catch (e) { if (!(e instanceof NeedMore) || mb === 48) throw e; }
+    let r; try { r = await fetch(url, { headers: Object.assign({ Range: `bytes=0-${(mb << 20) - 1}` }, HF.headers()) }); } catch (e) { throw new Error(NET_MSG); }
+    if (!r.ok && r.status !== 206) throw new Error(r.status === 401 || r.status === 403 ? 'This model is private or gated. Connect your Hugging Face account (Settings) and accept its license on huggingface.co.' : 'HTTP ' + r.status);
+    const buf = await r.arrayBuffer(), cr = r.headers.get('content-range'), total = size || (cr ? +cr.split('/')[1] : buf.byteLength);
+    try { return summarize(parseGGUF(buf), total); } catch (e) { if (!(e instanceof NeedMore) || mb === 48) throw e; }
   }
 }

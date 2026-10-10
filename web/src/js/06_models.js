@@ -153,6 +153,11 @@ async function openRepo(repo) {
 function renderHF(body) {
   const inp = h('input', { type: 'search', placeholder: 'Search models: qwen, olmoe, llama, smol…', value: hfState.q, enterkeyhint: 'search' });
   const form = h('form', { class: 'row', style: 'flex-wrap:nowrap', onsubmit: e => { e.preventDefault(); hfSearch(inp.value.trim()); } }, inp, h('button', { class: 'btn primary', type: 'submit' }, 'Search'));
+  const imp = h('input', { type: 'text', placeholder: 'Paste a Hugging Face link or owner/name…', enterkeyhint: 'go' });
+  const impForm = h('form', { class: 'row', style: 'flex-wrap:nowrap', onsubmit: e => { e.preventDefault(); importFromText(imp.value); } }, imp, h('button', { class: 'btn', type: 'submit' }, 'Import'));
+  const mine = h('div', { class: 'stack' });
+  body.append(accountCard(() => { if (mtab === 'hf') renderModels(); }), h('div', { class: 'card' }, h('h3', {}, 'Import from a link'), impForm));
+  if (HFAcct.user) { const btnMine = h('button', { class: 'btn', onclick: async () => { btnMine.textContent = 'Loading…'; const l = await HFAcct.myRepos(); mine.replaceChildren(...(l.length ? l.map(m => h('div', { class: 'mcard', style: 'cursor:pointer', onclick: () => openRepo(m.id) }, h('div', { class: 'glyph' }, glyphOf(m.id.split('/')[1])), h('div', {}, h('div', { class: 't' }, m.id), h('div', { class: 'm' }, m.private ? chip('warn', 'private') : null, m.arch ? chip(ENGINE_ARCH[m.arch] ? 'good' : 'bad', m.arch) : null, m.total ? chip('', fmtN(m.total) + ' params') : null)), h('div', { class: 'acts' }, h('button', { class: 'btn sm' }, 'Files')))) : [h('div', { class: 'note' }, 'No GGUF repositories found under your account or organisations.')])); btnMine.remove(); } }, 'Show my GGUF repositories'); body.append(btnMine, mine); }
   body.append(form, h('div', { class: 'row' }, ['qwen3', 'olmoe', 'smollm2', 'llama 3.2', 'qwen2.5', 'mixtral'].map(q => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => { inp.value = q; hfSearch(q); } }, q))));
   if (hfState.openRepo) { const r = hfState.openRepo; hfState.openRepo = null; setTimeout(() => openRepo(r), 50); }
   if (hfState.loading) { body.append(...[1, 2, 3, 4].map(() => h('div', { class: 'skel', style: 'height:64px' }))); return; }
@@ -165,7 +170,6 @@ function renderHF(body) {
       h('div', { class: 'acts' }, h('button', { class: 'btn sm' }, 'Files'))));
   });
   if (hfState.results && !hfState.results.length && !hfState.error) body.append(h('div', { class: 'card empty' }, h('p', {}, 'Nothing found. Try a shorter search.')));
-  body.append(h('details', { class: 'think' }, h('summary', {}, 'Private or gated models'), h('p', { class: 'dim' }, 'Paste a Hugging Face read token to access gated repos. It is stored only in this browser and sent only to huggingface.co.'), h('input', { type: 'password', placeholder: 'hf_…', value: store.get('hftoken', ''), onchange: e => { store.set('hftoken', e.target.value.trim()); toast('Token saved on this device'); } })));
 }
 
 /* ----- From device ----- */
