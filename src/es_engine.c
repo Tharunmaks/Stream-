@@ -341,6 +341,7 @@ static void forward(int32_t tok, int pos, int want_logits) {
     es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)tok, X, n);
     for (int l = 0; l < M.n_layer; l++) {
         layer *L = &M.L[l];
+        es_act_arena_reset();   /* activations of the previous layer are dead */
         rmsnorm(XN, X, L->attn_norm.data, n, M.eps);
         es_act a;
         es_act_prepare(&a, XN, n, n % 256 ? NULL : Q8A);
@@ -383,6 +384,7 @@ static void forward(int32_t tok, int pos, int want_logits) {
         }
     }
     if (!want_logits) return;
+    es_act_arena_reset();
     rmsnorm(XN, X, M.output_norm.data, n, M.eps);
     es_act a;
     es_act_prepare(&a, XN, n, n % 256 ? NULL : Q8A);
@@ -607,6 +609,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     GU = malloc(sizeof(float) * 2 * (size_t)ffmax * MAXK);
     H = malloc(sizeof(float) * (size_t)ffmax * MAXK);
     YE = malloc(sizeof(float) * (size_t)n * MAXK);
+    es_act_arena_init(sizeof(es_blk_q80) * ((size_t)(n + qd + 2 * ffmax * MAXK + 4096) / 32 + 64));
     Q8A = malloc(sizeof(es_block_q8_K) * (size_t)(n / 256 + 1 + qd / 256 + 1));
     Q8H = malloc(sizeof(es_block_q8_K) * (size_t)((ffmax / 256 + 1) * MAXK + qd / 256 + 1));
     size_t kv_bytes = sizeof(float) * (size_t)M.n_layer * M.ctx * kvd;

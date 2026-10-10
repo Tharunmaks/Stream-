@@ -218,12 +218,32 @@ void es_dequant_row(uint32_t t, const void *src, float *y, int n) {
     }
 }
 
+static es_blk_q80 *ARENA;
+static size_t ARENA_CAP, ARENA_USE;   /* in blocks */
+void es_act_arena_init(size_t bytes) { free(ARENA); ARENA_CAP = bytes / sizeof(es_blk_q80); ARENA = malloc(ARENA_CAP * sizeof(es_blk_q80)); ARENA_USE = 0; if (!ARENA) ARENA_CAP = 0; }
+void es_act_arena_reset(void) { ARENA_USE = 0; }
+
+static void quantize_q80(const float *x, es_blk_q80 *y, int n) {
+    for (int b = 0; b < n / 32; b++, x += 32) {
+        float amax = 0;
+        for (int i = 0; i < 32; i++) { const float v = x[i] < 0 ? -x[i] : x[i]; amax = v > amax ? v : amax; }
+        const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
+        y[b].d = d;
+        for (int i = 0; i < 32; i++) { const float v = x[i] * id; y[b].qs[i] = (int8_t)(int)(v < 0 ? v - 0.5f : v + 0.5f); }
+    }
+}
+
 void es_act_prepare(es_act *a, const float *x, int cols, es_block_q8_K *q8_buf) {
     static int float_only = -1; /* ES_FLOAT_ACT=1: exact float path (slow, for testing) */
     if (float_only < 0) float_only = getenv("ES_FLOAT_ACT") != NULL;
     if (float_only) q8_buf = NULL;
     a->x = x;
     a->cols = cols;
+    a->q80 = NULL;
+    if (!float_only && cols % 32 == 0 && ARENA_USE + (size_t)cols / 32 <= ARENA_CAP) {
+        a->q80 = ARENA + ARENA_USE; ARENA_USE += (size_t)cols / 32;
+        quantize_q80(x, a->q80, cols);
+    }
     a->q8 = q8_buf;
     if (q8_buf && cols % 256 == 0) es_quantize_q8_K(x, q8_buf, cols);
 }
@@ -241,6 +261,144 @@ static inline float dot_f32(const float *a, const float *b, int n) {
     return (s0 + s1) + (s2 + s3);
 }
 
+
+/* ---- integer dot kernels (activations are int8; weights stay packed) ---- */
+static inline float fp16f(uint16_t h) {   /* branch-free, no inf/nan (never appear in scales) */
+    uint32_t u = (uint32_t)(h & 0x7fff) << 13; float f; memcpy(&f, &u, 4);
+    f *= 0x1p112f;
+    return (h & 0x8000) ? -f : f;
+}
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+/* 16 int8 x 16 int8 -> 4 partial int32 sums */
+static inline v128_t wdot16(v128_t a, v128_t b) {
+    return wasm_i32x4_add(wasm_i32x4_dot_i16x8(wasm_i16x8_extend_low_i8x16(a), wasm_i16x8_extend_low_i8x16(b)),
+                          wasm_i32x4_dot_i16x8(wasm_i16x8_extend_high_i8x16(a), wasm_i16x8_extend_high_i8x16(b)));
+}
+static inline int whsum(v128_t v) { return wasm_i32x4_extract_lane(v, 0) + wasm_i32x4_extract_lane(v, 1) + wasm_i32x4_extract_lane(v, 2) + wasm_i32x4_extract_lane(v, 3); }
+#define LD(p) wasm_v128_load((const void *)(p))
+#endif
+static inline int dot8(const int8_t *a, const int8_t *b, int n) {
+#ifdef __wasm_simd128__
+    v128_t acc = wasm_i32x4_splat(0);
+    for (int i = 0; i < n; i += 16) acc = wasm_i32x4_add(acc, wdot16(LD(a + i), LD(b + i)));
+    return whsum(acc);
+#else
+    int s = 0; for (int i = 0; i < n; i++) s += (int)a[i] * (int)b[i]; return s;
+#endif
+}
+
+static void mv_q8_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 34;
+    for (int r = r0; r < r1; r++) {
+        const blk_q8_0 *x = (const blk_q8_0 *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) s += fp16f(x[b].d) * y[b].d * (float)dot8(x[b].qs, y[b].qs, 32);
+        out[r] = s;
+    }
+}
+static void mv_q4_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 18;
+    for (int r = r0; r < r1; r++) {
+        const blk_q4_0 *x = (const blk_q4_0 *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+#ifdef __wasm_simd128__
+            const v128_t q = LD(x[b].qs), m = wasm_i8x16_splat(15), e = wasm_i8x16_splat(8);
+            const v128_t lo = wasm_i8x16_sub(wasm_v128_and(q, m), e), hi = wasm_i8x16_sub(wasm_u8x16_shr(q, 4), e);
+            const int a = whsum(wasm_i32x4_add(wdot16(lo, LD(y[b].qs)), wdot16(hi, LD(y[b].qs + 16))));
+#else
+            int a = 0;
+            for (int j = 0; j < 16; j++) a += ((int)(x[b].qs[j] & 15) - 8) * y[b].qs[j] + ((int)(x[b].qs[j] >> 4) - 8) * y[b].qs[j + 16];
+#endif
+            s += fp16f(x[b].d) * y[b].d * (float)a;
+        }
+        out[r] = s;
+    }
+}
+static void mv_q5_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 22;
+    for (int r = r0; r < r1; r++) {
+        const blk_q5_0 *x = (const blk_q5_0 *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint32_t qh; memcpy(&qh, x[b].qh, 4);
+#ifdef __wasm_simd128__
+            int8_t w5[32];
+            for (int j = 0; j < 16; j++) { w5[j] = (int8_t)(((x[b].qs[j] & 15) | (int)(((qh >> j) << 4) & 0x10)) - 16); w5[j + 16] = (int8_t)(((x[b].qs[j] >> 4) | (int)((qh >> (j + 12)) & 0x10)) - 16); }
+            const int a = dot8(w5, y[b].qs, 32);
+#else
+            int a = 0;
+            for (int j = 0; j < 16; j++) {
+                const int x0 = (x[b].qs[j] & 15) | (int)(((qh >> j) << 4) & 0x10), x1 = (x[b].qs[j] >> 4) | (int)((qh >> (j + 12)) & 0x10);
+                a += (x0 - 16) * y[b].qs[j] + (x1 - 16) * y[b].qs[j + 16];
+            }
+#endif
+            s += fp16f(x[b].d) * y[b].d * (float)a;
+        }
+        out[r] = s;
+    }
+}
+static void mv_q4_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 144;
+    for (int r = r0; r < r1; r++) {
+        const blk_q4_K *x = (const blk_q4_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint8_t sc[8], mn[8];
+            for (int j = 0; j < 8; j++) scale_min_k4(j, x[b].scales, &sc[j], &mn[j]);
+            int dot = 0, mins = 0; const uint8_t *q = x[b].qs; const int8_t *q8 = y[b].qs;
+            for (int c = 0; c < 4; c++, q += 32, q8 += 64) {
+#ifdef __wasm_simd128__
+                const v128_t m = wasm_i8x16_splat(15), qa = LD(q), qb = LD(q + 16);
+                const int lo = whsum(wasm_i32x4_add(wdot16(wasm_v128_and(qa, m), LD(q8)), wdot16(wasm_v128_and(qb, m), LD(q8 + 16))));
+                const int hi = whsum(wasm_i32x4_add(wdot16(wasm_u8x16_shr(qa, 4), LD(q8 + 32)), wdot16(wasm_u8x16_shr(qb, 4), LD(q8 + 48))));
+#else
+                int lo = 0, hi = 0;
+                for (int l = 0; l < 32; l++) { lo += (q[l] & 15) * q8[l]; hi += (q[l] >> 4) * q8[l + 32]; }
+#endif
+                dot += sc[2 * c] * lo + sc[2 * c + 1] * hi;
+                mins += mn[2 * c] * (y[b].bsums[4 * c] + y[b].bsums[4 * c + 1]) + mn[2 * c + 1] * (y[b].bsums[4 * c + 2] + y[b].bsums[4 * c + 3]);
+            }
+            s += y[b].d * (fp16f(x[b].d) * (float)dot - fp16f(x[b].dmin) * (float)mins);
+        }
+        out[r] = s;
+    }
+}
+static void mv_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 210;
+    for (int r = r0; r < r1; r++) {
+        const blk_q6_K *x = (const blk_q6_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            const uint8_t *ql = x[b].ql, *qh = x[b].qh; const int8_t *sc = x[b].scales, *q8 = y[b].qs;
+            int tot = 0;
+            for (int h = 0; h < 2; h++, ql += 64, qh += 32, sc += 8, q8 += 128) {
+                int p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+#ifdef __wasm_simd128__
+                const v128_t m15 = wasm_i8x16_splat(15), m3 = wasm_i8x16_splat(3), c32 = wasm_i8x16_splat(32);
+                for (int is = 0; is < 2; is++) {
+                    const int l = is * 16;
+                    const v128_t a0 = LD(ql + l), a1 = LD(ql + l + 32), h = LD(qh + l);
+                    const v128_t q1 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(a0, m15), wasm_i8x16_shl(wasm_v128_and(h, m3), 4)), c32);
+                    const v128_t q2 = wasm_i8x16_sub(wasm_v128_or(wasm_v128_and(a1, m15), wasm_i8x16_shl(wasm_v128_and(wasm_u8x16_shr(h, 2), m3), 4)), c32);
+                    const v128_t q3 = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(a0, 4), wasm_i8x16_shl(wasm_v128_and(wasm_u8x16_shr(h, 4), m3), 4)), c32);
+                    const v128_t q4 = wasm_i8x16_sub(wasm_v128_or(wasm_u8x16_shr(a1, 4), wasm_i8x16_shl(wasm_u8x16_shr(h, 6), 4)), c32);
+                    p[is] = whsum(wdot16(q1, LD(q8 + l))); p[is + 2] = whsum(wdot16(q2, LD(q8 + l + 32)));
+                    p[is + 4] = whsum(wdot16(q3, LD(q8 + l + 64))); p[is + 6] = whsum(wdot16(q4, LD(q8 + l + 96)));
+                }
+#else
+                for (int l = 0; l < 32; l++) {
+                    const int is = l >> 4;
+                    p[is]     += (((ql[l] & 15) | (((qh[l] >> 0) & 3) << 4)) - 32) * q8[l];
+                    p[is + 2] += (((ql[l + 32] & 15) | (((qh[l] >> 2) & 3) << 4)) - 32) * q8[l + 32];
+                    p[is + 4] += (((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32) * q8[l + 64];
+                    p[is + 6] += (((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32) * q8[l + 96];
+                }
+#endif
+                for (int k = 0; k < 8; k++) tot += sc[k] * p[k];
+            }
+            s += y[b].d * fp16f(x[b].d) * (float)tot;
+        }
+        out[r] = s;
+    }
+}
+
 void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, float *y,
                float *scratch) {
     const size_t rb = es_row_bytes(t, cols);
@@ -248,6 +406,18 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
     if (t == GGML_Q2_K && a->q8) {
         es_matvec_q2_K((const es_block_q2_K *)W, cols, r0, r1, a->q8, y);
         return;
+    }
+    if (a->q80) {
+        switch (t) {
+        case GGML_Q8_0: mv_q8_0(w, cols, r0, r1, a->q80, y); return;
+        case GGML_Q4_0: mv_q4_0(w, cols, r0, r1, a->q80, y); return;
+        case GGML_Q5_0: mv_q5_0(w, cols, r0, r1, a->q80, y); return;
+        default: break;
+        }
+    }
+    if (a->q8) {
+        if (t == GGML_Q4_K) { mv_q4_K(w, cols, r0, r1, a->q8, y); return; }
+        if (t == GGML_Q6_K) { mv_q6_K(w, cols, r0, r1, a->q8, y); return; }
     }
     if (t == GGML_F32) {
         for (int r = r0; r < r1; r++) y[r] = dot_f32((const float *)(w + rb * r), a->x, cols);

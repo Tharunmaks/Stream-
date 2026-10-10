@@ -25,11 +25,16 @@ void es_dequant_row(uint32_t type, const void *src, float *dst, int n);
 
 /* Activation prepared once per matvec input: float copy plus Q8_K blocks
  * for the fast integer path. cols must be a multiple of 256. */
+typedef struct { float d; int8_t qs[32]; } es_blk_q80;   /* activation block for the 32-wide formats */
 typedef struct {
     const float *x;
-    es_block_q8_K *q8;
+    es_block_q8_K *q8;     /* NULL unless cols % 256 == 0 */
+    es_blk_q80 *q80;       /* NULL unless the arena had room; cols % 32 == 0 */
     int cols;
 } es_act;
+/* Q8_0 activations live in an arena that is emptied after every batch of matvecs. */
+void es_act_arena_init(size_t bytes);
+void es_act_arena_reset(void);
 void es_act_prepare(es_act *a, const float *x, int cols, es_block_q8_K *q8_buf);
 
 /* y[r] = dot(W[r], x) for r in [r0, r1). scratch holds `cols` floats. */
