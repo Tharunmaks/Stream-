@@ -25,6 +25,13 @@ Remote mode: `python3 mcp/expertstream_mcp.py --http 8765 --host 0.0.0.0 --model
 (`/mcp`, legacy `/sse`) and an OpenAI-compatible API (`/v1/chat/completions`, model `agent:<id>`) with a
 token, so a phone's coding AI can use a PC's models and the other way round.
 
+**Create a model from scratch (1 thousand to 37 billion parameters):** the MCP server has builder tools
+(`builder_rules`, `design_model`, `prepare_data`, `train_model`, `evaluate_model`, `grow_model`, `create_model`,
+`export_model`, ...) and rules R1-R10 that an AI must follow. `mcp/builder.py` is a NumPy trainer with verified
+backprop and a byte-level BPE tokenizer; models it trains match the engine's logits exactly. Training cost is about
+6 x parameters x tokens FLOPs, so large models need `grow_model` (function-preserving depth growth) and long runs;
+the tools print honest estimates. Needs NumPy (`pkg install python-numpy`).
+
 Rebuild the site: `source emsdk_env.sh && bash scripts/build_web.sh` (`UI_ONLY=1` reuses the last
 WebAssembly build). Sources: `web/src/{template.html,style.css,js/,workers/}`.
 

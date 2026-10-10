@@ -139,14 +139,14 @@ async function hfSearch(q) {
 }
 async function openRepo(repo) {
   const list = h('div', { class: 'files' }, h('div', { class: 'skel', style: 'height:44px' }), h('div', { class: 'skel', style: 'height:44px' }));
-  const sh = sheet([h('span', { class: 'eyebrow' }, 'Hugging Face'), h('h2', { style: 'font-size:20px;word-break:break-all' }, repo), h('p', { class: 'dim', style: 'font-size:13px' }, 'Smaller quantisations (Q2_K–Q4_K_M) are faster and fit; IQ… and BF16 files are not supported yet.'), list, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => sh.close() }, 'Close'))]);
+  const sh = sheet([h('span', { class: 'eyebrow' }, 'Hugging Face'), h('h2', { style: 'font-size:20px;word-break:break-all' }, repo), h('p', { class: 'dim', style: 'font-size:13px' }, 'Smaller quantisations (Q2_K–Q4_K_M) are faster and fit. IQ1–IQ3 files are not supported yet.'), list, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => sh.close() }, 'Close'))]);
   try {
     const files = await HF.files(repo);
     if (!files.length) { list.replaceChildren(h('div', { class: 'note bad' }, 'No .gguf files in this repository.')); return; }
     list.replaceChildren(...files.map(f => {
-      const bad = /(^|[-_.])(IQ\d|BF16)|\bbf16\b/i.test(f.path), split = /-\d{5}-of-\d{5}/.test(f.path);
+      const bad = /(^|[-_.])IQ[1-3]/i.test(f.path), split = /-\d{5}-of-\d{5}/.test(f.path);
       return h('div', { class: 'file' }, h('div', { style: 'min-width:0' }, h('div', { class: 'n' }, f.path), h('div', { class: 'row', style: 'gap:6px;margin-top:3px' }, chip('', fmtB(f.size)), bad ? chip('bad', 'unsupported quant') : null, split ? chip('warn', 'split · Termux') : null)),
-        h('div', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' }, h('button', { class: 'btn sm', onclick: e => checkRemote(repo, f.path, f.size, e.currentTarget) }, 'Check'), h('button', { class: 'btn sm primary', disabled: split || bad, onclick: () => { sh.close(); Dl.start(repo, f.path, f.size); showModelsTab('lib'); } }, 'Get')));
+        h('div', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' }, h('button', { class: 'btn sm', onclick: e => checkRemote(repo, f.path, f.size, e.currentTarget) }, 'Check'), h('button', { class: 'btn sm primary', disabled: bad || (split && !/-00001-of-/.test(f.path)), onclick: () => { sh.close(); Dl.start(repo, f.path, f.size); showModelsTab('lib'); } }, 'Get')));
     }));
   } catch (e) { list.replaceChildren(h('div', { class: 'note bad' }, String(e.message || e), h('span', { class: 'dim' }, ' If this page cannot reach huggingface.co, open it in a normal browser tab (see Testing → Doctor).'))); }
 }

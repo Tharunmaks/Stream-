@@ -58,7 +58,7 @@ HFO = urllib.request.build_opener(_HFRedirect())
 
 # ---------------- GGUF header ----------------
 GT = {0:('F32',1,4),1:('F16',1,2),2:('Q4_0',32,18),3:('Q4_1',32,20),6:('Q5_0',32,22),7:('Q5_1',32,24),8:('Q8_0',32,34),9:('Q8_1',32,36),10:('Q2_K',256,84),11:('Q3_K',256,110),12:('Q4_K',256,144),13:('Q5_K',256,176),14:('Q6_K',256,210),15:('Q8_K',256,292),16:('IQ2_XXS',256,66),17:('IQ2_XS',256,74),18:('IQ3_XXS',256,98),19:('IQ1_S',256,50),20:('IQ4_NL',32,18),21:('IQ3_S',256,110),22:('IQ2_S',256,82),23:('IQ4_XS',256,136),24:('I8',1,1),25:('I16',1,2),26:('I32',1,4),27:('I64',1,8),28:('F64',1,8),29:('IQ1_M',256,56),30:('BF16',1,2)}
-ENGINE_TYPES = {0,1,2,3,6,7,8,10,11,12,13,14}
+ENGINE_TYPES = {0,1,2,3,6,7,8,10,11,12,13,14,20,23,30}
 ARCH = {'olmoe':'verified','qwen3moe':'verified','qwen3':'verified','qwen2':'verified','llama':'ok','mixtral':'experimental'}
 class NeedMore(Exception): pass
 def parse_gguf(buf):
@@ -113,7 +113,7 @@ def assess(s, ctx=1024, cache_mb=384, free_ram_mb=None, file_name=''):
     bad = [GT[t][0] if t in GT else str(t) for t in s['types'] if t not in ENGINE_TYPES]
     if bad: blockers.append('unsupported quantisation: ' + ', '.join(bad))
     if s['rope_dim'] and s['head_dim'] and s['rope_dim'] != s['head_dim']: blockers.append('partial rotary embeddings are not supported')
-    if re.search(r'-\d{5}-of-\d{5}', file_name): warns.append('split GGUF: import with es_import first (import_pack tool)')
+    if re.search(r'-\d{5}-of-\d{5}', file_name): warns.append('split GGUF: the native engine loads the first part directly once every part is downloaded')
     if ARCH.get(s['arch']) == 'experimental': warns.append('mixtral routing is not verified against llama.cpp')
     kv_mb = s['layers'] * 2 * s['kv_heads'] * s['head_dim'] * ctx * 4 / 1048576
     core_mb = (s['core_bytes'] if s['moe'] else s['size']) / 1048576
@@ -161,6 +161,13 @@ def hf(url, **kw):
 def hf_json(url): return json.load(hf(url))
 JOBS = {}
 def download_job(jid, repo, file, dest):
+    m = re.match(r'^(.*)-00001-of-(\d{5})(\.gguf)$', file)
+    if not m: return _dl_one(jid, repo, file, dest, True)
+    for i in range(1, int(m.group(2)) + 1):
+        f = '%s-%05d-of-%s%s' % (m.group(1), i, m.group(2), m.group(3)); JOBS[jid]['file'] = f
+        _dl_one(jid, repo, f, os.path.join(os.path.dirname(dest), os.path.basename(f)), i == int(m.group(2)))
+        if JOBS[jid]['status'] in ('error', 'cancelled'): return
+def _dl_one(jid, repo, file, dest, last):
     j = JOBS[jid]; url = 'https://huggingface.co/%s/resolve/main/%s?download=true' % (repo, urllib.parse.quote(file))
     try:
         have = os.path.getsize(dest + '.part') if os.path.exists(dest + '.part') else 0
@@ -182,7 +189,8 @@ def download_job(jid, repo, file, dest):
             except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
                 if isinstance(e, urllib.error.HTTPError) and e.code < 500: raise
                 j['note'] = 'retrying: %s' % e; time.sleep(3)
-        os.replace(dest + '.part', dest); j['status'] = 'done'
+        os.replace(dest + '.part', dest)
+        if last: j['status'] = 'done'
     except Exception as e:
         j['status'] = 'error'; j['error'] = str(e) + (' (gated or private repo: connect a Hugging Face token)' if '401' in str(e) or '403' in str(e) else '')
 
@@ -528,9 +536,16 @@ def t_prepare(a):
     for pth in a['paths'][:200]:
         p = os.path.realpath(os.path.expanduser(pth))
         if not (under(p, os.path.expanduser('~')) or ALLOW_ANY_PATH): raise ValueError('data must be inside your home folder')
-        files = [os.path.join(r, f) for r, _, fs in os.walk(p) for f in fs] if os.path.isdir(p) else [p]
+        if any(part.startswith('.') for part in os.path.relpath(p, os.path.expanduser('~')).split(os.sep)): raise ValueError('hidden folders (such as .ssh or .config) are never used as training data (Rule R4)')
+        files = []
+        if os.path.isdir(p):
+            for r, ds, fs in os.walk(p):
+                ds[:] = [d for d in ds if not d.startswith('.') and d not in ('node_modules', '__pycache__')]
+                files += [os.path.join(r, f) for f in fs]
+        else: files = [p]
         for f in sorted(files)[:5000]:
-            if os.path.getsize(f) > 200 << 20 or os.path.basename(f).startswith('.'): continue
+            b = os.path.basename(f).lower()
+            if os.path.getsize(f) > 200 << 20 or b.startswith('.') or re.search(r'(id_rsa|id_ed25519|\.pem$|\.key$|\.p12$|secret|credential|passw|token|\.env)', b): continue
             try: t = open(f, encoding='utf-8', errors='ignore').read()
             except Exception: continue
             if len(t) < 20: continue

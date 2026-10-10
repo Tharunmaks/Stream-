@@ -24,7 +24,7 @@ int es_quant_supported(uint32_t t) {
     switch (t) {
     case GGML_F32: case GGML_F16: case GGML_Q4_0: case GGML_Q4_1: case GGML_Q5_0:
     case GGML_Q5_1: case GGML_Q8_0: case GGML_Q2_K: case GGML_Q3_K:
-    case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: return 1;
+    case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ4_NL: case GGML_IQ4_XS: case GGML_BF16: return 1;
     }
     return 0;
 }
@@ -43,6 +43,9 @@ size_t es_row_bytes(uint32_t t, int n) {
     case GGML_Q4_K: return (size_t)n / 256 * 144;
     case GGML_Q5_K: return (size_t)n / 256 * 176;
     case GGML_Q6_K: return (size_t)n / 256 * 210;
+    case GGML_IQ4_NL: return (size_t)n / 32 * 18;
+    case GGML_IQ4_XS: return (size_t)n / 256 * 136;
+    case GGML_BF16: return (size_t)n * 2;
     }
     return 0;
 }
@@ -155,8 +158,38 @@ static void deq_q6_K(const blk_q6_K *x, float *y, int nb) {
     }
 }
 
+static const int8_t KV_IQ4NL[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 void es_dequant_row(uint32_t t, const void *src, float *y, int n) {
     switch (t) {
+    case GGML_BF16: {
+        const uint16_t *h = src;
+        for (int i = 0; i < n; i++) { uint32_t u = (uint32_t)h[i] << 16; memcpy(&y[i], &u, 4); }
+        return;
+    }
+    case GGML_IQ4_NL: {
+        const uint8_t *p = src;
+        for (int i = 0; i < n / 32; i++, p += 18, y += 32) {
+            uint16_t dh; memcpy(&dh, p, 2);
+            const float d = es_fp16_to_fp32(dh);
+            for (int j = 0; j < 16; j++) { y[j] = d * KV_IQ4NL[p[2 + j] & 15]; y[j + 16] = d * KV_IQ4NL[p[2 + j] >> 4]; }
+        }
+        return;
+    }
+    case GGML_IQ4_XS: {
+        const uint8_t *p = src;
+        for (int i = 0; i < n / 256; i++, p += 136) {
+            uint16_t dh, sh; memcpy(&dh, p, 2); memcpy(&sh, p + 2, 2);
+            const uint8_t *sl = p + 4, *qs = p + 8;
+            const float d = es_fp16_to_fp32(dh);
+            for (int ib = 0; ib < 8; ib++) {
+                const int ls = ((sl[ib / 2] >> (4 * (ib % 2))) & 0xf) | (((sh >> (2 * ib)) & 3) << 4);
+                const float dl = d * (ls - 32);
+                for (int j = 0; j < 16; j++) { y[j] = dl * KV_IQ4NL[qs[j] & 15]; y[j + 16] = dl * KV_IQ4NL[qs[j] >> 4]; }
+                y += 32; qs += 16;
+            }
+        }
+        return;
+    }
     case GGML_F32: memcpy(y, src, sizeof(float) * (size_t)n); return;
     case GGML_F16: {
         const uint16_t *h = src;

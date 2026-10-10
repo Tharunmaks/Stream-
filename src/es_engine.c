@@ -206,15 +206,21 @@ static const es_tensor_desc *find_role(const es_header *h, uint32_t role) {
     return NULL;
 }
 
-static void read_at(uint64_t off, void *dst, size_t n) {
+/* split models: shard 0 is the file given; later shards are extra files with their own data area */
+static int SH_FD[256];
+static uint64_t SH_DS[256];
+static uint64_t shard_base(const es_gguf_tensor *t) { return t->shard ? SH_DS[t->shard] : G.data_start; }
+static void read_at_fd(int fd, uint64_t off, void *dst, size_t n) {
     uint8_t *p = dst;
     while (n) {
-        ssize_t r = es_gguf_pread(G.fd, p, n, off);
+        ssize_t r = es_gguf_pread(fd, p, n, off);
         if (r <= 0) { fprintf(stderr, "read failed at %llu\n", (unsigned long long)off); exit(1); }
         p += r; n -= (size_t)r; off += (uint64_t)r;
     }
 }
-
+static void read_tensor(const es_gguf_tensor *t, uint64_t extra, void *dst, size_t n) {
+    read_at_fd(t->shard ? SH_FD[t->shard] : G.fd, shard_base(t) + t->offset + extra, dst, n);
+}
 /* Make sure the k experts of layer l are in the RAM cache; fill W views. */
 static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
     C.step++;
@@ -241,7 +247,7 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
                 for (int r = 0; r < 3; r++) {
                     const es_gguf_tensor *t = XT[l * 3 + r];
                     const uint64_t per = t->nbytes / t->ne[2];
-                    read_at(G.data_start + t->offset + per * (uint64_t)sel[j], (uint8_t *)C.slots[s].buf + XOFF[r], per);
+                    read_tensor(t, per * (uint64_t)sel[j], (uint8_t *)C.slots[s].buf + XOFF[r], per);
                 }
                 STAT_WAIT_S += (es_now_ns() - t0) / 1e9;
                 C.slots[s].state = ES_SLOT_READY;
@@ -492,6 +498,21 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         if (es_gguf_open(&G, path, &e)) ERR("%s: %s", path, e);
     } else if (o->gguf) {
         if (es_gguf_open(&G, o->gguf, &e)) ERR("%s: %s", o->gguf, e);
+        /* split model: name-00001-of-00004.gguf -> open the other parts and merge their tensor tables */
+        const char *dash = strstr(o->gguf, "-00001-of-");
+        if (dash) {
+            const int total = atoi(dash + 10);
+            for (int part = 2; part <= total && part < 256; part++) {
+                char sp[4096];
+                snprintf(sp, sizeof sp, "%.*s-%05d-of-%05d%s", (int)(dash - o->gguf), o->gguf, part, total, dash + 15);
+                es_gguf S;
+                if (es_gguf_open(&S, sp, &e)) ERR("%s: %s", sp, e);
+                SH_FD[part - 1] = S.fd; SH_DS[part - 1] = S.data_start;
+                G.t = realloc(G.t, (G.n_tensors + S.n_tensors) * sizeof *G.t);
+                for (uint64_t i = 0; i < S.n_tensors; i++) { G.t[G.n_tensors + i] = S.t[i]; G.t[G.n_tensors + i].shard = (uint32_t)(part - 1); }
+                G.n_tensors += S.n_tensors;
+            }
+        }
     } else {
         if (es_gguf_open_fd(&G, o->gguf_fd, o->gguf_size, &e)) ERR("model file: %s", e);
     }
@@ -530,7 +551,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         if (strstr(t->name, "_exps.")) continue;
         M.tptr[i] = es_alloc(t->nbytes ? t->nbytes : 1);
         if (!M.tptr[i]) ERR("out of memory loading %s", t->name);
-        read_at(G.data_start + t->offset, M.tptr[i], t->nbytes);
+        read_tensor(t, 0, M.tptr[i], t->nbytes);
         M.core_bytes += t->nbytes;
     }
     M.tok_embd = load_w("token_embd.weight", 1);

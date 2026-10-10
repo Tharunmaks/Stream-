@@ -32,6 +32,7 @@ typedef struct {
     uint32_t type;       /* ggml type */
     uint64_t offset;     /* relative to data_start */
     uint64_t nbytes;
+    uint32_t shard;      /* 0 = this file; >0 = a later file of a split model */
 } es_gguf_tensor;
 
 typedef struct {
