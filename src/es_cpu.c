@@ -56,6 +56,7 @@ static long read_long(const char *path) {
     return v;
 }
 
+static int part_score(int impl, int part);
 int es_topo_read(es_topo *t) {
     memset(t, 0, sizeof(*t));
     FILE *f = fopen("/proc/cpuinfo", "r");
@@ -100,13 +101,42 @@ int es_topo_read(es_topo *t) {
     for (int i = 1; i < t->ncpu; i++)
         for (int j = i; j > 0; j--) {
             int a = t->order[j - 1], b = t->order[j];
+            const int sa = part_score(t->impl[a], t->part[a]), sb = part_score(t->impl[b], t->part[b]);
             int swap = t->max_khz[b] > t->max_khz[a] ||
-                       (t->max_khz[b] == t->max_khz[a] && b > a);
+                       (t->max_khz[b] == t->max_khz[a] && (sb > sa || (sb == sa && b > a)));
             if (!swap) break;
             t->order[j - 1] = b;
             t->order[j] = a;
         }
     return 0;
+}
+
+/* rough performance class of a core from its MIDR part number (higher = faster); used when cpufreq is unreadable */
+static int part_score(int impl, int part) {
+    if (impl == 0x41) switch (part) {
+        case 0xd03: case 0xd04: case 0xd05: case 0xd46: case 0xd80: return 1;   /* A53 A34 A55 A510 A520 */
+        case 0xd07: case 0xd08: case 0xd09: return 2;                          /* A57 A72 A73 */
+        case 0xd0a: case 0xd0b: case 0xd0d: case 0xd41: case 0xd47: return 3;   /* A75 A76 A77 A78 A710 */
+        case 0xd4d: case 0xd81: return 4;                                       /* A715 A720 */
+        case 0xd44: case 0xd48: case 0xd4b: case 0xd4e: case 0xd82: case 0xd84: case 0xd85: return 5;   /* X1 X2 X3 X4 */
+        default: return 3;
+    }
+    return 3;
+}
+
+int es_auto_threads(void) {
+    es_topo t;
+    if (es_topo_read(&t) != 0 || t.ncpu < 1) return 4;
+    int best = -1, n = 0;
+    for (int i = 0; i < t.ncpu; i++) if (t.allowed[t.order[i]]) { best = t.order[i]; break; }
+    if (best < 0) return 4;
+    for (int c = 0; c < t.ncpu; c++) {
+        if (!t.allowed[c]) continue;
+        const int fast = t.max_khz[best] > 0 && t.max_khz[c] > 0 ? t.max_khz[c] * 100 >= t.max_khz[best] * 75
+                                                                  : part_score(t.impl[c], t.part[c]) >= part_score(t.impl[best], t.part[best]) - (t.max_khz[best] > 0 ? 0 : 0);
+        if (fast) n++;
+    }
+    return n < 1 ? 1 : n > 8 ? 8 : n;
 }
 
 int es_pin_self(int cpu) {

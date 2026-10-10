@@ -837,7 +837,19 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     USER_TOK = es_tok_find(T, "<|user|>");
 
     /* threads: compute on the fastest cores, readers on the rest */
+#if defined(__EMSCRIPTEN__)
     NT = o->threads > 0 ? o->threads : 1;
+#else
+    NT = o->threads > 0 ? o->threads : es_auto_threads();   /* 0 = one thread per fast core */
+#endif
+    if (NT > ES_MAX_CPUS) NT = ES_MAX_CPUS;
+#if !defined(__EMSCRIPTEN__)
+    {   /* never run more compute threads than usable cores: the workers spin, so oversubscribing collapses speed */
+        es_topo tp; int usable = 0;
+        if (es_topo_read(&tp) == 0) for (int i = 0; i < tp.ncpu; i++) usable += tp.allowed[i] ? 1 : 0;
+        if (usable > 0 && NT > usable) { fprintf(stderr, "note: %d threads requested but only %d cores usable; using %d\n", NT, usable, usable); NT = usable; }
+    }
+#endif
     if (NT > 1) {
         es_topo topo;
         es_topo_read(&topo);

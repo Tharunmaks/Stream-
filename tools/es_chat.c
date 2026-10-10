@@ -70,14 +70,14 @@ static void usage(void) {
     fprintf(stderr,
             "usage: es_chat (-m PACKDIR | -g FILE.gguf) [-p PROMPT] [-n max_tokens=256] [-r raw]\n"
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
-            "               [-c context=2048] [-C cache_mb=1024] [-j threads=4] [-s seed]\n"
+            "               [-c context=2048] [-C cache_mb=1024] [-j threads=auto (fast cores)] [-s seed]\n"
             "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n"
             "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
-    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 4, .lookahead = 1, .warm = 1};
+    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 0, .lookahead = 1, .warm = 1};
     const char *prompt = NULL, *dump_ids = NULL, *dump_path = NULL;
     int max_new = 256, raw = 0, top_k = 40, opt;
     float temp = 0.7f, top_p = 0.9f;

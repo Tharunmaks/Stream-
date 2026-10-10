@@ -17,6 +17,13 @@ const Brain = {
       return j;
     } catch (e) { return null; }
   },
+  relaxed() {
+    if (this._rs === undefined) {
+      try { this._rs = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 19, 1, 17, 0, 65, 1, 253, 15, 65, 2, 253, 15, 65, 3, 253, 15, 253, 147, 2, 11])) && store.get('relaxed', 1) !== 0; }
+      catch (e) { this._rs = false; }
+    }
+    return this._rs;
+  },
   /* open a model in this page. src = {file: File, label} or {opfs: name, label} */
   async open(src, opt = {}) {
     if (this.loading) return;
@@ -24,8 +31,11 @@ const Brain = {
     this.loading = true; this.stage = 'starting'; this.emit();
     const mtSrc = document.getElementById('engine-mt-src');
     const mt = window.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined' && mtSrc && mtSrc.textContent.length > 1000 && store.get('threads', 0) !== 1;
-    const threads = mt ? Math.max(1, Math.min(8, store.get('threads', 0) || (navigator.hardwareConcurrency >= 8 ? 4 : Math.max(1, (navigator.hardwareConcurrency || 2) - 2)))) : 1;
-    const code = (mt ? mtSrc : document.getElementById('engine-src')).textContent;
+    const threads = mt ? Math.max(1, Math.min(8, store.get('threads', 0) || (navigator.hardwareConcurrency >= 8 ? 4 : Math.max(1, (navigator.hardwareConcurrency || 2) - 1)))) : 1;
+    /* relaxed-SIMD build (one-instruction int8 dot) when the browser accepts it; plain SIMD build otherwise */
+    const rs = Brain.relaxed(), rsSrc = document.getElementById(mt ? 'engine-mt-rs-src' : 'engine-rs-src');
+    const code = (rs && rsSrc && rsSrc.textContent.length > 1000 ? rsSrc : (mt ? mtSrc : document.getElementById('engine-src'))).textContent;
+    this.relaxedSimd = !!(rs && rsSrc && rsSrc.textContent.length > 1000);
     let w;
     try { w = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' }))); }
     catch (e) { this.loading = false; this.emit(); throw new Error('This page cannot start the engine worker (' + e.message + '). Open the site in a normal browser tab, not inside another app.'); }

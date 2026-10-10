@@ -8,6 +8,9 @@ rd = lambda p: open(p if os.path.isabs(p) else os.path.join(root, p), encoding='
 engine = rd(sys.argv[1]) + '\n' + rd('web/src/workers/engine_driver.js')
 dl = rd('web/src/workers/dl_worker.js')
 engine_mt = (rd(sys.argv[sys.argv.index('--mt') + 1]) + '\n' + rd('web/src/workers/engine_driver.js')) if '--mt' in sys.argv else ''
+def opt(flag):
+    return (rd(sys.argv[sys.argv.index(flag) + 1]) + '\n' + rd('web/src/workers/engine_driver.js')) if flag in sys.argv else ''
+engine_rs, engine_mt_rs = opt('--rs'), opt('--mt-rs')
 js = '\n'.join(rd(p) for p in sorted(glob.glob(os.path.join(root, 'web/src/js/*.js'))))
 q3 = 'not compared yet'
 if '--verify-q3' in sys.argv: q3 = sys.argv[sys.argv.index('--verify-q3') + 1]
@@ -16,9 +19,9 @@ import json
 ag = json.load(open(os.path.join(root, 'mcp/agents.json'), encoding='utf-8'))
 ag['agents'] = [{k: a[k] for k in ('id', 'name', 'category', 'category_name', 'description', 'system', 'tags') if k in a} for a in ag['agents']]
 js = js.replace('@@AGENTS@@', json.dumps(ag, ensure_ascii=False).replace('</', '<\\/'))
-for name, txt in (('engine mt', engine_mt), ('engine', engine), ('dl worker', dl), ('app js', js)):
+for name, txt in (('engine mt', engine_mt), ('engine rs', engine_rs), ('engine mt rs', engine_mt_rs), ('engine', engine), ('dl worker', dl), ('app js', js)):
     assert '</script' not in txt.lower() and '\0' not in txt, name + ' contains </script or NUL'
-page = rd('web/src/template.html').replace('@@STYLE@@', rd('web/src/style.css')).replace('@@DLWORKER@@', dl).replace('@@ENGINE_MT@@', engine_mt).replace('@@ENGINE@@', engine).replace('@@JS@@', js)
+page = rd('web/src/template.html').replace('@@STYLE@@', rd('web/src/style.css')).replace('@@DLWORKER@@', dl).replace('@@ENGINE_MT_RS@@', engine_mt_rs).replace('@@ENGINE_RS@@', engine_rs).replace('@@ENGINE_MT@@', engine_mt).replace('@@ENGINE@@', engine).replace('@@JS@@', js)
 import hashlib, base64
 page = page.replace('@@FONTS@@', rd('web/src/fonts.css'))
 hashes = ["'sha256-" + base64.b64encode(hashlib.sha256(m.encode('utf-8')).digest()).decode() + "'" for m in re.findall(r'<script>(.*?)</script>', page, re.S)]

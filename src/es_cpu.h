@@ -15,6 +15,7 @@ typedef struct {
 
 int         es_topo_read(es_topo *t);
 const char *es_part_name(int impl, int part);
+int         es_auto_threads(void);  /* number of fast cores (the "big" cluster), 1..8 */
 int         es_pin_self(int cpu);   /* 0 on success, else errno */
 int         es_has_dotprod(void);   /* sdot/udot (asimddp) */
 int         es_has_i8mm(void);      /* smmla (not needed, informational) */

@@ -14,7 +14,7 @@ async function runDoctor() {
   let hf = false, hfmsg = ''; try { const c = new AbortController(); setTimeout(() => c.abort(), 6000); const x = await fetch('https://huggingface.co/api/models?limit=1', { signal: c.signal }); hf = x.ok; hfmsg = hf ? 'reachable' : 'HTTP ' + x.status; } catch (e) { hfmsg = 'blocked: this page cannot reach the internet. Open the site in Chrome (not inside another app).'; }
   add('Hugging Face', hf, hfmsg);
   const dm = navigator.deviceMemory; if (dm) add('Device memory', true, '≥ ' + dm + ' GB reported (browsers cap the number)');
-  add('CPU threads', true, (navigator.hardwareConcurrency || '?') + ' reported; the in-page engine uses 1, the native engine uses the big cores');
+  add('CPU threads', true, (navigator.hardwareConcurrency || '?') + ' reported; the in-page engine uses up to 4 (cores - 1), the native engine uses the fast cores');
   add('Native engine (Termux)', !!Brain.native, Brain.native ? 'connected: ' + Brain.native.model : 'not connected (optional): run es_serve for full speed');
   return r;
 }

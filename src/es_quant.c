@@ -672,6 +672,157 @@ void es_mv_q5_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, floa
 static int HAVE_DOT = -1;
 #endif
 
+
+#ifdef __wasm_simd128__
+/* ---- WebAssembly kernels: vector accumulation (no lane extraction per block), four rows per pass for the
+ * 32-wide formats. With relaxed SIMD (-mrelaxed-simd, picked at load time by the page) the int8 dot is one
+ * instruction (SDOT on ARM phones, VNNI/pmaddubsw on x86). u = unsigned values 0..127, s = signed int8. */
+static inline v128_t wdot_us(v128_t u, v128_t s, v128_t acc) {
+#ifdef __wasm_relaxed_simd__
+    return wasm_i32x4_relaxed_dot_i8x16_i7x16_add(s, u, acc);
+#else
+    return wasm_i32x4_add(acc, wasm_i32x4_add(wasm_i32x4_dot_i16x8(wasm_u16x8_extend_low_u8x16(u), wasm_i16x8_extend_low_i8x16(s)),
+                                              wasm_i32x4_dot_i16x8(wasm_u16x8_extend_high_u8x16(u), wasm_i16x8_extend_high_i8x16(s))));
+#endif
+}
+static inline float wsumf(v128_t v) { return wasm_f32x4_extract_lane(v, 0) + wasm_f32x4_extract_lane(v, 1) + wasm_f32x4_extract_lane(v, 2) + wasm_f32x4_extract_lane(v, 3); }
+#define WACC(acc, t, xd, yd) (acc) = wasm_f32x4_add((acc), wasm_f32x4_mul(wasm_f32x4_convert_i32x4(t), wasm_f32x4_splat(fp16f(xd) * (yd))))
+
+static inline v128_t w8_dot(const blk_q8_0 *x, v128_t y0, v128_t y1, v128_t ny0, v128_t ny1) {
+    const v128_t z = wasm_i32x4_splat(0), x0 = LD(x->qs), x1 = LD(x->qs + 16);
+#ifdef __wasm_relaxed_simd__
+    const v128_t zz = wasm_i8x16_splat(0);   /* |x| as the i7 operand, the sign moved onto the activation */
+    const v128_t m0 = wasm_i8x16_lt(x0, zz), m1 = wasm_i8x16_lt(x1, zz);
+    return wasm_i32x4_relaxed_dot_i8x16_i7x16_add(wasm_v128_bitselect(ny1, y1, m1), wasm_i8x16_abs(x1),
+           wasm_i32x4_relaxed_dot_i8x16_i7x16_add(wasm_v128_bitselect(ny0, y0, m0), wasm_i8x16_abs(x0), z));
+#else
+    (void)ny0; (void)ny1; (void)z;
+    return wasm_i32x4_add(wdot16(x0, y0), wdot16(x1, y1));
+#endif
+}
+static void wmv_q8_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 34; int r = r0;
+    for (; r + 4 <= r1; r += 4) {
+        const blk_q8_0 *x0 = (const blk_q8_0 *)(w + rb * r), *x1 = (const blk_q8_0 *)(w + rb * (r + 1)), *x2 = (const blk_q8_0 *)(w + rb * (r + 2)), *x3 = (const blk_q8_0 *)(w + rb * (r + 3));
+        v128_t a0 = wasm_f32x4_splat(0), a1 = a0, a2 = a0, a3 = a0;
+        for (int b = 0; b < nb; b++) {
+            const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16), ny0 = wasm_i8x16_neg(y0), ny1 = wasm_i8x16_neg(y1); const float yd = y[b].d;
+            WACC(a0, w8_dot(x0 + b, y0, y1, ny0, ny1), x0[b].d, yd); WACC(a1, w8_dot(x1 + b, y0, y1, ny0, ny1), x1[b].d, yd);
+            WACC(a2, w8_dot(x2 + b, y0, y1, ny0, ny1), x2[b].d, yd); WACC(a3, w8_dot(x3 + b, y0, y1, ny0, ny1), x3[b].d, yd);
+        }
+        out[r] = wsumf(a0); out[r + 1] = wsumf(a1); out[r + 2] = wsumf(a2); out[r + 3] = wsumf(a3);
+    }
+    for (; r < r1; r++) {
+        const blk_q8_0 *x = (const blk_q8_0 *)(w + rb * r); v128_t a = wasm_f32x4_splat(0);
+        for (int b = 0; b < nb; b++) { const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16); WACC(a, w8_dot(x + b, y0, y1, wasm_i8x16_neg(y0), wasm_i8x16_neg(y1)), x[b].d, y[b].d); }
+        out[r] = wsumf(a);
+    }
+}
+/* Q4_0: unsigned nibbles, "-8" removed through 8 * sum(y) (computed once per block, shared by the four rows) */
+static inline v128_t w4_dot(const blk_q4_0 *x, v128_t y0, v128_t y1, v128_t sy8) {
+    const v128_t q = LD(x->qs), m = wasm_i8x16_splat(15);
+    return wasm_i32x4_sub(wdot_us(wasm_u8x16_shr(q, 4), y1, wdot_us(wasm_v128_and(q, m), y0, wasm_i32x4_splat(0))), sy8);
+}
+static void wmv_q4_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 18; int r = r0; const v128_t one = wasm_i8x16_splat(1);
+    for (; r + 4 <= r1; r += 4) {
+        const blk_q4_0 *x0 = (const blk_q4_0 *)(w + rb * r), *x1 = (const blk_q4_0 *)(w + rb * (r + 1)), *x2 = (const blk_q4_0 *)(w + rb * (r + 2)), *x3 = (const blk_q4_0 *)(w + rb * (r + 3));
+        v128_t a0 = wasm_f32x4_splat(0), a1 = a0, a2 = a0, a3 = a0;
+        for (int b = 0; b < nb; b++) {
+            const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16); const float yd = y[b].d;
+            const v128_t sy8 = wasm_i32x4_shl(wdot_us(one, y1, wdot_us(one, y0, wasm_i32x4_splat(0))), 3);
+            WACC(a0, w4_dot(x0 + b, y0, y1, sy8), x0[b].d, yd); WACC(a1, w4_dot(x1 + b, y0, y1, sy8), x1[b].d, yd);
+            WACC(a2, w4_dot(x2 + b, y0, y1, sy8), x2[b].d, yd); WACC(a3, w4_dot(x3 + b, y0, y1, sy8), x3[b].d, yd);
+        }
+        out[r] = wsumf(a0); out[r + 1] = wsumf(a1); out[r + 2] = wsumf(a2); out[r + 3] = wsumf(a3);
+    }
+    for (; r < r1; r++) {
+        const blk_q4_0 *x = (const blk_q4_0 *)(w + rb * r); v128_t a = wasm_f32x4_splat(0);
+        for (int b = 0; b < nb; b++) {
+            const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16);
+            WACC(a, w4_dot(x + b, y0, y1, wasm_i32x4_shl(wdot_us(one, y1, wdot_us(one, y0, wasm_i32x4_splat(0))), 3)), x[b].d, y[b].d);
+        }
+        out[r] = wsumf(a);
+    }
+}
+static inline v128_t w5_dot(const blk_q5_0 *x, v128_t y0, v128_t y1, v128_t sy16) {
+    const v128_t qv = wasm_v128_load32_splat(x->qh), q = LD(x->qs), m15 = wasm_i8x16_splat(15), b16 = wasm_i8x16_splat(16), z = wasm_i8x16_splat(0);
+    const v128_t bits = wasm_i8x16_make(1, 2, 4, 8, 16, 32, 64, (int8_t)128, 1, 2, 4, 8, 16, 32, 64, (int8_t)128);
+    const v128_t h0 = wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(wasm_i8x16_swizzle(qv, wasm_i8x16_make(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1)), bits), z), b16);
+    const v128_t h1 = wasm_v128_and(wasm_i8x16_ne(wasm_v128_and(wasm_i8x16_swizzle(qv, wasm_i8x16_make(2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3)), bits), z), b16);
+    return wasm_i32x4_sub(wdot_us(wasm_v128_or(wasm_u8x16_shr(q, 4), h1), y1, wdot_us(wasm_v128_or(wasm_v128_and(q, m15), h0), y0, wasm_i32x4_splat(0))), sy16);
+}
+static void wmv_q5_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 22; int r = r0; const v128_t one = wasm_i8x16_splat(1);
+    for (; r + 4 <= r1; r += 4) {
+        const blk_q5_0 *x0 = (const blk_q5_0 *)(w + rb * r), *x1 = (const blk_q5_0 *)(w + rb * (r + 1)), *x2 = (const blk_q5_0 *)(w + rb * (r + 2)), *x3 = (const blk_q5_0 *)(w + rb * (r + 3));
+        v128_t a0 = wasm_f32x4_splat(0), a1 = a0, a2 = a0, a3 = a0;
+        for (int b = 0; b < nb; b++) {
+            const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16); const float yd = y[b].d;
+            const v128_t sy = wasm_i32x4_shl(wdot_us(one, y1, wdot_us(one, y0, wasm_i32x4_splat(0))), 4);
+            WACC(a0, w5_dot(x0 + b, y0, y1, sy), x0[b].d, yd); WACC(a1, w5_dot(x1 + b, y0, y1, sy), x1[b].d, yd);
+            WACC(a2, w5_dot(x2 + b, y0, y1, sy), x2[b].d, yd); WACC(a3, w5_dot(x3 + b, y0, y1, sy), x3[b].d, yd);
+        }
+        out[r] = wsumf(a0); out[r + 1] = wsumf(a1); out[r + 2] = wsumf(a2); out[r + 3] = wsumf(a3);
+    }
+    for (; r < r1; r++) {
+        const blk_q5_0 *x = (const blk_q5_0 *)(w + rb * r); v128_t a = wasm_f32x4_splat(0);
+        for (int b = 0; b < nb; b++) {
+            const v128_t y0 = LD(y[b].qs), y1 = LD(y[b].qs + 16);
+            WACC(a, w5_dot(x + b, y0, y1, wasm_i32x4_shl(wdot_us(one, y1, wdot_us(one, y0, wasm_i32x4_splat(0))), 4)), x[b].d, y[b].d);
+        }
+        out[r] = wsumf(a);
+    }
+}
+static void wmv_q4_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 144; const v128_t m = wasm_i8x16_splat(15), z = wasm_i32x4_splat(0);
+    for (int r = r0; r < r1; r++) {
+        const blk_q4_K *x = (const blk_q4_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            uint8_t sc[8], mn[8];
+            for (int j = 0; j < 8; j++) scale_min_k4(j, x[b].scales, &sc[j], &mn[j]);
+            v128_t acc = z; const uint8_t *q = x[b].qs; const int8_t *q8 = y[b].qs;
+            for (int c = 0; c < 4; c++, q += 32, q8 += 64) {
+                const v128_t qa = LD(q), qb = LD(q + 16);
+                const v128_t lo = wdot_us(wasm_v128_and(qb, m), LD(q8 + 16), wdot_us(wasm_v128_and(qa, m), LD(q8), z));
+                const v128_t hi = wdot_us(wasm_u8x16_shr(qb, 4), LD(q8 + 48), wdot_us(wasm_u8x16_shr(qa, 4), LD(q8 + 32), z));
+                acc = wasm_i32x4_add(acc, wasm_i32x4_add(wasm_i32x4_mul(lo, wasm_i32x4_splat(sc[2 * c])), wasm_i32x4_mul(hi, wasm_i32x4_splat(sc[2 * c + 1]))));
+            }
+            int mins = 0;
+            for (int j = 0; j < 8; j++) mins += mn[j] * (y[b].bsums[2 * j] + y[b].bsums[2 * j + 1]);
+            s += y[b].d * (fp16f(x[b].d) * (float)whsum(acc) - fp16f(x[b].dmin) * (float)mins);
+        }
+        out[r] = s;
+    }
+}
+static void wmv_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 210; const v128_t m15 = wasm_i8x16_splat(15), m3 = wasm_i8x16_splat(3), z = wasm_i32x4_splat(0);
+    for (int r = r0; r < r1; r++) {
+        const blk_q6_K *x = (const blk_q6_K *)(w + rb * r); float s = 0;
+        for (int b = 0; b < nb; b++) {
+            const uint8_t *ql = x[b].ql, *qh = x[b].qh; const int8_t *sc = x[b].scales, *q8 = y[b].qs; v128_t acc = z; int corr = 0;
+            for (int g = 0; g < 16; g++) corr += sc[g] * y[b].bsums[g];
+            for (int h = 0; h < 2; h++, ql += 64, qh += 32, sc += 8, q8 += 128) {
+                for (int is = 0; is < 2; is++) {
+                    const int l = is * 16;
+                    const v128_t a0 = LD(ql + l), a1 = LD(ql + l + 32), hh = LD(qh + l);
+                    const v128_t q1 = wasm_v128_or(wasm_v128_and(a0, m15), wasm_i8x16_shl(wasm_v128_and(hh, m3), 4));
+                    const v128_t q2 = wasm_v128_or(wasm_v128_and(a1, m15), wasm_i8x16_shl(wasm_v128_and(wasm_u8x16_shr(hh, 2), m3), 4));
+                    const v128_t q3 = wasm_v128_or(wasm_u8x16_shr(a0, 4), wasm_i8x16_shl(wasm_v128_and(wasm_u8x16_shr(hh, 4), m3), 4));
+                    const v128_t q4 = wasm_v128_or(wasm_u8x16_shr(a1, 4), wasm_i8x16_shl(wasm_u8x16_shr(hh, 6), 4));
+                    acc = wasm_i32x4_add(acc, wasm_i32x4_mul(wdot_us(q1, LD(q8 + l), z), wasm_i32x4_splat(sc[is])));
+                    acc = wasm_i32x4_add(acc, wasm_i32x4_mul(wdot_us(q2, LD(q8 + l + 32), z), wasm_i32x4_splat(sc[is + 2])));
+                    acc = wasm_i32x4_add(acc, wasm_i32x4_mul(wdot_us(q3, LD(q8 + l + 64), z), wasm_i32x4_splat(sc[is + 4])));
+                    acc = wasm_i32x4_add(acc, wasm_i32x4_mul(wdot_us(q4, LD(q8 + l + 96), z), wasm_i32x4_splat(sc[is + 6])));
+                }
+            }
+            s += y[b].d * fp16f(x[b].d) * (float)(whsum(acc) - 32 * corr);
+        }
+        out[r] = s;
+    }
+}
+#endif
+
 void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, float *y,
                float *scratch) {
     const size_t rb = es_row_bytes(t, cols);
@@ -692,6 +843,17 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
             if (t == GGML_Q4_K) { avx_q4_K(w, cols, r0, r1, a->q8, y); return; }
             if (t == GGML_Q6_K) { avx_q6_K(w, cols, r0, r1, a->q8, y); return; }
         }
+    }
+#endif
+#ifdef __wasm_simd128__
+    if (a->q80) {
+        if (t == GGML_Q8_0) { wmv_q8_0(w, cols, r0, r1, a->q80, y); return; }
+        if (t == GGML_Q4_0) { wmv_q4_0(w, cols, r0, r1, a->q80, y); return; }
+        if (t == GGML_Q5_0) { wmv_q5_0(w, cols, r0, r1, a->q80, y); return; }
+    }
+    if (a->q8) {
+        if (t == GGML_Q4_K) { wmv_q4_K(w, cols, r0, r1, a->q8, y); return; }
+        if (t == GGML_Q6_K) { wmv_q6_K(w, cols, r0, r1, a->q8, y); return; }
     }
 #endif
 #if defined(__aarch64__)

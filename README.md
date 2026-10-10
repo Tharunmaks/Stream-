@@ -40,7 +40,9 @@ the tools print honest estimates. Needs NumPy (`pkg install python-numpy`).
 
 **Speed (measured, 4-core x86 test PC, SmolLM2-135M, greedy, `es_chat -j 4`, default build, no `-march=native`)**:
 Q4_K_M 107-111 tok/s, Q4_0 103-114 tok/s (127-138 with Turbo on), Q8_0 about 90 tok/s (memory-bandwidth bound).
-The same file in the browser (WebAssembly, 2-4 threads) runs at about 22-25 tok/s. Numbers on a phone differ.
+The same file in the browser (WebAssembly, relaxed-SIMD build, 3 threads) runs at about 42 tok/s (Q4_0) / 35 tok/s (Q4_K_M)
+on that PC. Phone numbers differ: run `bash scripts/speedtest.sh` in Termux (it builds, downloads both files, prints a table)
+and use `es_chat -j 0` (the default: one thread per fast core, pinned; never more threads than usable cores).
 How: runtime-dispatched AVX2/FMA integer kernels (Q8_0/Q4_0/Q5_0/Q4_K/Q6_K, 4 rows per pass; `ES_NO_AVX2=1` turns
 them off), NEON SDOT on ARM, batched prompt processing, and **Turbo** (prompt-lookup speculative decoding: the engine
 guesses the next few words from the text so far and checks them in one batched pass; greedy output stays identical,
