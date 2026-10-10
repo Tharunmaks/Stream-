@@ -1,4 +1,5 @@
 #include "es_quant.h"
+#include "es_cpu.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -399,6 +400,15 @@ static void mv_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_block_q
     }
 }
 
+#if defined(__aarch64__)
+void es_mv_q8_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
+void es_mv_q4_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
+void es_mv_q5_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
+void es_mv_q4_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+void es_mv_q6_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+static int HAVE_DOT = -1;
+#endif
+
 void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, float *y,
                float *scratch) {
     const size_t rb = es_row_bytes(t, cols);
@@ -407,6 +417,20 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
         es_matvec_q2_K((const es_block_q2_K *)W, cols, r0, r1, a->q8, y);
         return;
     }
+#if defined(__aarch64__)
+    if (HAVE_DOT < 0) HAVE_DOT = es_has_dotprod();
+    if (HAVE_DOT) {
+        if (a->q80) {
+            if (t == GGML_Q8_0) { es_mv_q8_0_neon(w, cols, r0, r1, a->q80, y); return; }
+            if (t == GGML_Q4_0) { es_mv_q4_0_neon(w, cols, r0, r1, a->q80, y); return; }
+            if (t == GGML_Q5_0) { es_mv_q5_0_neon(w, cols, r0, r1, a->q80, y); return; }
+        }
+        if (a->q8) {
+            if (t == GGML_Q4_K) { es_mv_q4_K_neon(w, cols, r0, r1, a->q8, y); return; }
+            if (t == GGML_Q6_K) { es_mv_q6_K_neon(w, cols, r0, r1, a->q8, y); return; }
+        }
+    }
+#endif
     if (a->q80) {
         switch (t) {
         case GGML_Q8_0: mv_q8_0(w, cols, r0, r1, a->q80, y); return;
