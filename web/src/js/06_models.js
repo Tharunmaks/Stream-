@@ -197,7 +197,7 @@ function renderDev(body) {
 }
 
 /* ----- Capacity planner ----- */
-const plan = { params: 2000, bits: 2, active: 40, cache: 2 };
+const plan = { params: 2000, bits: 2, active: 40, cache: 2, skip: 0 };
 function setPlan(p, b, a) { plan.params = p; plan.bits = b; plan.active = a; renderModels(); }
 function renderPlan(body) {
   const out = h('div', { class: 'stack' });
@@ -205,15 +205,18 @@ function renderPlan(body) {
   function calc() {
     const diskGB = plan.params * plan.bits / 8, actGB = plan.active * plan.bits / 8, fits = diskGB <= ENV.disk;
     const hit = Math.min(.9, plan.cache / Math.max(1, diskGB) * 12), sec = actGB * (1 - hit) / ENV.flashGBs + actGB / 9.8 * 1.0;
-    const rows = [['File size on flash', gb(diskGB), fits ? 'good' : 'bad'], ['Your free flash', ENV.disk + ' GB', ''], ['Read per word (active weights)', gb(actGB), ''], ['Expert cache hit rate (rough)', Math.round(hit * 100) + '%', ''], ['Time per word', fmtT(sec), sec > 30 ? 'bad' : sec > 3 ? 'warn' : 'good'], ['A 200-word answer', fmtT(sec * 200 * 1.3), sec > 30 ? 'bad' : 'warn']];
+    const dense = plan.params === plan.active;
+    const comp = actGB / 9.8, ioPlain = actGB * (1 - hit) / 0.5, plainSec = dense ? sec : ioPlain + comp;
+    const hitL = Math.min(.97, hit + (1 - hit) * .8), ioAll = actGB * (1 - hit) * 1.45 / ENV.flashGBs * (1 - plan.skip), lookSec = dense ? sec : Math.max(ioAll, comp * (1 - plan.skip * .5));
+    const rows = [['File size on flash', gb(diskGB), fits ? 'good' : 'bad'], ['Your free flash', ENV.disk + ' GB', ''], ['Read per word (active weights)', gb(actGB), ''], ['Expert cache hit rate (rough)', Math.round(hit * 100) + '%', ''], ['Time per word, plain streaming (1 reader)', fmtT(plainSec), plainSec > 30 ? 'bad' : plainSec > 3 ? 'warn' : 'good'], ['Time per word with Lookahead', fmtT(lookSec), lookSec > 30 ? 'bad' : lookSec > 3 ? 'warn' : 'good'], ['Speed-up', (plainSec / lookSec).toFixed(1) + '×', ''], ['A 200-word answer with Lookahead', fmtT(lookSec * 200 * 1.3), lookSec > 30 ? 'bad' : 'warn']];
     const verdict = !fits ? `Does not fit: ${gb(diskGB)} needs ${(diskGB / ENV.disk).toFixed(1)}× your flash. Options: fewer bits, a smaller model, or an external SSD over USB.` : sec > 30 ? 'It fits, but every word would take longer than half a minute.' : sec > 3 ? 'It fits and runs, at seconds per word. Useful for patient jobs only.' : 'Fits and reaches readable speed.';
     out.replaceChildren(h('div', { class: 'note ' + (!fits ? 'bad' : sec > 3 ? '' : 'ok') }, h('b', {}, verdict)), h('div', { class: 'table-box' }, rows.map(([k, v, c]) => h('div', { class: 'trow', style: 'grid-template-columns:minmax(0,1fr) auto' }, h('span', { class: 'dim' }, k), c ? chip(c, v) : h('span', { class: 'mono' }, v)))),
       h('p', { class: 'dim', style: 'font-size:12.5px' }, 'Reality check: no open 2-trillion-parameter model exists. If one did, at 2 bits it would be about 500 GB. The architecture here is built so size is limited by storage, not RAM; speed is limited by how many weights each word touches.'));
   }
   const presets = [['7B dense', 7, 4.5, 7], ['Qwen3 30B-A3B', 30, 2.7, 3], ['Qwen3 235B', 235, 2.7, 22], ['Kimi K2 1T', 1000, 2, 32], ['2T hypothetical', 2000, 2, 40]];
   const gb = g => g >= 1000 ? (g / 1000).toFixed(2) + ' TB' : g >= 100 ? Math.round(g) + ' GB' : g.toFixed(1) + ' GB';
-  body.append(h('div', { class: 'row' }, presets.map(([n, p, b, a]) => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => setPlan(p, b, a) }, n))),
-    h('div', { class: 'card' }, sl('params', 'Total parameters (billions)', 1, 2500, 1, v => v + 'B'), sl('bits', 'Bits per weight', 1, 8, .1, v => (+v).toFixed(1)), sl('active', 'Parameters used per word (billions)', 1, 400, 1, v => v + 'B'), sl('cache', 'Expert cache in RAM (GB)', .2, 4, .1, v => (+v).toFixed(1) + ' GB')), out);
+  body.append(lookaheadCard(), h('div', { class: 'row' }, presets.map(([n, p, b, a]) => h('button', { class: 'chip', style: 'cursor:pointer', onclick: () => setPlan(p, b, a) }, n))),
+    h('div', { class: 'card' }, sl('params', 'Total parameters (billions)', 1, 2500, 1, v => v + 'B'), sl('bits', 'Bits per weight', 1, 8, .1, v => (+v).toFixed(1)), sl('active', 'Parameters used per word (billions)', 1, 400, 1, v => v + 'B'), sl('cache', 'Expert cache in RAM (GB)', .2, 4, .1, v => (+v).toFixed(1) + ' GB'), sl('skip', 'Skip weak experts (Lookahead)', 0, .4, .05, v => v ? 'skip below ' + Math.round(v * 100) + '% of the best' : 'off')), out);
   calc();
   body.append(simPanel());
 }
@@ -267,4 +270,26 @@ function simPanel() {
     })();
   };
   return card;
+}
+
+/* ----- ExpertStream Lookahead: how big models are made to run ----- */
+function lookaheadCard() {
+  const svg = `<svg viewBox="0 0 640 210" width="100%" role="img" aria-label="Timeline: flash readers load the next layer's experts while the CPU computes the current layer" style="max-width:100%;height:auto">
+<defs><linearGradient id="lg1" x1="0" x2="1"><stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#19b07d"/></linearGradient></defs>
+<style>.lb{font:11px 'IBM Plex Mono',monospace;fill:var(--ink-3)} .ld{font:12px 'IBM Plex Sans',sans-serif;fill:var(--ink-2)} .cpu{fill:#e8683a} .io{fill:url(#lg1)} .pre{fill:none;stroke:#f2c98a;stroke-width:1.5;stroke-dasharray:4 3}
+@keyframes mv{from{transform:translateX(0)}to{transform:translateX(-120px)}} .lane{animation:mv 4s linear infinite}</style>
+<text class="ld" x="8" y="16">Plain streaming: read, then compute, read, then compute…</text>
+<text class="lb" x="8" y="44">flash</text><text class="lb" x="8" y="66">CPU</text>
+<g class="lane"><rect class="io" x="60" y="34" width="90" height="14" rx="3"/><rect class="cpu" x="150" y="56" width="30" height="14" rx="3"/><rect class="io" x="180" y="34" width="90" height="14" rx="3"/><rect class="cpu" x="270" y="56" width="30" height="14" rx="3"/><rect class="io" x="300" y="34" width="90" height="14" rx="3"/><rect class="cpu" x="390" y="56" width="30" height="14" rx="3"/><rect class="io" x="420" y="34" width="90" height="14" rx="3"/><rect class="cpu" x="510" y="56" width="30" height="14" rx="3"/><rect class="io" x="540" y="34" width="90" height="14" rx="3"/><rect class="cpu" x="630" y="56" width="30" height="14" rx="3"/></g>
+<line x1="8" x2="632" y1="96" y2="96" stroke="var(--line)"/>
+<text class="ld" x="8" y="118">ExpertStream Lookahead: guess the next layer's experts and read them while the CPU works</text>
+<text class="lb" x="8" y="146">flash</text><text class="lb" x="8" y="168">CPU</text><text class="lb" x="8" y="190">×4 readers in parallel</text>
+<g class="lane"><rect class="io" x="60" y="136" width="95" height="14" rx="3"/><rect class="io" x="60" y="152" width="95" height="0" rx="3"/><rect class="cpu" x="100" y="158" width="30" height="14" rx="3"/><rect class="io" x="155" y="136" width="95" height="14" rx="3"/><rect class="cpu" x="195" y="158" width="30" height="14" rx="3"/><rect class="io" x="250" y="136" width="95" height="14" rx="3"/><rect class="cpu" x="290" y="158" width="30" height="14" rx="3"/><rect class="io" x="345" y="136" width="95" height="14" rx="3"/><rect class="cpu" x="385" y="158" width="30" height="14" rx="3"/><rect class="io" x="440" y="136" width="95" height="14" rx="3"/><rect class="cpu" x="480" y="158" width="30" height="14" rx="3"/><rect class="io" x="535" y="136" width="95" height="14" rx="3"/><rect class="cpu" x="575" y="158" width="30" height="14" rx="3"/></g>
+</svg>`;
+  return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'New technology'), h('h3', {}, 'ExpertStream Lookahead: run models bigger than your memory'),
+    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'A mixture-of-experts model only uses a few experts per word, but plain streaming waits for storage every time. Lookahead (1) reads all the experts a layer needs at once with several readers, (2) runs the next layer\'s router early on the current state to guess its experts and loads them while the CPU is busy, (3) can skip experts the router barely uses, and (4) remembers which experts you use most and preloads them next time.'),
+    h('div', { html: svg }),
+    h('div', { class: 'tiles', style: 'grid-template-columns:repeat(3,minmax(0,1fr))' }, tile('1.46 → 2.94', 'tok/s, OLMoE, simulated 500 MB/s storage'), tile('49% → 91%', 'experts already in RAM when needed'), tile('2.0×', 'faster, measured')),
+    h('div', { class: 'note' }, h('b', {}, 'Honest limit. '), 'Storage speed is a wall: every word still has to read the experts it needs, and a model that needs 10 GB per word cannot go faster than storage allows. Lookahead removes the waiting, not the reading. A 2-trillion-parameter model (no such open model exists) would still take seconds per word; the planner below shows the numbers. Lookahead runs in the native engine (Termux, PC, es_serve, MCP); the in-page engine keeps small models.'),
+    h('p', { class: 'dim', style: 'font-size:12.5px' }, 'Measured on a test machine with storage slowed to a phone-like 500 MB/s per reader. Real phones differ.'));
 }

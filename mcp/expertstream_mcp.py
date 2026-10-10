@@ -198,10 +198,10 @@ def _dl_one(jid, repo, file, dest, last):
 # ---------------- engine process ----------------
 class Engine:
     def __init__(self): self.p = None; self.path = None; self.info = None; self.lock = threading.Lock()
-    def load(self, path, ctx, cache, temp=0.7, max_new=256):
+    def load(self, path, ctx, cache, temp=0.7, max_new=256, skip=0.0):
         self.unload(); exe = find_engine()
         if not exe: raise RuntimeError('es_chat not found. Run `make` in %s (see README).' % ROOT)
-        self.p = subprocess.Popen([exe, '-g', path, '-J', '-c', str(ctx), '-C', str(cache), '-t', str(temp), '-n', str(max_new)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        self.p = subprocess.Popen([exe, '-g', path, '-J', '-c', str(ctx), '-C', str(cache), '-t', str(temp), '-n', str(max_new)] + (['-E', str(skip)] if skip else []), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
         t0 = time.time()
         while True:
             line = self.p.stdout.readline()
@@ -383,7 +383,7 @@ def t_load(a):
     if not os.path.exists(p): raise RuntimeError('model not found: ' + p)
     s = read_header(p); v = assess(s, int(a.get('ctx', 2048)), int(a.get('cache_mb', 1024)), meminfo().get('MemAvailable'), p)
     if not v['runs']: return dict(loaded=False, verdict=v)
-    e = ENG.load(p, int(a.get('ctx', 2048)), int(a.get('cache_mb', 1024)), float(a.get('temperature', 0.7)), int(a.get('max_tokens', 256)))
+    e = ENG.load(p, int(a.get('ctx', 2048)), int(a.get('cache_mb', 1024)), float(a.get('temperature', 0.7)), int(a.get('max_tokens', 256)), float(a.get('skip_threshold', 0)))
     return dict(loaded=True, model=e.get('model'), arch=e.get('arch'), layers=e.get('layers'), experts=e.get('experts'), core_mb=e.get('core_mb'), ram_mb=e.get('ram_mb'), load_seconds=e.get('load_wall_s'))
 def t_unload(a): ENG.unload(); return dict(unloaded=True)
 def t_generate(a):
@@ -469,7 +469,7 @@ TOOLS = [
  ('inspect_model', 'Read a GGUF header (local file or Hugging Face file) and report architecture, sizes, RAM need and whether the engine can run it. Does not download the model.', S(repo=P('string', 'owner/name (for remote)'), file=P('string', 'file in the repo'), path=P('string', 'local file name or path'), ctx=P('integer', 'context tokens'), cache_mb=P('integer', 'expert cache MB')), t_inspect),
  ('download_model', 'Start a resumable background download from Hugging Face into the models folder. Checks compatibility, disk space and the 250B cap first.', S(repo=P('string', 'owner/name', req=True), file=P('string', 'gguf file name', req=True), force=P('boolean', 'download even if the check fails')), t_download),
  ('download_status', 'Progress of a download job.', S(job=P('string', 'job id from download_model', req=True)), t_dl_status),
- ('load_model', 'Load a local GGUF into the ExpertStream engine (core in RAM, experts streamed from flash). One model at a time.', S(model=P('string', 'file name in the models folder, or absolute path', req=True), ctx=P('integer', 'context tokens, default 2048'), cache_mb=P('integer', 'expert cache MB, default 1024'), temperature=P('number', '0 = greedy, default 0.7'), max_tokens=P('integer', 'longest answer, default 256')), t_load),
+ ('load_model', 'Load a local GGUF into the ExpertStream engine (core in RAM, experts streamed from flash). One model at a time.', S(model=P('string', 'file name in the models folder, or absolute path', req=True), ctx=P('integer', 'context tokens, default 2048'), cache_mb=P('integer', 'expert cache MB, default 1024'), temperature=P('number', '0 = greedy, default 0.7'), max_tokens=P('integer', 'longest answer, default 256'), skip_threshold=P('number', 'ExpertStream Lookahead: skip experts whose router weight is below this share of the best (0 = off, 0.15-0.25 = faster, small quality cost)')), t_load),
  ('generate', 'Send a prompt to the loaded model and return its answer with speed stats. Keeps conversation context until chat_reset.', S(prompt=P('string', 'user message', req=True), raw=P('boolean', 'continue raw text without chat template')), t_generate),
  ('chat_reset', 'Forget the conversation so far.', S(), t_reset),
  ('benchmark', 'Generate a fixed prompt on the loaded model and report tokens per second and memory.', S(), t_bench),

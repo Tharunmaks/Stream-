@@ -38,6 +38,14 @@ backprop and a byte-level BPE tokenizer; models it trains match the engine's log
 6 x parameters x tokens FLOPs, so large models need `grow_model` (function-preserving depth growth) and long runs;
 the tools print honest estimates. Needs NumPy (`pkg install python-numpy`).
 
+**ExpertStream Lookahead** (native engine): big mixture-of-experts models stream experts from storage, and
+plain streaming waits for storage on every layer. Lookahead (default on in `es_chat`/`es_serve`/MCP) loads all
+missing experts of a layer in parallel, runs the next layer's router early to guess and preload its experts while the
+CPU computes (`-L 1`), can skip experts the router barely uses (`-E 0.15`, a speed/quality knob, off by default),
+and remembers hot experts for a warm start next run (`-W 1`, stored in `<model>.esprof`). On OLMoE with storage
+simulated at 500 MB/s per reader (`ES_SIM_FLASH_MBPS=500`): 1.46 -> 2.94 tok/s, experts found in RAM 49% -> 91%,
+identical output. It removes waiting, not reading: storage speed still bounds models that need many GB per word.
+
 Rebuild the site: `source emsdk_env.sh && bash scripts/build_web.sh` (`UI_ONLY=1` reuses the last
 WebAssembly build). Sources: `web/src/{template.html,style.css,js/,workers/}`.
 

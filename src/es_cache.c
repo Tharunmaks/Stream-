@@ -42,7 +42,8 @@ int es_cache_claim(es_cache *c, es_pool *pool, int layer, int expert) {
     for (int i = 0; i < c->nslots; i++) {
         es_slot *s = &c->slots[i];
         if (s->state == ES_SLOT_LOADING) {
-            if (!es_done(pool, &s->req)) continue;
+            int d = pool ? es_done(pool, &s->req) : __atomic_load_n(&s->req.done, __ATOMIC_ACQUIRE);
+            if (!d) continue;
             s->state = ES_SLOT_READY; /* finished in the background */
         }
         if (s->state == ES_SLOT_EMPTY) { best = i; break; }

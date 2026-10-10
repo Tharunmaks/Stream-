@@ -22,6 +22,11 @@ typedef struct {
     size_t      cache_mb;    /* expert cache size */
     int         threads;     /* compute threads (pinned to the fastest cores) */
     const char *trace_path;  /* optional routing trace file */
+    /* ExpertStream Lookahead (native engine, GGUF experts) */
+    float       skip_thr;    /* drop experts whose router weight < thr * best (0 = off) */
+    int         lookahead;   /* 1 = predict the next layer's experts and load them while computing */
+    int         warm;        /* 1 = preload the experts this model used most last time */
+    int         io_threads;  /* parallel expert readers (0 = 4) */
 } es_engine_opts;
 
 typedef struct {
@@ -33,6 +38,7 @@ typedef struct {
 typedef struct {
     int prompt_tokens, gen_tokens, ctx_reset;
     double prompt_s, gen_s, hit_pct, flash_mb, wait_s;
+    unsigned long long pf_issued, pf_used, skipped;
 } es_turn_stats;
 
 /* 0 on success, else writes a message to err */
@@ -53,5 +59,7 @@ void es_engine_turn_stats(es_turn_stats *s);
 /* Testing: feed ids one by one and write each position's logits. */
 int  es_engine_dump_logits(const int32_t *ids, int n, FILE *f);
 long es_rss_mb(void);
+/* Remember which experts were used (read back by warm start). */
+void es_engine_save_profile(void);
 
 #endif

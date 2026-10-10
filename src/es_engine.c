@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "es_cache.h"
@@ -218,9 +219,141 @@ static void read_at_fd(int fd, uint64_t off, void *dst, size_t n) {
         p += r; n -= (size_t)r; off += (uint64_t)r;
     }
 }
+static double SIM_S_PER_BYTE;   /* ES_SIM_FLASH_MBPS=500: pretend each reader gets that speed (to test slow storage on a fast disk) */
 static void read_tensor(const es_gguf_tensor *t, uint64_t extra, void *dst, size_t n) {
+    if (SIM_S_PER_BYTE > 0) { struct timespec ts = {0, (long)(n * SIM_S_PER_BYTE * 1e9)}; nanosleep(&ts, NULL); }
     read_at_fd(t->shard ? SH_FD[t->shard] : G.fd, shard_base(t) + t->offset + extra, dst, n);
 }
+
+/* ================= ExpertStream Lookahead =================
+ * 1. parallel loader: every missing expert of a layer is read by a small thread pool at once
+ * 2. lookahead: the next layer's router is run on the current hidden state to guess its experts,
+ *    which are loaded in the background while this layer computes
+ * 3. adaptive skipping: experts with a tiny router weight are not loaded at all
+ * 4. warm start: the experts used most last time are preloaded before the first question */
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#include <sched.h>
+static int GIO_ON, LOOKAHEAD;
+static float SKIP_THR;
+typedef struct { int slot, l, e; } gtask;
+static struct { pthread_mutex_t mu; pthread_cond_t cv, cv_done; gtask *dq, *pq; int dh, dn, ph, pn, cap, stop; pthread_t th[16]; int nth; } GQ;
+static unsigned long long STAT_PF_ISSUED, STAT_PF_USED, STAT_SKIPPED;
+static unsigned *PROF;            /* per (layer, expert) use counts */
+static char PROF_PATH[4096];
+
+static void gio_load(const gtask *t) {
+    es_slot *s = &C.slots[t->slot];
+    for (int r = 0; r < 3; r++) {
+        const es_gguf_tensor *x = XT[t->l * 3 + r];
+        const uint64_t per = x->nbytes / x->ne[2];
+        read_tensor(x, per * (uint64_t)t->e, (uint8_t *)s->buf + XOFF[r], per);
+    }
+}
+static void *gio_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&GQ.mu);
+        while (!GQ.stop && !GQ.dn && !GQ.pn) pthread_cond_wait(&GQ.cv, &GQ.mu);
+        if (GQ.stop) { pthread_mutex_unlock(&GQ.mu); return NULL; }
+        gtask t;
+        if (GQ.dn) { t = GQ.dq[GQ.dh]; GQ.dh = (GQ.dh + 1) % GQ.cap; GQ.dn--; }
+        else { t = GQ.pq[GQ.ph]; GQ.ph = (GQ.ph + 1) % GQ.cap; GQ.pn--; }
+        pthread_mutex_unlock(&GQ.mu);
+        gio_load(&t);
+        __atomic_store_n(&C.slots[t.slot].req.done, 1, __ATOMIC_RELEASE);
+        pthread_mutex_lock(&GQ.mu);
+        pthread_cond_broadcast(&GQ.cv_done);
+        pthread_mutex_unlock(&GQ.mu);
+    }
+}
+static void gio_start(int nthreads, int nslots) {
+    GQ.cap = nslots + 8; GQ.dq = malloc(sizeof(gtask) * (size_t)GQ.cap); GQ.pq = malloc(sizeof(gtask) * (size_t)GQ.cap);
+    pthread_mutex_init(&GQ.mu, NULL); pthread_cond_init(&GQ.cv, NULL); pthread_cond_init(&GQ.cv_done, NULL);
+    GQ.nth = nthreads > 16 ? 16 : nthreads < 1 ? 1 : nthreads;
+    for (int i = 0; i < GQ.nth; i++) pthread_create(&GQ.th[i], NULL, gio_worker, NULL);
+    GIO_ON = 1;
+}
+static void gio_enqueue(int slot, int l, int e, int urgent) {
+    C.slots[slot].req.done = 0;
+    pthread_mutex_lock(&GQ.mu);
+    gtask t = {slot, l, e};
+    if (urgent) { GQ.dq[(GQ.dh + GQ.dn) % GQ.cap] = t; GQ.dn++; } else { GQ.pq[(GQ.ph + GQ.pn) % GQ.cap] = t; GQ.pn++; }
+    pthread_cond_signal(&GQ.cv);
+    pthread_mutex_unlock(&GQ.mu);
+}
+static void gio_wait(int slot) {
+    if (__atomic_load_n(&C.slots[slot].req.done, __ATOMIC_ACQUIRE)) return;
+    pthread_mutex_lock(&GQ.mu);
+    while (!__atomic_load_n(&C.slots[slot].req.done, __ATOMIC_ACQUIRE)) pthread_cond_wait(&GQ.cv_done, &GQ.mu);
+    pthread_mutex_unlock(&GQ.mu);
+}
+static float *PFX, *PFR;
+/* guess the experts layer l2 will choose from the hidden state x, and start loading them */
+static void prefetch_layer(int l2, const float *x) {
+    if (!GIO_ON || !LOOKAHEAD || l2 >= M.n_layer || !M.L[l2].moe) return;
+    const int ne = M.n_exp, T = M.n_used + 2;
+    rmsnorm(PFX, x, M.L[l2].ffn_norm.data, M.n_embd, M.eps);
+    es_act a = {.x = PFX, .q8 = NULL, .q80 = NULL, .cols = M.n_embd};
+    es_matvec(M.L[l2].gate_inp.type, M.L[l2].gate_inp.data, M.n_embd, 0, ne, &a, PFR, SCRATCH[0]);
+    for (int j = 0; j < T && j < ne; j++) {
+        int best = -1;
+        for (int e = 0; e < ne; e++) {
+            if (PFR[e] == -INFINITY) continue;
+            if (best < 0 || PFR[e] > PFR[best]) best = e;
+        }
+        if (best < 0) break;
+        const float keep = PFR[best]; PFR[best] = -INFINITY; (void)keep;
+        if (es_cache_find(&C, l2, best) >= 0) continue;
+        const int s = es_cache_claim(&C, NULL, l2, best);
+        if (s < 0) return;
+        C.slots[s].prefetched = 1;
+        C.slots[s].protect_until = C.step + 3;
+        gio_enqueue(s, l2, best, 0);
+        STAT_PF_ISSUED++; STAT_READ_MB += C.slot_bytes / 1048576.0;
+    }
+}
+void es_engine_save_profile(void) {
+    if (!PROF || !PROF_PATH[0]) return;
+    FILE *f = fopen(PROF_PATH, "wb");
+    if (!f) return;
+    uint32_t hdr[3] = {0x50534545u, (uint32_t)M.n_layer, (uint32_t)M.n_exp};
+    fwrite(hdr, 4, 3, f); fwrite(PROF, 4, (size_t)M.n_layer * (size_t)M.n_exp, f); fclose(f);
+}
+static void warm_start(int want) {
+    if (!GIO_ON || !PROF) return;
+    FILE *f = fopen(PROF_PATH, "rb");
+    if (!f) return;
+    uint32_t hdr[3];
+    if (fread(hdr, 4, 3, f) != 3 || hdr[0] != 0x50534545u || (int)hdr[1] != M.n_layer || (int)hdr[2] != M.n_exp) { fclose(f); return; }
+    const size_t n = (size_t)M.n_layer * (size_t)M.n_exp;
+    if (fread(PROF, 4, n, f) != n) { fclose(f); return; }
+    fclose(f);
+    int loaded = 0, *order = malloc(sizeof(int) * n);
+    for (size_t i = 0; i < n; i++) order[i] = (int)i;
+    /* take the `want` most used (selection by repeated max is fine: want is a few thousand at most) */
+    int *pick = malloc(sizeof(int) * (size_t)want);
+    for (int w = 0; w < want; w++) {
+        int b = -1;
+        for (size_t i = 0; i < n; i++) if (order[i] >= 0 && PROF[order[i]] > 0 && (b < 0 || PROF[order[i]] > PROF[order[b]])) b = (int)i;
+        if (b < 0) break;
+        pick[loaded++] = order[b]; order[b] = -1;
+    }
+    for (int i = 0; i < loaded; i++) {
+        const int l = pick[i] / M.n_exp, e = pick[i] % M.n_exp;
+        const int s = es_cache_claim(&C, NULL, l, e);
+        if (s < 0) break;
+        C.slots[s].protect_until = 0; C.slots[s].uses = 1; C.slots[s].last_use = 0;
+        gio_enqueue(s, l, e, 1);
+    }
+    for (int i = 0; i < loaded; i++) { const int s = es_cache_find(&C, pick[i] / M.n_exp, pick[i] % M.n_exp); if (s >= 0) { gio_wait(s); C.slots[s].state = ES_SLOT_READY; } }
+    STAT_READ_MB += loaded * C.slot_bytes / 1048576.0;
+    free(order); free(pick);
+}
+#else
+#define GIO_ON 0
+#endif
+
 /* Make sure the k experts of layer l are in the RAM cache; fill W views. */
 static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
     C.step++;
@@ -230,6 +363,9 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
         int s = es_cache_find(&C, l, sel[j]);
         if (s >= 0) {
             STAT_HITS++;
+#ifndef __EMSCRIPTEN__
+            if (C.slots[s].prefetched) { STAT_PF_USED++; C.slots[s].prefetched = 0; }
+#endif
         } else {
             STAT_MISS++;
             s = es_cache_claim(&C, IO, l, sel[j]);
@@ -242,6 +378,10 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
                     fprintf(stderr, "cannot read %s: %s\n", path, strerror(C.slots[s].req.err));
                     exit(1);
                 }
+            } else if (GIO_ON) {
+#ifndef __EMSCRIPTEN__
+                gio_enqueue(s, l, sel[j], 1);
+#endif
             } else {
                 uint64_t t0 = es_now_ns();
                 for (int r = 0; r < 3; r++) {
@@ -260,6 +400,13 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
         slot[j] = s;
     }
     uint64_t t0 = es_now_ns();
+#ifndef __EMSCRIPTEN__
+    if (GIO_ON) {
+        for (int j = 0; j < k; j++) { gio_wait(slot[j]); C.slots[slot[j]].state = ES_SLOT_READY; if (PROF) PROF[(size_t)l * M.n_exp + sel[j]]++; }
+        STAT_WAIT_S += (es_now_ns() - t0) / 1e9;
+        t0 = es_now_ns();
+    }
+#endif
     for (int j = 0; j < k; j++) {
         es_slot *s = &C.slots[slot[j]];
         if (!PACK) {
@@ -285,7 +432,8 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
 }
 
 static void moe(int l, const float *xn, float *out) {
-    const int ne = M.n_exp, k = M.n_used;
+    const int ne = M.n_exp;
+    int k = M.n_used;
     es_act a;
     es_act_prepare(&a, xn, M.n_embd, M.n_embd % 256 ? NULL : Q8A);
     /* router: softmax over experts, take top-k */
@@ -308,6 +456,15 @@ static void moe(int l, const float *xn, float *out) {
         w[j] = ROUTER[best];
         wsum += w[j];
     }
+#ifndef __EMSCRIPTEN__
+    if (SKIP_THR > 0 && k > 1) {
+        float mxw = 0; for (int j = 0; j < k; j++) if (w[j] > mxw) mxw = w[j];
+        int kk = 0; wsum = 0;
+        for (int j = 0; j < k; j++) if (w[j] >= SKIP_THR * mxw) { sel[kk] = sel[j]; w[kk] = w[j]; wsum += w[j]; kk++; }
+        STAT_SKIPPED += (unsigned long long)(k - kk); k = kk;
+    }
+    if (LOOKAHEAD) prefetch_layer(l + 1, X);
+#endif
     if (M.norm_topk) for (int j = 0; j < k; j++) w[j] /= wsum;
     if (TRACE) {
         fprintf(TRACE, "%d %d", TRACE_TOKEN, l);
@@ -479,6 +636,9 @@ void es_engine_turn_stats(es_turn_stats *s) {
     s->hit_pct = 100.0 * hits / (hits + miss ? hits + miss : 1);
     s->flash_mb = STAT_READ_MB - R0;
     s->wait_s = STAT_WAIT_S - W0;
+#ifndef __EMSCRIPTEN__
+    s->pf_issued = STAT_PF_ISSUED; s->pf_used = STAT_PF_USED; s->skipped = STAT_SKIPPED;
+#endif
 }
 void es_engine_set_sampling(float temp, int top_k, float top_p, int max_new, uint64_t seed) {
     TEMP = temp; TOP_K = top_k; TOP_P = top_p; MAX_NEW = max_new;
@@ -629,6 +789,22 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
     if (any_moe && nslots < 2 * M.n_used + 1) nslots = 2 * M.n_used + 1;
     if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache"); }
+#ifndef __EMSCRIPTEN__
+    if (any_moe) {
+        const char *ev;
+        if ((ev = getenv("ES_SIM_FLASH_MBPS")) && atof(ev) > 0) SIM_S_PER_BYTE = 1.0 / (atof(ev) * 1e6);
+        SKIP_THR = (ev = getenv("ES_SKIP")) ? (float)atof(ev) : o->skip_thr;
+        LOOKAHEAD = (ev = getenv("ES_LOOKAHEAD")) ? atoi(ev) : o->lookahead;
+        int nio = (ev = getenv("ES_IOTHREADS")) ? atoi(ev) : (o->io_threads > 0 ? o->io_threads : 4);
+        if (!PACK && nio > 0 && !getenv("ES_SYNC_IO")) {
+            gio_start(nio, nslots);
+            PFX = malloc(sizeof(float) * (size_t)M.n_embd); PFR = malloc(sizeof(float) * (size_t)(M.n_exp + 1));
+            PROF = calloc((size_t)M.n_layer * (size_t)M.n_exp, sizeof(unsigned));
+            if (o->gguf) snprintf(PROF_PATH, sizeof PROF_PATH, "%s.esprof", o->gguf);
+            if (o->warm) warm_start(nslots * 7 / 10);
+        }
+    }
+#endif
 
     /* activations and KV cache */
     const int n = M.n_embd, kvd = M.n_head_kv * M.head_dim, qd = M.n_head * M.head_dim;

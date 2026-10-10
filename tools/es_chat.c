@@ -71,17 +71,18 @@ static void usage(void) {
             "usage: es_chat (-m PACKDIR | -g FILE.gguf) [-p PROMPT] [-n max_tokens=256] [-r raw]\n"
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
             "               [-c context=2048] [-C cache_mb=1024] [-j threads=4] [-s seed]\n"
-            "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n");
+            "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n"
+            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
-    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 4};
+    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 4, .lookahead = 1, .warm = 1};
     const char *prompt = NULL, *dump_ids = NULL, *dump_path = NULL;
     int max_new = 256, raw = 0, top_k = 40, opt;
     float temp = 0.7f, top_p = 0.9f;
     uint64_t seed = 42;
-    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:Jh")) != -1) {
+    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:")) != -1) {
         switch (opt) {
         case 'm': o.pack = optarg; break;
         case 'g': o.gguf = optarg; break;
@@ -100,6 +101,10 @@ int main(int argc, char **argv) {
         case 'I': dump_ids = optarg; break;   /* testing: comma-separated token ids */
         case 'D': dump_path = optarg; break;  /* testing: write every position's logits */
         case 'J': JSON = 1; QUIET = 1; break;
+        case 'E': o.skip_thr = (float)atof(optarg); break;   /* skip experts below this share of the best */
+        case 'L': o.lookahead = atoi(optarg); break;         /* 1 = predict + preload next layer */
+        case 'W': o.warm = atoi(optarg); break;             /* 1 = preload last run's hot experts */
+        case 'i': o.io_threads = atoi(optarg); break;
         default: usage();
         }
     }
@@ -178,8 +183,8 @@ int main(int argc, char **argv) {
         es_engine_turn_stats(&s);
         double tps = s.gen_tokens / (s.gen_s > 0 ? s.gen_s : 1);
         if (JSON)
-            printf("{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld}\n",
-                   s.gen_tokens, s.gen_s, tps, s.prompt_s, s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb());
+            printf("{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld,\"pf_issued\":%llu,\"pf_used\":%llu,\"skipped\":%llu}\n",
+                   s.gen_tokens, s.gen_s, tps, s.prompt_s, s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb(), s.pf_issued, s.pf_used, s.skipped);
         else
             printf("\n");
         fflush(stdout);
