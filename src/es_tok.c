@@ -47,6 +47,7 @@ struct es_tok {
     int n_special;
     int32_t bos, eos, eot;
     int add_bos;
+    int pre_mode;             /* 0 gpt2/olmo, 1 qwen2, 2 llama3, 3 smollm (each digit alone, then gpt2 rules) */
     char b2u[256][4];         /* byte -> UTF-8 of its GPT-2 unicode char */
     uint8_t b2u_len[256];
     int16_t u2b[512];         /* codepoint -> byte, -1 if none */
@@ -120,6 +121,19 @@ es_tok *es_tok_load(const es_gguf *g, const char **err) {
     t->eos = (int32_t)es_gguf_int(g, "tokenizer.ggml.eos_token_id", -1);
     t->eot = (int32_t)es_gguf_int(g, "tokenizer.ggml.eot_token_id", -1);
     t->add_bos = (int)es_gguf_int(g, "tokenizer.ggml.add_bos_token", 0);
+    {
+        const char *pre = es_gguf_str(g, "tokenizer.ggml.pre");
+        t->pre_mode = 0;
+        if (pre && (!strcmp(pre, "qwen2") || !strcmp(pre, "qwen35") || !strcmp(pre, "stablelm2") ||
+                    !strcmp(pre, "hunyuan") || !strcmp(pre, "solar-open")))
+            t->pre_mode = 1;
+        else if (pre && (!strcmp(pre, "smollm") || !strcmp(pre, "codeshell") || !strcmp(pre, "exaone") ||
+                         !strcmp(pre, "minerva-7b")))
+            t->pre_mode = 3;
+        else if (pre && (!strcmp(pre, "llama-bpe") || !strcmp(pre, "llama3") || !strcmp(pre, "smaug-bpe") ||
+                         !strcmp(pre, "dbrx") || !strcmp(pre, "llama-v3")))
+            t->pre_mode = 2;
+    }
     if (t->eot < 0) {
         static const char *eots[] = {"<|im_end|>", "<|eot_id|>", "<|end|>", "<end_of_turn>", NULL};
         for (int i = 0; eots[i] && t->eot < 0; i++) t->eot = es_tok_find(t, eots[i]);
@@ -205,29 +219,78 @@ static int bpe_word(const es_tok *t, const uint8_t *w, int wn, int32_t *out, int
     return n;
 }
 
-/* GPT-2 pre-tokenizer, same rules as llama.cpp's unicode_regex_split_custom_gpt2 */
-static int encode_raw(const es_tok *t, const uint8_t *s, int n, int32_t *out, int max) {
-    /* decode to codepoints with byte offsets */
-    uint32_t *cp = malloc(sizeof(uint32_t) * (size_t)(n + 1));
-    int *off = malloc(sizeof(int) * (size_t)(n + 1));
-    int m = 0;
-    for (int i = 0; i < n;) {
-        int k = utf8_len(s[i]);
-        if (i + k > n) k = 1;
-        cp[m] = utf8_cp(s + i, k);
-        off[m++] = i;
-        i += k;
+
+/* Pre-tokenizer for the Qwen2 / Llama-3 family. Same rules, in the same
+ * order, as llama.cpp's regex
+ *   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,k}|
+ *   ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+ * with k = 1 (Qwen) or 3 (Llama 3). Returns the length (in code points) of
+ * the piece starting at pos. */
+static int split_qwen_like(const uint32_t *cp, int m, int pos, int digits) {
+#define CLS(i) ((i) < m ? cclass(cp[i]) : -1)
+#define LOWER(x) ((x) | 32u)
+    const uint32_t c = cp[pos];
+    if (c == '\'' && pos + 1 < m) {
+        uint32_t c1 = LOWER(cp[pos + 1]);
+        if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd') return 2;
+        if (pos + 2 < m) {
+            uint32_t c2 = LOWER(cp[pos + 2]);
+            if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l')) return 3;
+        }
     }
-    off[m] = n;
-#define CL(i) ((i) < m ? cclass(cp[i]) : -1)
+    /* [^\r\n\p{L}\p{N}]?\p{L}+ */
+    {
+        int p = pos;
+        int cl = CLS(p);
+        if (cl != C_LETTER && c != '\r' && c != '\n' && cl != C_NUMBER) p++;   /* optional leading char */
+        if (CLS(p) == C_LETTER) {
+            while (CLS(p) == C_LETTER) p++;
+            return p - pos;
+        }
+    }
+    /* \p{N}{1,digits} */
+    if (CLS(pos) == C_NUMBER) {
+        int p = pos;
+        while (p - pos < digits && CLS(p) == C_NUMBER) p++;
+        return p - pos;
+    }
+    /*  ?[^\s\p{L}\p{N}]+[\r\n]* */
+    {
+        int p = pos + (c == ' ' ? 1 : 0);
+        if (CLS(p) == C_OTHER) {
+            while (CLS(p) == C_OTHER) p++;
+            while (p < m && (cp[p] == '\r' || cp[p] == '\n')) p++;
+            return p - pos;
+        }
+    }
+    /* whitespace: \s*[\r\n]+ | \s+(?!\S) | \s+ */
+    {
+        int run = 0;
+        while (CLS(pos + run) == C_SPACE) run++;
+        int last_nl = -1;
+        for (int i = 0; i < run; i++) if (cp[pos + i] == '\r' || cp[pos + i] == '\n') last_nl = i;
+        if (last_nl >= 0) return last_nl + 1;
+        if (pos + run >= m) return run;      /* whitespace reaching the end of text */
+        if (run >= 2) return run - 1;        /* leave one space to attach to the next word */
+        return run > 0 ? run : 1;
+    }
+#undef CLS
+#undef LOWER
+}
+
+/* GPT-2 pre-tokenizer, same rules as llama.cpp's unicode_regex_split_custom_gpt2 */
+/* split code points [lo, hi) with the GPT-2 rules and BPE-encode each piece */
+static int gpt2_range(const es_tok *t, const uint8_t *s, const uint32_t *cp, const int *off, int lo, int hi,
+                      int32_t *out, int max) {
+#define CL(i) ((i) < hi ? cclass(cp[i]) : -1)
     int count = 0;
-    for (int pos = 0; pos < m && count < max;) {
+    for (int pos = lo; pos < hi && count < max;) {
         int start = pos;
         uint32_t c = cp[pos];
-        if (c == '\'' && pos + 1 < m) {
+        if (c == '\'' && pos + 1 < hi) {
             uint32_t c1 = cp[pos + 1];
             if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd') { pos += 2; goto emit; }
-            if (pos + 2 < m) {
+            if (pos + 2 < hi) {
                 uint32_t c2 = cp[pos + 2];
                 if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l')) { pos += 3; goto emit; }
             }
@@ -245,7 +308,7 @@ static int encode_raw(const es_tok *t, const uint8_t *s, int n, int32_t *out, in
         {
             int nw = 0;
             while (CL(pos + nw) == C_SPACE) nw++;
-            if (nw > 1 && pos + nw < m) { pos += nw - 1; goto emit; }
+            if (nw > 1 && pos + nw < hi) { pos += nw - 1; goto emit; }
             if (nw > 0) { pos += nw; goto emit; }
         }
         pos++;
@@ -253,6 +316,43 @@ static int encode_raw(const es_tok *t, const uint8_t *s, int n, int32_t *out, in
         count += bpe_word(t, s + off[start], off[pos] - off[start], out + count, max - count);
     }
 #undef CL
+    return count;
+}
+
+static int encode_raw(const es_tok *t, const uint8_t *s, int n, int32_t *out, int max) {
+    /* decode to codepoints with byte offsets */
+    uint32_t *cp = malloc(sizeof(uint32_t) * (size_t)(n + 1));
+    int *off = malloc(sizeof(int) * (size_t)(n + 1));
+    int m = 0;
+    for (int i = 0; i < n;) {
+        int k = utf8_len(s[i]);
+        if (i + k > n) k = 1;
+        cp[m] = utf8_cp(s + i, k);
+        off[m++] = i;
+        i += k;
+    }
+    off[m] = n;
+    int count = 0;
+    if (t->pre_mode == 1 || t->pre_mode == 2) {
+        for (int pos = 0; pos < m && count < max;) {
+            int len = split_qwen_like(cp, m, pos, t->pre_mode == 2 ? 3 : 1);
+            count += bpe_word(t, s + off[pos], off[pos + len] - off[pos], out + count, max - count);
+            pos += len;
+        }
+    } else if (t->pre_mode == 3) {
+        /* every digit on its own, the text between digits uses the GPT-2 rules */
+        int lo = 0;
+        for (int pos = 0; pos <= m && count < max; pos++) {
+            int digit = pos < m && cclass(cp[pos]) == C_NUMBER;
+            if (pos == m || digit) {
+                if (pos > lo) count += gpt2_range(t, s, cp, off, lo, pos, out + count, max - count);
+                if (digit) count += bpe_word(t, s + off[pos], off[pos + 1] - off[pos], out + count, max - count);
+                lo = pos + 1;
+            }
+        }
+    } else {
+        count = gpt2_range(t, s, cp, off, 0, m, out, max);
+    }
     free(cp); free(off);
     return count;
 }

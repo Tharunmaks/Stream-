@@ -32,6 +32,7 @@ typedef struct { uint32_t type; int rows, cols; const void *data; } W;
 
 typedef struct {
     W attn_norm, q, k, v, o, q_norm, k_norm, ffn_norm, gate_inp;
+    W bq, bk, bv;                            /* optional QKV biases (Qwen2) */
     W ffn_gate, ffn_up, ffn_down;            /* dense FFN (layers without experts) */
     W sh_gate, sh_up, sh_down;               /* shared expert, if any */
     int moe;
@@ -336,7 +337,7 @@ static void dense_ffn(const W *wg, const W *wu, const W *wd, const float *xn, fl
 
 /* one token through the whole model; writes LOGITS if want_logits */
 static void forward(int32_t tok, int pos, int want_logits) {
-    const int n = M.n_embd, hd = M.head_dim, kvd = M.n_head_kv * hd;
+    const int n = M.n_embd, hd = M.head_dim, kvd = M.n_head_kv * hd, qd_ = M.n_head * hd;
     es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)tok, X, n);
     for (int l = 0; l < M.n_layer; l++) {
         layer *L = &M.L[l];
@@ -347,6 +348,11 @@ static void forward(int32_t tok, int pos, int want_logits) {
         job(&L->k, &a, K);
         job(&L->v, &a, V);
         run_jobs();
+        if (L->bq.data) {
+            const float *b = L->bq.data; for (int i = 0; i < qd_; i++) Q[i] += b[i];
+            b = L->bk.data; for (int i = 0; i < kvd; i++) K[i] += b[i];
+            b = L->bv.data; for (int i = 0; i < kvd; i++) V[i] += b[i];
+        }
         if (L->q_norm.data) {
             if (L->q_norm.cols == n) rmsnorm(Q, Q, L->q_norm.data, M.n_head * hd, M.eps);
             else for (int h = 0; h < M.n_head; h++) rmsnorm(Q + h * hd, Q + h * hd, L->q_norm.data, hd, M.eps);
@@ -492,10 +498,16 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     snprintf(key, sizeof key, "%s.rope.freq_base", M.arch);
     M.rope_base = (kv = es_gguf_find(&G, key)) ? (float)kv->v.f : 10000.0f;
     if (!strcmp(M.arch, "olmoe")) { M.rope_neox = 1; M.norm_topk = 0; }
-    else if (!strcmp(M.arch, "qwen3moe") || !strcmp(M.arch, "qwen2moe")) { M.rope_neox = 1; M.norm_topk = !strcmp(M.arch, "qwen3moe"); }
+    else if (!strcmp(M.arch, "qwen3moe")) { M.rope_neox = 1; M.norm_topk = 1; }
+    else if (!strcmp(M.arch, "qwen3") || !strcmp(M.arch, "qwen2")) { M.rope_neox = 1; M.norm_topk = 0; }
     else if (!strcmp(M.arch, "llama") || !strcmp(M.arch, "mixtral")) { M.rope_neox = 0; M.norm_topk = 1; }
-    else ERR("architecture '%s' is not supported yet (olmoe, qwen3moe, llama/mixtral are)", M.arch);
-    if (M.n_exp <= 0 || M.n_used <= 0 || M.n_used > MAXK) ERR("not a supported Mixture-of-Experts model");
+    else ERR("architecture '%s' is not supported yet (olmoe, qwen3moe, qwen3, qwen2, llama are)", M.arch);
+    if (M.n_exp < 0 || M.n_used > MAXK || (M.n_exp > 0 && M.n_used <= 0)) ERR("unsupported expert layout");
+    snprintf(key, sizeof key, "%s.rope.dimension_count", M.arch);
+    { int rd = (int)es_gguf_int(&G, key, M.head_dim);
+      if (rd != M.head_dim) ERR("partial rotary embeddings (%d of %d dims) are not supported yet", rd, M.head_dim); }
+    snprintf(key, sizeof key, "%s.rope.scaling.type", M.arch);
+    { const char *rs = es_gguf_str(&G, key); (void)rs; }
 
     /* copy every non-expert tensor into RAM */
     M.tptr = calloc(G.n_tensors, sizeof(uint8_t *));
@@ -518,6 +530,10 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
 #define T_(field, name, req) do { snprintf(key, sizeof key, "blk.%d." name ".weight", l); L->field = load_w(key, req); } while (0)
         T_(attn_norm, "attn_norm", 1); T_(q, "attn_q", 1); T_(k, "attn_k", 1); T_(v, "attn_v", 1);
         T_(o, "attn_output", 1); T_(q_norm, "attn_q_norm", 0); T_(k_norm, "attn_k_norm", 0);
+        { snprintf(key, sizeof key, "blk.%d.attn_q.bias", l); L->bq = load_w(key, 0);
+          snprintf(key, sizeof key, "blk.%d.attn_k.bias", l); L->bk = load_w(key, 0);
+          snprintf(key, sizeof key, "blk.%d.attn_v.bias", l); L->bv = load_w(key, 0);
+          if (!L->bq.data != !L->bk.data || !L->bq.data != !L->bv.data) ERR("layer %d has only some of the Q/K/V biases", l); }
         T_(ffn_norm, "ffn_norm", 1); T_(gate_inp, "ffn_gate_inp", 0);
         T_(ffn_gate, "ffn_gate", 0); T_(ffn_up, "ffn_up", 0); T_(ffn_down, "ffn_down", 0);
         T_(sh_gate, "ffn_gate_shexp", 0); T_(sh_up, "ffn_up_shexp", 0); T_(sh_down, "ffn_down_shexp", 0);
@@ -551,7 +567,11 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
 
     /* expert cache: slot size from the pack, or from the GGUF tensor shapes */
     unsigned long long slot_bytes = 0;
-    if (PACK) {
+    int any_moe = 0;
+    for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe) any_moe = 1;
+    if (!any_moe) {
+        slot_bytes = 4096;                      /* dense model: nothing to stream */
+    } else if (PACK) {
         unsigned lay, ne;
         if (es_read_manifest(PACK, &lay, &ne, &slot_bytes)) ERR("no manifest.txt in %s", PACK);
     } else {
@@ -571,9 +591,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
             if (off > slot_bytes) slot_bytes = off;
         }
     }
-    int nslots = (int)(o->cache_mb * 1048576ull / slot_bytes);
-    if (nslots < 2 * M.n_used + 1) nslots = 2 * M.n_used + 1;
-    if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache");
+    int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
+    if (any_moe && nslots < 2 * M.n_used + 1) nslots = 2 * M.n_used + 1;
+    if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache"); }
 
     /* activations and KV cache */
     const int n = M.n_embd, kvd = M.n_head_kv * M.head_dim, qd = M.n_head * M.head_dim;
@@ -597,7 +617,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
 
     const char *nm = es_gguf_str(&G, "general.name");
     INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, nslots,
-                            M.core_bytes / 1e6, nslots * (double)slot_bytes / 1e6, 2 * kv_bytes / 1e6,
+                            M.core_bytes / 1e6, any_moe ? nslots * (double)slot_bytes / 1e6 : 0.0, 2 * kv_bytes / 1e6,
                             (es_now_ns() - t0) / 1e9};
     DONE = 1;
     return 0;
