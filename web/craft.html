@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-/9lk7l2s6v14C90pc9K+Pbrd3trnSIxn7LXkawzQN1w='; style-src 'unsafe-inline'; font-src data:; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-f4lLRzkDebnWhg6NzfwFhouR3+yJgTKxr0yKRYL0e+E='; style-src 'unsafe-inline'; font-src data:; img-src 'self' data:; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'">
 <meta name="referrer" content="no-referrer">
-<meta name="description" content="Expert Craft: an MCP server that lets Claude, ChatGPT or any AI build a language model from scratch, 1 million to 70 billion parameters, on free compute.">
+<meta name="description" content="Expert Craft: train a language model with up to 70 billion parameters on your own phone for free. A small model in RAM plus millions of page-sized experts in a sparse file on flash, trained in place.">
 <title>Expert Craft</title>
 <style>
 /* Latin subsets of Bricolage Grotesque, IBM Plex Sans and IBM Plex Mono (SIL Open Font License), embedded so the page makes no third-party requests. */
@@ -94,6 +94,8 @@ pre { margin: 0; background: #050810; border: 1px solid var(--line); border-radi
 ul.clean { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--ink-2); }
 footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 40px; color: var(--ink-3); font-size: 13px; }
 :focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; border-radius: 6px; }
+details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f-display); font-size: 17px; }
+.res td, .res th { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -108,26 +110,90 @@ footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 40px; color: var(--i
 
 <main>
   <section class="hero">
-    <span class="eyebrow">MCP server · free · phone and PC</span>
+    <span class="eyebrow">Free · offline · runs in Termux</span>
     <h1>Expert<em>Craft</em></h1>
-    <p class="muted">Let Claude, ChatGPT, Cursor or any AI that speaks MCP build a language model from scratch, from 1 million up to 70 billion parameters. It designs the model, gets free training data, trains a BPE tokenizer, writes the PyTorch code, and trains on free GPUs (Google Colab, Kaggle) or your own machine.</p>
+    <p class="muted">Train a language model with up to <b>70 billion parameters</b> on your own phone. A small model stays in RAM. The other parameters live in millions of page-sized experts in a file on flash, and each word reads, trains and rewrites only a handful of them. No GPU, no account, no cloud.</p>
     <div class="row">
-      <a class="btn primary" href="#connect">Connect it to your AI</a>
-      <a class="btn" href="#plan">Plan a model</a>
+      <a class="btn primary" href="#start">Start on your phone</a>
+      <a class="btn" href="#plan">Plan for your phone</a>
+      <a class="btn" href="#honest">What you really get</a>
       <a class="btn" href="https://github.com/Tharunmaks/Stream-/tree/claude/expertstream-moe-android-oegt59/craft" rel="noopener">Source on GitHub</a>
     </div>
   </section>
 
   <section class="grid4" aria-label="How it works">
-    <div class="card"><div class="num">1</div><h3>Design</h3><p class="muted">Pick a size. It chooses layers, width, heads and shows the exact parameter count, memory and training time.</p></div>
-    <div class="card"><div class="num">2</div><h3>Data</h3><p class="muted">Streams free datasets (TinyStories, FineWeb-Edu, Wikipedia) or your own text, and trains a BPE tokenizer on it.</p></div>
-    <div class="card"><div class="num">3</div><h3>Train</h3><p class="muted">One device, or many GPUs with FSDP. Saves often and resumes by itself when a free session ends.</p></div>
-    <div class="card"><div class="num">4</div><h3>Talk to it</h3><p class="muted">Export to one weights file and chat with the model you made.</p></div>
+    <div class="card"><div class="num">1</div><h3>Small model in RAM</h3><p class="muted">An ordinary transformer of a few million parameters, trained the normal way with hand-written, gradient-checked backpropagation.</p></div>
+    <div class="card"><div class="num">2</div><h3>Experts on flash</h3><p class="muted">Each expert is a tiny network that fills exactly one 4 KB flash page. About 18 million of them make 70 billion parameters. The file is sparse, so unused experts take no space.</p></div>
+    <div class="card"><div class="num">3</div><h3>Routing by hash</h3><p class="muted">The last 1, 2 and 3 tokens each pick one expert by hash, so the same context always reaches the same page and every occurrence trains it (hashed n-gram memory, as in Engram and the Byte Latent Transformer). A learned product-key router is available with --route pk.</p></div>
+    <div class="card"><div class="num">4</div><h3>Train in place</h3><p class="muted">Only those 3 pages are read, updated (row-wise Adagrad, 8-bit stochastic rounding) and written back. The work per word is that of the small model.</p></div>
   </section>
 
   <section class="card hot" id="plan">
-    <span class="eyebrow">Planner</span>
-    <h2>How big, and can you train it for free?</h2>
+    <span class="eyebrow">Planner · phone</span>
+    <h2>What does your phone get?</h2>
+    <div class="row" style="align-items:flex-end;justify-content:space-between">
+      <div><div class="big" id="f-size">70B</div><div class="dim">parameters wanted</div></div>
+      <div class="presets" id="f-presets"></div>
+    </div>
+    <input type="range" id="f-range" min="0" max="1000" step="1" aria-label="Parameters wanted">
+    <div class="grid2">
+      <label class="dim" style="display:grid;gap:4px">Minutes of training <input id="f-min" type="number" min="5" step="5" value="600" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
+      <label class="dim" style="display:grid;gap:4px">Tokens per second on your phone <input id="f-tps" type="number" min="20" step="20" value="400" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
+      <label class="dim" style="display:grid;gap:4px">Free storage, GB <input id="f-disk" type="number" min="1" step="5" value="100" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
+      <div class="dim" style="font-size:13px;align-self:end">The speed is a guess. Run <span class="mono">phone-plan</span> on your phone: it measures the real figure and your storage speed.</div>
+    </div>
+    <div class="tiles">
+      <div class="tile"><span class="v" id="f-total">-</span><span class="k">parameters trained on the device</span></div>
+      <div class="tile"><span class="v" id="f-dense">-</span><span class="k">dense model in RAM</span></div>
+      <div class="tile"><span class="v" id="f-exp">-</span><span class="k">experts on flash</span></div>
+      <div class="tile"><span class="v" id="f-active">-</span><span class="k">used per word</span></div>
+      <div class="tile"><span class="v" id="f-tokens">-</span><span class="k">tokens in that time</span></div>
+      <div class="tile"><span class="v" id="f-visits">-</span><span class="k">uses per expert</span></div>
+      <div class="tile"><span class="v" id="f-file">-</span><span class="k">file size when full</span></div>
+      <div class="tile"><span class="v" id="f-wear">-</span><span class="k">flash written per day</span></div>
+    </div>
+    <div class="verdict" id="f-verdict" role="status"></div>
+    <p class="dim" style="font-size:13px">Sizing follows the code in craft/phone: the dense model is the largest rung of a fixed ladder with about 20 tokens per parameter, experts fill one 4096-byte page each, 3 experts are used per word. Flash written is an upper bound (pages are written back after every step).</p>
+  </section>
+
+  <section class="card" id="start">
+    <span class="eyebrow">Start</span>
+    <h2>Train it on your phone</h2>
+    <p class="muted">Termux (from F-Droid) on Android, or any Linux/Mac/Windows shell with Python 3. Only NumPy is needed. Keep the phone on a charger and use internal storage (an SD card or FAT volume cannot hold a sparse file).</p>
+    <div class="code"><pre id="s-cmd">pkg install -y python python-numpy git
+git clone https://github.com/Tharunmaks/Stream-.git ~/Stream-
+cd ~/Stream-
+
+# 1. see what 70B means on THIS phone (measures speed, storage and wear, then explains it)
+python3 craft/expertcraft.py phone-plan 70e9 --minutes 600
+
+# 2. train: any text file or folder, or the free TinyStories sample
+python3 craft/expertcraft.py phone-train mymodel --dataset tinystories --params 70e9 --minutes 600 --min-battery 25 --max-temp 42 --max-wear-gb 2000
+
+# 3. stop any time (Ctrl-C saves); run the same command again to continue
+
+# 4. talk to it
+python3 craft/expertcraft.py phone-sample mymodel --prompt "Once upon a time"
+python3 craft/expertcraft.py phone-status mymodel</pre><button class="btn copy" data-copy="s-cmd">Copy</button></div>
+    <p class="dim" style="font-size:13px">Projects live in ~/expertcraft (set EXPERTCRAFT_HOME to change it). The tool never writes outside that folder.</p>
+  </section>
+
+  <section class="card" id="honest">
+    <span class="eyebrow">Straight answer</span>
+    <h2>What 70 billion parameters on a phone really means</h2>
+    <ul class="clean">
+      <li><b>True:</b> all 70 billion parameters exist on the phone, are read, trained and saved there, for free, without a GPU or network. Training a dense 70B model this way is impossible: it costs about 4×10^20 FLOPs per billion tokens, hundreds of years at the speed of a phone CPU. That is why the model is sparse.</li>
+      <li><b>Also true:</b> each word uses only about 0.005% of them, and a phone processes a few tens of millions of tokens a day. The text quality follows the words seen and the small dense model, not the file size. Expect small-model text, a little better than the same small model without experts (measured below).</li>
+      <li><b>Cost:</b> every word reads and rewrites 3 flash pages (12 KB). Nonstop training therefore writes terabytes per day; the planner shows it and <span class="mono">--max-wear-gb</span> caps it. Use a charger and keep the phone cool.</li>
+      <li><b>Not done:</b> there is no GPU path for the experts and no export to the fast C engine yet; a trained model is used with <span class="mono">phone-sample</span> (NumPy). It was tested on a 4-core Linux PC, not yet on a phone, so measure with <span class="mono">phone-plan</span> first.</li>
+    </ul>
+    <h3>Measured on the test PC</h3>
+    <div class="scroll"><table class="tbl res"><thead><tr><th>3.0M-parameter dense model (width 192), same data and 2,000 steps (2.05M tokens)</th><th class="r">Validation loss</th><th class="r">vs no experts</th><th class="r">Perplexity</th></tr></thead><tbody><tr><td>No experts (dense only)</td><td class="r mono">2.611</td><td class="r mono">–</td><td class="r mono">13.6</td></tr><tr><td>+ Flash Experts: 262,144 experts = 1.0B parameters, orders 1+2+3</td><td class="r mono">2.367</td><td class="r mono">-0.244</td><td class="r mono">10.7</td></tr></tbody></table></div><p class="dim" style="font-size:13px">Measured on a 4-core Linux PC with TinyStories. Perplexity is 21% lower with experts. More experts help until the table exceeds the distinct contexts in the data (small model, 800 steps: 1K experts 2.880, 4K 2.807, 262K 2.724, 1M 2.715, none 3.187). A real run of the command line tool with --params 70e9 on this PC: 69.98 billion parameters, 1.83M tokens in 23 minutes (1,340 tokens/s), validation loss 2.345 on its own split, a 74.6 GB sparse file of which 2.15 GB was on disk (520,407 experts created), 15.5 GB of flash written. Not yet measured on a phone.</p>
+  </section>
+
+  <details class="card" id="gpu">
+    <summary>Other free compute: Colab and Kaggle GPUs (100M to 1B parameters, dense)</summary>
+    <p class="muted">The same tool writes a complete PyTorch project (Llama-style, FSDP, resumable) with Colab and Kaggle notebooks: <span class="mono">python3 craft/expertcraft.py scaffold 125e6 mymodel</span>.</p>
     <div class="row" style="align-items:flex-end;justify-content:space-between">
       <div><div class="big" id="p-size">30M</div><div class="dim">parameters</div></div>
       <div class="presets" id="presets"></div>
@@ -141,52 +207,22 @@ footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 40px; color: var(--i
     </div>
     <div class="verdict" id="verdict" role="status"></div>
     <div class="scroll"><table class="tbl" id="hw"><thead><tr><th>Where</th><th>Fits</th><th class="r">Time</th><th class="r">Largest it can train</th></tr></thead><tbody></tbody></table></div>
-    <p class="dim" style="font-size:13px">Estimates: training costs 6 × parameters × tokens FLOPs. Effective speed assumed: phone 0.02, T4 15, H100 400 TFLOPS per device. Memory: 16 bytes per parameter (split across GPUs with FSDP) plus activations. The MCP server's <span class="mono">free_compute_plan</span> tool gives the same numbers.</p>
+    <p class="dim" style="font-size:13px">Estimates: training costs 6 × parameters × tokens FLOPs. Effective speed assumed: phone 0.02, T4 15, H100 400 TFLOPS per device. Memory: 16 bytes per parameter (split across GPUs with FSDP) plus activations.</p>
     <div class="code"><pre id="p-cmd"></pre><button class="btn copy" data-copy="p-cmd">Copy</button></div>
-  </section>
-
-  <section class="card" id="connect">
-    <span class="eyebrow">Connect</span>
-    <h2>Add Expert Craft to your AI</h2>
-    <p class="muted">Get the code once: <span class="mono">git clone https://github.com/Tharunmaks/Stream-.git</span>. It needs only Python 3; training needs PyTorch.</p>
-    <div class="seg" role="tablist" id="seg"></div>
-    <div class="code"><pre id="conn"></pre><button class="btn copy" data-copy="conn">Copy</button></div>
-    <p class="dim" id="conn-note"></p>
-  </section>
-
-  <section class="grid2">
-    <div class="card">
-      <span class="eyebrow">Free compute</span>
-      <h3>Where training happens</h3>
-      <ul class="clean">
-        <li><b>Your phone (Termux):</b> tiny models and testing the pipeline. Slow but always available.</li>
-        <li><b>Google Colab free:</b> 1× T4 GPU. Every project includes <span class="mono">colab.ipynb</span>, saving to Google Drive so it resumes.</li>
-        <li><b>Kaggle free:</b> 2× T4 GPUs, about 30 GPU-hours a week. Every project includes <span class="mono">kaggle.ipynb</span>, which shards the model over both GPUs.</li>
-        <li><b>Rented GPUs:</b> the same <span class="mono">torchrun … --fsdp</span> command scales to many GPUs for billions of parameters.</li>
-      </ul>
-    </div>
-    <div class="card">
-      <span class="eyebrow">Straight answer</span>
-      <h3>About 70 billion parameters</h3>
-      <p class="muted">Expert Craft designs, writes and can run training code for a 70B model (FSDP, sharded checkpoints, meta-device init, activation checkpointing). Training one properly needs about 1.1 TB of GPU memory and around 400,000 H100-hours, so no free service can do it. The free path: build and test the pipeline small, train 30M–1B models on Colab or Kaggle, and scale up when you have GPUs.</p>
-    </div>
-  </section>
+  </details>
 
   <section class="card">
-    <span class="eyebrow">Tools</span>
-    <h2>What the AI gets</h2>
+    <span class="eyebrow">Commands</span>
+    <h2>Everything is one file</h2>
     <div class="scroll"><table class="tbl">
-      <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+      <thead><tr><th>Command</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td class="mono">craft_guide</td><td>Workflow and rules (honest estimates, start small, check loss).</td></tr>
-        <tr><td class="mono">design_model</td><td>Config for any size from 1M to 70B, with cost.</td></tr>
-        <tr><td class="mono">estimate_model</td><td>Exact params, memory, FLOPs and hours for a config.</td></tr>
-        <tr><td class="mono">free_compute_plan</td><td>Phone vs Colab vs Kaggle: fits, hours, largest model.</td></tr>
-        <tr><td class="mono">scaffold_project</td><td>Writes model, data, trainer, export, sampler, Colab and Kaggle notebooks.</td></tr>
-        <tr><td class="mono">run_step</td><td>Runs data / train / export / sample, in the background for long jobs.</td></tr>
-        <tr><td class="mono">job_status</td><td>Running or not, loss trend, best validation loss, checkpoints.</td></tr>
-        <tr><td class="mono">stop_job</td><td>Stops training after saving a checkpoint.</td></tr>
-        <tr><td class="mono">connect_guide</td><td>Setup snippets for every AI app.</td></tr>
+        <tr><td class="mono">phone-plan SIZE</td><td>Measures this device and prints the plan: parameters, speed, uses per expert, flash written, honest summary.</td></tr>
+        <tr><td class="mono">phone-train NAME</td><td>Prepares data and tokenizer, trains, saves, resumes. Guards: --min-battery, --max-temp, --max-wear-gb, --minutes.</td></tr>
+        <tr><td class="mono">phone-sample NAME</td><td>Generates text from the trained model.</td></tr>
+        <tr><td class="mono">phone-status NAME</td><td>Loss trend, experts created, flash written, disk used.</td></tr>
+        <tr><td class="mono">plan / design / scaffold</td><td>Free GPU planning and a ready-to-train PyTorch project with Colab and Kaggle notebooks.</td></tr>
+        <tr><td class="mono">run / status / stop</td><td>Run the scaffolded project's data, train, export and sample steps in the background.</td></tr>
       </tbody>
     </table></div>
   </section>
@@ -263,26 +299,43 @@ footer { max-width: 1080px; margin: 0 auto; padding: 0 16px 40px; color: var(--i
     if (best && best.h <= 60) { v.className = "verdict good"; v.textContent = "Trainable for free: about " + hrs(best.h) + " on " + best.name + "."; }
     else if (best) { v.className = "verdict warn"; v.textContent = "Fits on " + best.name + " but full training takes about " + hrs(best.h) + " (" + (best.h / 30).toFixed(1) + " weeks of Kaggle quota). Train on fewer tokens, or go smaller."; }
     else { v.className = "verdict bad"; v.textContent = fmt(n) + " parameters need " + gb(16 * n) + " to train, more than any free service has. Expert Craft can still design it, write the multi-GPU code and test it small for free; full training needs rented GPUs or a research grant such as Google's TPU Research Cloud."; }
-    $("p-cmd").textContent = "# ask your AI: \"use expertcraft to build a " + fmt(n) + " model\"\n# or by hand:\npython3 craft/expertcraft_mcp.py scaffold " + t.toPrecision(2).replace("+", "") + " my-model\ncd ~/expertcraft/my-model && python data.py --dataset tinystories && python train.py --out run";
+    $("p-cmd").textContent = "python3 craft/expertcraft.py plan " + t.toPrecision(2).replace("+", "") + "\npython3 craft/expertcraft.py scaffold " + t.toPrecision(2).replace("+", "") + " my-model\ncd ~/expertcraft/my-model && python3 data.py --dataset tinystories --max_tokens 50e6 && python3 train.py --out run --steps 2000";
   }
   $("p-range").addEventListener("input", function () { set(toT(+this.value)); });
   set(30e6);
 
-  var P = "~/Stream-/craft/expertcraft_mcp.py";
-  var CONN = [
-    ["Claude Code", "claude mcp add expertcraft -- python3 " + P, "Works on PC and in Termux on Android. Then ask: \"use expertcraft to build a 30M model\"."],
-    ["Claude Desktop", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Settings > Developer > Edit config, add this, restart. On Windows use the full path and \"python\"."],
-    ["Cursor / Windsurf / Cline", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Paste into the app's MCP settings file (mcp.json)."],
-    ["VS Code", JSON.stringify({ servers: { expertcraft: { type: "stdio", command: "python3", args: [P] } } }, null, 2), ".vscode/mcp.json in your workspace."],
-    ["Codex CLI", "[mcp_servers.expertcraft]\ncommand = \"python3\"\nargs = [\"" + P + "\"]", "Add to ~/.codex/config.toml."],
-    ["Gemini CLI", JSON.stringify({ mcpServers: { expertcraft: { command: "python3", args: [P] } } }, null, 2), "Add to ~/.gemini/settings.json."],
-    ["Phone apps (URL)", "pkg install python cloudflared\npython3 " + P + " --http 8766 --public\n# prints: https://<name>.trycloudflare.com/s/<secret>/mcp", "For apps that ask for a server URL: paste the printed link where the app lets you add a custom connector. The secret inside the link is the password, so keep it private."]
-  ];
-  CONN.forEach(function (c, i) {
-    var b = document.createElement("button"); b.setAttribute("role", "tab"); b.textContent = c[0];
-    b.onclick = function () { [].forEach.call($("seg").children, function (x) { x.setAttribute("aria-selected", "false"); }); b.setAttribute("aria-selected", "true"); $("conn").textContent = c[1]; $("conn-note").textContent = c[2]; };
-    $("seg").appendChild(b); if (!i) b.onclick();
+  // ---------------- phone planner: same sizing rules as craft/phone (backbone ladder, one 4 KB page per expert, 8 experts per word)
+  var BB = [[639840, 96, 4, 19], [1066112, 128, 4, 15], [3049920, 192, 6, 10], [6754560, 256, 8, 7], [10573120, 320, 8, 6], [18489216, 384, 10, 5], [39006720, 512, 12, 3]], PAGE = 4096, PER_TOKEN = 3, FMIN = 1e9, FMAX = 70e9;
+  var fT = 70e9;
+  var fx = function (v) { return Math.round(1000 * (Math.log(v) - Math.log(FMIN)) / (Math.log(FMAX) - Math.log(FMIN))); };
+  var fy = function (v) { return Math.exp(Math.log(FMIN) + (Math.log(FMAX) - Math.log(FMIN)) * v / 1000); };
+  [["1B", 1e9], ["7B", 7e9], ["30B", 30e9], ["70B", 70e9]].forEach(function (p) {
+    var b = document.createElement("button"); b.textContent = p[0]; b.dataset.t = p[1]; b.onclick = function () { fT = p[1]; fset(); }; $("f-presets").appendChild(b);
   });
+  function fset() {
+    var minutes = Math.max(5, +$("f-min").value || 600), tps = Math.max(1, +$("f-tps").value || 400), free = Math.max(1, +$("f-disk").value || 100);
+    var tokens = tps * 60 * minutes, bb = BB[0];
+    BB.forEach(function (r) { if (r[0] <= tokens / 20) bb = r; });
+    var bp = bb[0], per = 2 * bb[3] * bb[1], shrunk = false, want = fT;
+    var nk = Math.max(2, Math.round(Math.sqrt(Math.max(want - bp, 1e6) / per)));
+    if (nk * nk * PAGE / 1e9 > free * 0.85) { nk = Math.max(2, Math.floor(Math.sqrt(free * 0.85 * 1e9 / PAGE))); shrunk = true; }
+    var E = nk * nk, total = bp + E * per, active = bp + PER_TOKEN * per, visits = tokens * PER_TOKEN / E, file = E * PAGE / 1e9, wearTB = tps * 86400 * PER_TOKEN * PAGE / 1e12;
+    $("f-range").value = fx(fT); $("f-size").textContent = fmt(fT);
+    $("f-total").textContent = fmt(total); $("f-dense").textContent = fmt(bp) + " (" + bb[2] + " × " + bb[1] + ")"; $("f-exp").textContent = E.toLocaleString("en-US");
+    $("f-active").textContent = fmt(active) + " (" + (100 * active / total).toFixed(4) + "%)"; $("f-tokens").textContent = fmt(tokens); $("f-visits").textContent = visits >= 10 ? visits.toFixed(0) : visits.toFixed(2);
+    $("f-file").textContent = file >= 10 ? file.toFixed(0) + " GB" : file.toFixed(1) + " GB"; $("f-wear").textContent = wearTB.toFixed(1) + " TB";
+    [].forEach.call($("f-presets").children, function (b) { b.setAttribute("aria-pressed", Math.abs(Math.log(+b.dataset.t / fT)) < 0.05 ? "true" : "false"); });
+    var v = $("f-verdict"), msg = [];
+    if (shrunk) msg.push("Your free storage fits about " + fmt(total) + " parameters, so the plan is cut to that.");
+    if (visits < 1) { v.className = "verdict warn"; msg.push("In this time each expert is used about " + visits.toFixed(2) + " times, so most of the file stays unused. Train longer or choose a smaller size."); }
+    else { v.className = "verdict good"; msg.push("Each expert is used about " + (visits >= 10 ? visits.toFixed(0) : visits.toFixed(1)) + " times."); }
+    msg.push("Text quality follows the " + fmt(tokens) + " tokens seen and the " + fmt(bp) + " dense model, not the file size. Nonstop training writes about " + wearTB.toFixed(1) + " TB of flash a day (about " + (100 * wearTB / 500).toFixed(1) + "% of the life of a 500 TB flash, an assumed rating).");
+    v.textContent = msg.join(" ");
+  }
+  $("f-range").addEventListener("input", function () { fT = fy(+this.value); fset(); });
+  ["f-min", "f-tps", "f-disk"].forEach(function (id) { $(id).addEventListener("input", fset); });
+  fset();
+
   document.addEventListener("click", function (e) {
     var b = e.target.closest("[data-copy]"); if (!b) return;
     var txt = $(b.dataset.copy).textContent;

@@ -16,7 +16,7 @@ q3 = 'not compared yet'
 if '--verify-q3' in sys.argv: q3 = sys.argv[sys.argv.index('--verify-q3') + 1]
 js = js.replace('@@Q3VERIFY@@', q3)
 import json
-ag = json.load(open(os.path.join(root, 'mcp/agents.json'), encoding='utf-8'))
+ag = json.load(open(os.path.join(root, 'web/src/agents.json'), encoding='utf-8'))
 ag['agents'] = [{k: a[k] for k in ('id', 'name', 'category', 'category_name', 'description', 'system', 'tags') if k in a} for a in ag['agents']]
 js = js.replace('@@AGENTS@@', json.dumps(ag, ensure_ascii=False).replace('</', '<\\/'))
 for name, txt in (('engine mt', engine_mt), ('engine rs', engine_rs), ('engine mt rs', engine_mt_rs), ('engine', engine), ('dl worker', dl), ('app js', js)):

@@ -16,32 +16,22 @@ model and opens the same app backed by the native engine
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
 ```
 
-**AI coders (MCP) on PC and phone:** `claude mcp add expertstream -- python3 ~/Stream-/mcp/expertstream_mcp.py`
-(snippets for Cursor, VS Code, Windsurf, Cline, Codex, Gemini CLI, Zed and Claude Desktop are in the
-website's Settings). 24 tools: search/download/inspect/load/run models up to 250B parameters, plus
-251 ready-made agents (`mcp/agents.json`, rebuilt by `scripts/make_agents.py`) that run on the loaded
-local model: `list_agents`, `recommend_agents`, `run_agent`, `run_pipeline`, `agent_council`.
-**Apps that ask for a URL (Claude app, ChatGPT, mobile AI apps):** run
-`python3 mcp/expertstream_mcp.py --http 8765 --public --model FILE.gguf`. It opens a free https address
-(cloudflared: `pkg install cloudflared`, or ssh) and prints `https://<address>/s/<secret>/mcp`: paste that single link
-into the app's "add connector / MCP server" box. The secret is inside the link, so keep it private. With your own
-domain or proxy use `--public-url https://your.domain`.
+**Expert Craft: train a model with up to 70 billion parameters on your phone, free** (`craft/expertcraft.py`, Python + NumPy, no GPU, no account):
 
-Remote mode: `python3 mcp/expertstream_mcp.py --http 8765 --host 0.0.0.0 --model FILE.gguf` serves MCP
-(`/mcp`, legacy `/sse`) and an OpenAI-compatible API (`/v1/chat/completions`, model `agent:<id>`) with a
-token, so a phone's coding AI can use a PC's models and the other way round.
+```sh
+pkg install -y python python-numpy                                     # Termux
+python3 craft/expertcraft.py phone-plan 70e9 --minutes 600             # measures your phone, explains what 70B means on it
+python3 craft/expertcraft.py phone-train mymodel --dataset tinystories --params 70e9 --minutes 600 --max-wear-gb 2000
+python3 craft/expertcraft.py phone-sample mymodel --prompt "Once upon a time"
+```
 
-**Expert Craft: build your own AI model from scratch (1 million to 70 billion parameters, free compute):**
-`claude mcp add expertcraft -- python3 ~/Stream-/craft/expertcraft_mcp.py`. An MCP server that designs the model,
-gets free training data, trains a BPE tokenizer, writes PyTorch code with multi-GPU FSDP, and trains on free
-Colab/Kaggle GPUs (notebooks included) or your phone. Website: `docs/craft.html`; details in [`craft/README.md`](craft/README.md).
-
-**Create a model from scratch (1 thousand to 37 billion parameters):** the MCP server has builder tools
-(`builder_rules`, `design_model`, `prepare_data`, `train_model`, `evaluate_model`, `grow_model`, `create_model`,
-`export_model`, ...) and rules R1-R10 that an AI must follow. `mcp/builder.py` is a NumPy trainer with verified
-backprop and a byte-level BPE tokenizer; models it trains match the engine's logits exactly. Training cost is about
-6 x parameters x tokens FLOPs, so large models need `grow_model` (function-preserving depth growth) and long runs;
-the tools print honest estimates. Needs NumPy (`pkg install python-numpy`).
+How: a small dense model stays in RAM; up to 70 billion more parameters live in ~18 million page-sized experts (one 4 KB flash page each, 8-bit) in a
+sparse file. The last 1, 2 and 3 tokens each pick an expert by hash, and only those 3 pages per word are read, trained (row-wise Adagrad, stochastic
+rounding) and written back, so the work per word is that of the small model. Measured on the test PC, same data and steps: the 3.0M dense model reaches
+validation perplexity 13.6, and with 1.0B parameters of experts 10.7 (21% lower). Honest limits: each word uses about 0.004% of the parameters, quality
+follows the tokens your phone can process (tens of millions a day) and the dense model rather than the file size, nonstop training writes terabytes of
+flash per day (the plan prints it, `--max-wear-gb` caps it), and it is tested on a PC, not yet on a phone. Details, numbers and the free Colab/Kaggle
+route: [`craft/README.md`](craft/README.md) and `docs/craft.html`.
 
 **Speed (measured, 4-core x86 test PC, SmolLM2-135M, greedy, `es_chat -j 4`, default build, no `-march=native`)**:
 Q4_K_M 107-111 tok/s, Q4_0 103-114 tok/s (127-138 with Turbo on), Q8_0 about 90 tok/s (memory-bandwidth bound).
@@ -54,7 +44,7 @@ guesses the next few words from the text so far and checks them in one batched p
 `-S 0` or `ES_SPEC=0` turns it off, it switches itself off when it does not help).
 
 **ExpertStream Lookahead** (native engine): big mixture-of-experts models stream experts from storage, and
-plain streaming waits for storage on every layer. Lookahead (default on in `es_chat`/`es_serve`/MCP) loads all
+plain streaming waits for storage on every layer. Lookahead (default on in `es_chat`/`es_serve`) loads all
 missing experts of a layer in parallel, runs the next layer's router early to guess and preload its experts while the
 CPU computes (`-L 1`), can skip experts the router barely uses (`-E 0.15`, a speed/quality knob, off by default),
 and remembers hot experts for a warm start next run (`-W 1`, stored in `<model>.esprof`). On OLMoE with storage
@@ -124,6 +114,9 @@ docs/index.html       copy of web/index.html for GitHub Pages
 scripts/setup.sh      install, build, download, import, start the app
 scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
+craft/expertcraft.py  Expert Craft command line (phone training, free-GPU planning, project scaffolding)
+craft/phone/          Flash Experts: flashexperts.py (layer + flash store), builder.py (trainer), phonetrain.py (plan/train/sample)
+scripts/test_flash_experts.py  tests: gradients, 8-bit store, resume, 70B sparse file
 docs/expert_format.md format spec and design notes
 ```
 
@@ -255,32 +248,12 @@ Qwen3-235B-A22B shape at Q2_K: 94 MoE layers × 8 experts × 5.9 MiB is
   fill local flash from it in the background.
 
 
-## Expert Craft is part of the MCP server
-The tools of `craft/expertcraft_mcp.py` (design 1M-70B models, scaffold a PyTorch project, train on free Colab/Kaggle GPUs with FSDP, export) are
-merged into `mcp/expertstream_mcp.py` as `craft_guide`, `craft_design_model`, `craft_estimate_model`, `craft_free_compute_plan`,
-`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (49 tools in total with the Boss and legal tools). The standalone
-`craft/expertcraft_mcp.py` still works on its own. Projects live in `~/expertcraft` (`EXPERTCRAFT_HOME`), and paths outside it are refused.
-
 ## Legal and trust checks (the 20 must-haves before launch)
-`legal_checklist` returns the 20 items (privacy policy, terms, refund and cookie policies, consent banner, form consents, data minimisation, third-party SDK
+`scripts/legal_checklist.py` holds the 20 items (privacy policy, terms, refund and cookie policies, consent banner, form consents, data minimisation, third-party SDK
 audit, dark patterns, hidden fees, fake reviews, unsupported claims, alt text, colour contrast, keyboard navigation, business details, age consent,
-unsubscribe link, licensed fonts and images, data deletion) with why, how and how to verify. `legal_audit(path)` scans a project folder and returns
-PASS / FAIL / NEEDS-REVIEW / N/A per item with evidence. 15 agents in the new "Legal & trust" team (e.g. `launch-compliance-auditor`) use them. This is an
+unsubscribe link, licensed fonts and images, data deletion) with why, how and how to verify. `python3 scripts/legal_checklist.py audit FOLDER` scans a project folder and returns
+PASS / FAIL / NEEDS-REVIEW / N/A per item with evidence. 15 agents in the "Legal & trust" team of the website's agent library help with the items. This is an
 engineering checklist, not legal advice.
 The website now has `legal.html` (privacy, terms, refunds, cookies and storage, data deletion, accessibility, operator, licences, and the status of all 20 checks on this
 site), a privacy notice, Settings > Privacy > "Delete all my data", consent text on the Hugging Face sign-in, a skip link, keyboard fixes and contrast fixes.
 Fill `web/legal/operator.json` (e-mail, postal address, governing law, code licence) and run `python3 scripts/build_legal.py` to publish your own details.
-
-## The Boss: any model from 1,000 to 37 billion parameters, free, on your own device
-The MCP server now acts as a boss for the AI that connects to it. `boss_orders(target_params)` is the first call for any "make me a model" request. It never answers
-"no", never tells the user to rent a GPU, and returns binding orders: the technology for that size, the numbers for this device (measured training speed, disk, RAM),
-the exact tool calls in order, what to teach the user at each step, and an honest description of the file that will be delivered.
-- **Up to about 150M parameters:** trained from scratch on the device (real backpropagation, Adam).
-- **Bigger, up to 37B: sparse upcycling + expert streaming.** A small base is trained on the device (`train_model`), then `upcycle_model` copies each feed-forward block into
-  thousands of experts (Mixture-of-Experts, a router picks 2 per word) and writes a 4/8-bit GGUF straight to disk. Every expert starts as an exact copy, so the big model
-  answers exactly like the trained base (`scripts/test_upcycle.py` checks that in the real engine). A 37B file is about 21 GB (4-bit), uses roughly 25-110M parameters
-  per word and reads only a few MB of experts per word, so ExpertStream runs it from flash on a phone. Measured here: a 37B-parameter file loads in 0.2 s with 96 MB RAM.
-  If the disk is too small the tool writes the largest file that fits instead of refusing.
-- **Honest limit (the Boss makes the AI say it):** the file has 37B parameters but answers like the small base until that base is trained on more text and upcycled again.
-  It is not a dense 37B model trained on trillions of tokens.
-Tools: `boss_orders`, `upcycle_model`, the existing `prepare_data`, `train_model`, `evaluate_model`, `load_model`; agents `model-boss` and `upcycle-engineer`; rule R11.

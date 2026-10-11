@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
-"""Expert Craft: an MCP server that lets any AI (Claude, ChatGPT, Cursor, Gemini CLI, ...) build
-language models from scratch, from 1 million up to 70 billion parameters, using free compute.
+"""Expert Craft: build language models from scratch with free compute, including a 70-billion-parameter model trained on a phone.
 
-Part of ExpertStream: https://github.com/Tharunmaks/Stream-
+Part of ExpertStream: https://github.com/Tharunmaks/Stream-   Python 3.8+. Phone commands need NumPy (Termux: pkg install python python-numpy).
 
-Run it (Python 3.8+, standard library only, works in Termux):
-  python3 expertcraft_mcp.py                      MCP over stdio (Claude Code, Claude Desktop, Cursor, ...)
-  python3 expertcraft_mcp.py --http 8766          MCP over HTTP at http://127.0.0.1:8766/s/<secret>/mcp
-  python3 expertcraft_mcp.py --http 8766 --public same, plus a free https address (cloudflared) for phone apps
-  python3 expertcraft_mcp.py plan 125e6           CLI: free-compute plan for a model size
-  python3 expertcraft_mcp.py scaffold 30e6 mymodel  CLI: write a ready-to-train project
+PHONE (Flash Experts: sparse training, experts live in a file on flash)
+  expertcraft.py phone-plan 70e9 [--minutes 600]        what 70B means on THIS device: disk, speed, wear, what you get
+  expertcraft.py phone-train NAME --data text.txt --params 70e9 --minutes 600   train (resumes by itself; Ctrl-C saves)
+  (add --oversubscribe to plan a file bigger than the free disk: it grows only as experts are used and training stops safely when space runs low)
+  expertcraft.py phone-sample NAME --prompt "Once upon a time"
+  expertcraft.py phone-status NAME
 
-Tools: craft_guide, design_model, estimate_model, free_compute_plan, scaffold_project,
-       run_step, job_status, stop_job, connect_guide
-All project folders live under the workspace (EXPERTCRAFT_HOME, default ~/expertcraft).
+FREE GPUs (Colab / Kaggle) and planning
+  expertcraft.py plan 125e6          can free hardware train this size, and how long
+  expertcraft.py design 30e6         architecture and cost
+  expertcraft.py scaffold 30e6 NAME  write a ready-to-train PyTorch project with Colab and Kaggle notebooks
+  expertcraft.py run NAME data|train|export|sample [args ...] [--background]
+  expertcraft.py status NAME | stop NAME
+
+All project folders live under EXPERTCRAFT_HOME (default ~/expertcraft).
 """
-import json, math, os, re, secrets, shutil, signal, subprocess, sys, threading, time
+import json, math, os, re, shutil, signal, subprocess, sys, time
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 APP = "Expert Craft"
 REPO = "https://github.com/Tharunmaks/Stream-"
 SITE = "https://tharunmaks.github.io/Stream-/craft.html"
@@ -78,8 +82,8 @@ def design(target, vocab=None, seq=None):
 HARDWARE = [
     {"id": "phone", "name": "Your phone (CPU, Termux)", "free": True, "gpus": 1, "mem_gb": 3.0,
      "eff_tflops": 0.02, "limit": "no limit, but slow; keep it plugged in",
-     "how": "pkg install python python-numpy; pip install torch may not be available on Termux. "
-            "If not, use ExpertStream's NumPy builder (mcp/builder.py) for tiny models."},
+     "how": "pkg install python python-numpy; then use the phone commands (python3 craft/expertcraft.py phone-plan 70e9). "
+            "They train sparse models with Flash Experts, which is how a phone reaches 70B parameters."},
     {"id": "colab_t4", "name": "Google Colab free (1x T4 16 GB)", "free": True, "gpus": 1, "mem_gb": 15.0,
      "eff_tflops": 15.0, "limit": "sessions end after a few hours and GPU time is not guaranteed; resume from Drive",
      "how": "Open colab.ipynb from the project in colab.research.google.com, Runtime > Change runtime type > T4 GPU."},
@@ -182,7 +186,7 @@ def notebook(cells):
 def make_notebooks(name, target, dataset, vocab, steps):
     gc = " --grad_ckpt" if float(target) > 3e8 else ""
     common = f"""!git clone --depth 1 {REPO}.git expertstream
-!python expertstream/craft/expertcraft_mcp.py scaffold {target:.4g} {name} --vocab {vocab} --dataset {dataset} --into .
+!python expertstream/craft/expertcraft.py scaffold {target:.4g} {name} --vocab {vocab} --dataset {dataset} --into .
 %cd {name}
 !pip -q install tokenizers datasets"""
     colab = notebook([
@@ -352,265 +356,141 @@ def stop_job(path, step="train"):
     return {"stopped": True, "note": "the trainer saves a checkpoint before exiting; run train again to resume"}
 
 
-# ======================================================================= guides
-GUIDE = f"""{APP} {VERSION}: build a language model from scratch, 1M to 70B parameters, on free compute.
-
-Workflow for the AI:
- 1. design_model(target_params) and free_compute_plan(target_params): tell the user honestly what it costs.
- 2. scaffold_project(path, target_params, dataset): writes model.py, data.py, train.py, export.py, sample.py,
-    config.json and colab.ipynb / kaggle.ipynb.
- 3. run_step(path, 'data', ['--dataset','tinystories','--max_tokens','20e6'])  free data + BPE tokenizer.
- 4. run_step(path, 'train', ['--steps','2000','--out','run'], background=true), then job_status(path).
-    Loss must go down. If it is NaN or flat, lower --lr (e.g. 1e-4).
- 5. run_step(path, 'export', ['--out','run']) then run_step(path, 'sample', ['--out','run','--prompt','Hello']).
-
-Rules:
- R1 Never claim a model is trained until job_status shows it finished and val loss went down.
- R2 Always show free_compute_plan before training anything above 100M parameters.
- R3 Start small: test the full pipeline with a 5M model, then scale.
- R4 70B is supported for design, code and multi-GPU training, but it cannot be trained on free hardware;
-    say so plainly (about 1.1 TB of training state, ~5.6e23 FLOPs).
- R5 Free GPUs: Colab (1x T4) and Kaggle (2x T4, --fsdp). Phones: tiny models only.
- R6 Use --max_minutes so free sessions end with a saved checkpoint; training resumes automatically.
-
-Workspace: {HOME}   Website: {SITE}   Code: {REPO}
-"""
 
 
-def connect_guide(client="all"):
-    me = os.path.abspath(__file__)
-    py = "python3"
-    snippets = {
-        "claude_code": f"claude mcp add expertcraft -- {py} {me}",
-        "termux_claude_code": f"pkg install python && claude mcp add expertcraft -- {py} {me}",
-        "claude_desktop": {"mcpServers": {"expertcraft": {"command": py, "args": [me]}}},
-        "cursor_windsurf_cline": {"mcpServers": {"expertcraft": {"command": py, "args": [me]}}},
-        "vscode": {"servers": {"expertcraft": {"type": "stdio", "command": py, "args": [me]}}},
-        "codex_cli": f'[mcp_servers.expertcraft]\ncommand = "{py}"\nargs = ["{me}"]',
-        "gemini_cli": {"mcpServers": {"expertcraft": {"command": py, "args": [me]}}},
-        "phone_apps_by_url": (f"{py} {me} --http 8766 --public   -> prints https://<name>.trycloudflare.com/s/<secret>/mcp. "
-                              "Paste that link where the app lets you add a custom connector / MCP server. "
-                              "cloudflared is free: pkg install cloudflared (Termux) or see developers.cloudflare.com. "
-                              "Keep the link private: the secret in it is the password."),
-    }
-    if client != "all" and client in snippets:
-        return {client: snippets[client]}
-    return snippets
-
-
-# ======================================================================= MCP protocol
-CFG = {k: {"type": "integer"} for k in ("d_model", "n_layers", "n_heads", "n_kv_heads", "d_ff", "vocab_size", "max_seq_len")}
-CFG["tie_embeddings"] = {"type": "boolean"}
-TOOLS = [
-    {"name": "craft_guide", "description": f"{APP}: how to build a model from scratch with these tools, and the rules. Read first.",
-     "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "design_model", "description": "Design a Llama-style config for a parameter target (1e6 to 70e9). Returns config + cost estimate.",
-     "inputSchema": {"type": "object", "properties": {"target_params": {"type": "number", "description": "e.g. 30e6, 1e9, 70e9"},
-                                                      "vocab_size": {"type": "integer"}, "max_seq_len": {"type": "integer"}},
-                     "required": ["target_params"]}},
-    {"name": "estimate_model", "description": "Exact parameter count, memory, FLOPs and training time for a given config.",
-     "inputSchema": {"type": "object", "properties": {**CFG, "tokens": {"type": "number"}, "gpus": {"type": "integer"},
-                                                      "effective_tflops": {"type": "number"}},
-                     "required": ["d_model", "n_layers", "n_heads", "n_kv_heads", "d_ff", "vocab_size"]}},
-    {"name": "free_compute_plan", "description": "Where this model can be trained for free (phone, Colab T4, Kaggle 2xT4), how long it takes, and the largest model each option can train.",
-     "inputSchema": {"type": "object", "properties": {"target_params": {"type": "number"}, "tokens": {"type": "number"}},
-                     "required": ["target_params"]}},
-    {"name": "scaffold_project", "description": "Create a ready-to-train project folder (PyTorch model, BPE data prep, FSDP trainer, export, sampler, Colab and Kaggle notebooks).",
-     "inputSchema": {"type": "object", "properties": {
-         "path": {"type": "string", "description": "folder name inside the workspace, e.g. 'tiny-stories'"},
-         "target_params": {"type": "number"}, "name": {"type": "string"}, "vocab_size": {"type": "integer"},
-         "max_seq_len": {"type": "integer"},
-         "dataset": {"type": "string", "enum": ["tinystories", "fineweb-edu", "wikitext", "text"]}},
-         "required": ["path", "target_params"]}},
-    {"name": "run_step", "description": "Run a project step: data | train | export | sample. Long steps: background=true then job_status. gpus>1 trains with FSDP via torchrun.",
-     "inputSchema": {"type": "object", "properties": {
-         "path": {"type": "string"}, "step": {"type": "string", "enum": list(STEPS)},
-         "args": {"type": "array", "items": {"type": "string"}, "description": "CLI flags, e.g. ['--steps','500','--out','run']"},
-         "background": {"type": "boolean"}, "gpus": {"type": "integer"}, "timeout": {"type": "number"}},
-         "required": ["path", "step"]}},
-    {"name": "job_status", "description": "Is training running, latest loss, loss trend, best validation loss, saved checkpoints.",
-     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-    {"name": "stop_job", "description": "Stop a background step; the trainer saves a checkpoint first.",
-     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "step": {"type": "string"}}, "required": ["path"]}},
-    {"name": "connect_guide", "description": "Config snippets to connect Expert Craft to Claude Code, Claude Desktop, Cursor, VS Code, Codex, Gemini CLI, or phone apps by URL.",
-     "inputSchema": {"type": "object", "properties": {"client": {"type": "string"}}}},
-]
-
-
-def call(name, a):
-    if name == "craft_guide":
-        return GUIDE
-    if name == "design_model":
-        c = design(a["target_params"], a.get("vocab_size"), a.get("max_seq_len"))
-        return {"config": c, "estimate": estimate(c), "free_compute": free_plan(c)["verdict"]}
-    if name == "estimate_model":
-        c = {k: a[k] for k in CFG if k in a}
-        c.setdefault("tie_embeddings", False)
-        return estimate(c, a.get("tokens"), a.get("effective_tflops", 400.0), a.get("gpus", 1))
-    if name == "free_compute_plan":
-        return free_plan(a["target_params"], a.get("tokens"))
-    if name == "scaffold_project":
-        return scaffold(a["path"], a["target_params"], a.get("name"), a.get("vocab_size"),
-                        a.get("dataset", "tinystories"), a.get("max_seq_len"))
-    if name == "run_step":
-        return run_step(a["path"], a["step"], a.get("args"), a.get("background", False), a.get("gpus", 1), a.get("timeout", 900))
-    if name == "job_status":
-        return job_status(a["path"])
-    if name == "stop_job":
-        return stop_job(a["path"], a.get("step", "train"))
-    if name == "connect_guide":
-        return connect_guide(a.get("client", "all"))
-    raise ValueError(f"unknown tool {name}")
-
-
-def handle(r):
-    """One JSON-RPC message -> response dict, or None for notifications."""
-    m, i = r.get("method"), r.get("id")
-    if i is None:
-        return None
-    ok = lambda res: {"jsonrpc": "2.0", "id": i, "result": res}
+# ======================================================================= phone: Flash Experts (up to 70B parameters, on the device)
+def _phone():
+    sys.path.insert(0, os.path.join(HERE, "phone"))
     try:
-        if m == "initialize":
-            return ok({"protocolVersion": (r.get("params") or {}).get("protocolVersion", "2025-06-18"),
-                       "capabilities": {"tools": {"listChanged": False}},
-                       "serverInfo": {"name": "expertcraft", "title": APP, "version": VERSION},
-                       "instructions": GUIDE})
-        if m == "tools/list":
-            return ok({"tools": TOOLS})
-        if m == "tools/call":
-            p = r.get("params") or {}
-            try:
-                out = call(p.get("name"), p.get("arguments") or {})
-                text = out if isinstance(out, str) else json.dumps(out, indent=2)
-                return ok({"content": [{"type": "text", "text": text}]})
-            except Exception as e:
-                return ok({"content": [{"type": "text", "text": f"error: {e}"}], "isError": True})
-        if m == "ping":
-            return ok({})
-        return {"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": f"method not found: {m}"}}
-    except Exception as e:
-        return {"jsonrpc": "2.0", "id": i, "error": {"code": -32603, "message": str(e)}}
+        import phonetrain
+    except ImportError as e:
+        raise SystemExit(f"{e}\nThe phone commands need NumPy. Termux: pkg install python python-numpy   PC: pip install numpy")
+    return phonetrain
 
 
-def serve_stdio():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
+def _flag(argv, name, default=None, cast=str):
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 >= len(argv):
+            raise SystemExit(f"{name} needs a value")
+        return cast(argv[i + 1])
+    return default
+
+
+def _positional(argv, n):
+    """first n arguments that are not flags or flag values"""
+    out, skip = [], False
+    for i, a in enumerate(argv):
+        if skip:
+            skip = False
             continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
-            sys.stdout.flush(); continue
-        msgs = r if isinstance(r, list) else [r]
-        outs = [o for o in (handle(x) for x in msgs) if o]
-        if outs:
-            sys.stdout.write(json.dumps(outs if isinstance(r, list) else outs[0]) + "\n"); sys.stdout.flush()
+        if a.startswith("--"):
+            skip = a not in ("--background", "--oversubscribe", "--json")
+            continue
+        out.append(a)
+    if len(out) < n:
+        raise SystemExit("missing argument; run: python3 craft/expertcraft.py help")
+    return out
 
 
-def get_secret():
-    p = os.path.join(HOME, ".secret")
-    os.makedirs(HOME, exist_ok=True)
-    if not os.path.exists(p):
-        with open(p, "w") as f:
-            f.write(secrets.token_urlsafe(24))
-        os.chmod(p, 0o600)
-    return open(p).read().strip()
+def _orders(argv):
+    return tuple(int(x) for x in _flag(argv, "--orders", "1,2,3").split(","))
 
 
-def serve_http(port, host="127.0.0.1", public=False):
-    import http.server
-    secret = get_secret()
-    route = f"/s/{secret}/mcp"
-
-    class H(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def _send(self, code, body=b"", ctype="application/json"):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self):
-            if self.path.split("?")[0] == route:
-                return self._send(405, b'{"error":"use POST (streamable HTTP, JSON responses)"}')
-            if self.path == "/":
-                return self._send(200, f"{APP} MCP server is running. {SITE}".encode(), "text/plain")
-            self._send(404, b"{}")
-
-        def do_DELETE(self):
-            self._send(200 if self.path.split("?")[0] == route else 404, b"{}")
-
-        def do_POST(self):
-            if self.path.split("?")[0] != route:
-                return self._send(404, b'{"error":"not found"}')
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > 2_000_000:
-                return self._send(413, b"{}")
-            try:
-                r = json.loads(self.rfile.read(n) or b"null")
-            except json.JSONDecodeError:
-                return self._send(400, b'{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}')
-            msgs = r if isinstance(r, list) else [r]
-            outs = [o for o in (handle(x) for x in msgs if isinstance(x, dict)) if o]
-            if not outs:
-                return self._send(202)
-            self._send(200, json.dumps(outs if isinstance(r, list) else outs[0]).encode())
-
-    srv = http.server.ThreadingHTTPServer((host, port), H)
-    srv.daemon_threads = True
-    print(f"{APP} MCP (HTTP) on http://{host}:{port}{route}", flush=True)
-    if public:
-        threading.Thread(target=tunnel, args=(port, route), daemon=True).start()
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-
-
-def tunnel(port, route):
-    exe = shutil.which("cloudflared")
-    if not exe:
-        print("cloudflared not found. Install it (Termux: pkg install cloudflared) or use a free ssh tunnel:\n"
-              f"  ssh -R 80:localhost:{port} nokey@localhost.run   then add {route} to the https address it prints", flush=True)
+def phone_plan(argv):
+    pt = _phone()
+    target = float(_positional(argv, 1)[0])
+    p = pt.plan(target, _flag(argv, "--minutes", 600.0, float), HOME, vocab=_flag(argv, "--vocab", 2048, int), layers=_flag(argv, "--layers", 1, int),
+                topk=_flag(argv, "--topk", 8, int), heads=_flag(argv, "--heads", 1, int), oversubscribe="--oversubscribe" in argv, route=_flag(argv, "--route", "hash"), orders=_orders(argv), width=_flag(argv, "--width", None, int))
+    if "--json" in argv:
+        print(json.dumps(p, indent=2, default=str))
         return
-    p = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in p.stdout:
-        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
-        if m:
-            print(f"\nPublic MCP link (paste into your AI app, keep it private):\n  {m.group(0)}{route}\n", flush=True)
+    d, e, c = p["device"], p["experts"], p["backbone"]["config"]
+    print(f"Device: {d['ram_gb']} GB RAM, {d['cores']} cores, {d['disk_free_gb']} GB free disk" + (f", battery {d['battery_pct']}%" if d["battery_pct"] is not None else ""))
+    print(f"Plan for {pt.fmt(target)} parameters in {p['minutes']:.0f} minutes:\n")
+    print(f"  dense backbone (RAM):   {pt.fmt(c['params'])}  ({c['layers']} layers, width {c['dim']})")
+    print(f"  Flash Experts (disk):   {e['experts_per_layer']:,} experts x {e['layers']} layer(s), {pt.fmt(e['params_per_expert'])} parameters each = {pt.fmt(e['total_params'])}")
+    print(f"  total parameters:       {pt.fmt(p['total_params'])}   (file up to {p['file_gb']} GB, grows as experts are used; {d['disk_free_gb']} GB free)")
+    print(f"  used per word:          {pt.fmt(p['active_params_per_token'])}  ({100 * p['active_fraction']:.4f}% of the total)")
+    print(f"  speed (measured):       {p['tokens_per_second']:.0f} tokens/s  ->  {pt.fmt(p['tokens_affordable'])} tokens in {p['minutes']:.0f} min ({p['tokens_per_backbone_param']} per backbone parameter)")
+    print(f"  expert visits:          each expert is used about {p['visits_per_expert']} times")
+    print(f"  flash traffic:          {p['pages_per_token']} pages x 4 KB read and written per token; about {p['wear_tb_per_day']} TB written per day of nonstop training")
+    if p.get("io"):
+        print(f"  storage speed (random 4 KB): read {p['io']['read_mb_s']:.0f} MB/s, write {p['io']['write_mb_s']:.0f} MB/s; training needs {p['flash_mb_s_needed']} MB/s" + (" -> STORAGE LIMITS SPEED" if p["flash_limits_speed"] else ""))
+    if e.get("note"):
+        print(f"\n  NOTE: {e['note']}")
+    print("\nHonest summary:")
+    for line in p["honest"]:
+        print("  - " + line)
+    print(f"\nStart:  python3 craft/expertcraft.py phone-train mymodel --data your.txt --params {target / 1e9:g}e9 --minutes {p['minutes']:.0f}")
+
+
+def phone_train(argv):
+    pt = _phone()
+    name = _positional(argv, 1)[0]
+    proj = ws_path(name)
+    if not os.path.exists(os.path.join(proj, "phone.json")):
+        data = _flag(argv, "--data") or _flag(argv, "--dataset")
+        if not data:
+            raise SystemExit("first run needs --data FILE_OR_FOLDER (or --dataset tinystories)")
+        p, meta = pt.create(proj, data, _flag(argv, "--params", 70e9, float), _flag(argv, "--minutes", 600.0, float), vocab=_flag(argv, "--vocab", 2048, int),
+                            layers=_flag(argv, "--layers", 1, int), topk=_flag(argv, "--topk", 8, int), heads=_flag(argv, "--heads", 1, int), oversubscribe="--oversubscribe" in argv, route=_flag(argv, "--route", "hash"), orders=_orders(argv), width=_flag(argv, "--width", None, int))
+        for line in p["honest"]:
+            print("  - " + line)
+    res = pt.train(proj, minutes=_flag(argv, "--minutes", None, float), steps=_flag(argv, "--steps", None, int), min_battery=_flag(argv, "--min-battery", 0, int),
+                   max_temp=_flag(argv, "--max-temp", 0, float), max_wear_gb=_flag(argv, "--max-wear-gb", None, float), min_free_gb=_flag(argv, "--min-free-gb", None, float))
+    print(json.dumps(res, indent=2))
+
+
+def phone_sample(argv):
+    pt = _phone()
+    name = _positional(argv, 1)[0]
+    print(pt.sample(ws_path(name), _flag(argv, "--prompt", "Once upon a time"), _flag(argv, "--tokens", 80, int), _flag(argv, "--temp", 0.8, float)))
+
+
+def phone_status(argv):
+    print(json.dumps(_phone().status(ws_path(_positional(argv, 1)[0])), indent=2))
 
 
 # ======================================================================= CLI
 def main(argv):
-    def opt(flag, default=None):
-        return argv[argv.index(flag) + 1] if flag in argv else default
-
-    if argv and argv[0] == "plan":
-        print(json.dumps(free_plan(float(argv[1])), indent=2)); return
-    if argv and argv[0] == "design":
-        c = design(float(argv[1]), opt("--vocab"))
-        print(json.dumps({"config": c, "estimate": estimate(c)}, indent=2)); return
-    if argv and argv[0] == "scaffold":
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd, rest = argv[0], argv[1:]
+    if "--version" in argv:
+        print(APP, VERSION)
+    elif cmd == "phone-plan":
+        phone_plan(rest)
+    elif cmd == "phone-train":
+        phone_train(rest)
+    elif cmd == "phone-sample":
+        phone_sample(rest)
+    elif cmd == "phone-status":
+        phone_status(rest)
+    elif cmd == "plan":
+        print(json.dumps(free_plan(float(_positional(rest, 1)[0])), indent=2))
+    elif cmd == "design":
+        c = design(float(_positional(rest, 1)[0]), _flag(rest, "--vocab"))
+        print(json.dumps({"config": c, "estimate": estimate(c)}, indent=2))
+    elif cmd == "scaffold":
         global HOME
-        into = opt("--into")
+        into = _flag(rest, "--into")
         if into:  # notebooks scaffold into the current folder
             HOME = os.path.abspath(into)
-        out = scaffold(argv[2] if len(argv) > 2 else "model", float(argv[1]), None, opt("--vocab"), opt("--dataset", "tinystories"))
-        print(json.dumps({k: out[k] for k in ("path", "params", "verdict", "files")}, indent=2)); return
-    if argv and argv[0] == "connect":
-        print(json.dumps(connect_guide(), indent=2)); return
-    if argv and argv[0] in ("-h", "--help", "help"):
-        print(__doc__); return
-    if "--version" in argv:
-        print(APP, VERSION); return
-    if "--http" in argv:
-        serve_http(int(opt("--http")), opt("--host", "127.0.0.1"), "--public" in argv); return
-    serve_stdio()
+        pos = _positional(rest, 1)
+        out = scaffold(pos[1] if len(pos) > 1 else "model", float(pos[0]), None, _flag(rest, "--vocab"), _flag(rest, "--dataset", "tinystories"))
+        print(json.dumps({k: out[k] for k in ("path", "params", "verdict", "files")}, indent=2))
+    elif cmd == "run":
+        pos = _positional(rest, 2)
+        extra = [a for a in rest[2:] if a != "--background"]
+        print(json.dumps(run_step(pos[0], pos[1], extra, background="--background" in rest), indent=2))
+    elif cmd == "status":
+        print(json.dumps(job_status(_positional(rest, 1)[0]), indent=2))
+    elif cmd == "stop":
+        print(json.dumps(stop_job(_positional(rest, 1)[0]), indent=2))
+    else:
+        raise SystemExit(f"unknown command {cmd!r}; run: python3 craft/expertcraft.py help")
 
 
 if __name__ == "__main__":

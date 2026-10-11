@@ -1,6 +1,6 @@
 """The 20 legal and trust must-haves for an app or website, as data plus a static auditor.
 
-Used by the MCP tools legal_checklist and legal_audit, and by scripts/build_legal.py (the legal page of the website).
+Used by scripts/build_legal.py (the legal page of the website). Run `python3 scripts/legal_checklist.py audit FOLDER` to scan a project.
 This is a practical engineering checklist, NOT legal advice: laws differ by country and by what your app does.
 Python standard library only."""
 import os, re
@@ -200,3 +200,10 @@ def audit(root, kind=''):
     for r in out: tally[r['status']] = tally.get(r['status'], 0) + 1
     return dict(root=root, files_scanned=len(files), summary=tally, results=out, disclaimer=DISCLAIMER,
                 note='Static heuristics only: they read source files, not the running site, and cannot judge legal sufficiency. NEEDS-REVIEW means a human must look.')
+
+
+if __name__ == '__main__':
+    import json, sys
+    if len(sys.argv) >= 3 and sys.argv[1] == 'audit': print(json.dumps(audit(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ''), indent=1))
+    elif len(sys.argv) >= 2 and sys.argv[1] == 'checklist': print(json.dumps(checklist(sys.argv[2] if len(sys.argv) > 2 else ''), indent=1))
+    else: print('usage: legal_checklist.py audit FOLDER [KIND] | checklist [KIND]')

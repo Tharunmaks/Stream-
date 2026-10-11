@@ -64,7 +64,7 @@ footer { color: var(--ink-2); font-size: 13.5px; padding: 28px 0; border-top: 1p
 <ul>
 <li><b>GitHub Pages</b> hosts this page. Like any web host it can see technical request data such as your IP address and browser type, under <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement" rel="noopener noreferrer">GitHub's privacy statement</a>. The operator does not receive or use that data.</li>
 <li><b>Hugging Face</b> (huggingface.co) is contacted only when you search for models, sign in or download. Your browser then sends requests, including your IP address and, if you connected, your access token, to Hugging Face under <a href="https://huggingface.co/privacy" rel="noopener noreferrer">its privacy policy</a>. Sign-in uses OAuth 2 with PKCE and asks for the scopes <span class="mono">openid profile read-repos</span> only: your profile name and read access to repositories so private or gated models can be downloaded. The page never sees your password. "Disconnect" removes the token.</li>
-<li><b>Your own devices</b>: the optional MCP server and native engine run on your phone or computer. If you start the server with <span class="mono">--public</span>, a tunnel provider you choose (for example Cloudflare or an SSH host) carries the traffic; the link contains a secret, treat it like a password.</li>
+<li><b>Your own devices</b>: the optional native engine (<span class="mono">es_serve</span>, listening on 127.0.0.1 only) and Expert Craft (a command-line tool that opens no port) run on your phone or computer.</li>
 <li><b>Models you download</b> come with their own licences and may behave in ways the operator does not control.</li>
 </ul>
 <h3>Legal basis, retention, sharing</h3>
@@ -96,7 +96,7 @@ footer { color: var(--ink-2); font-size: 13.5px; padding: 28px 0; border-top: 1p
 <section id="cookies"><h2>Cookies and storage</h2>
 <p><b>Cookies: none.</b> No analytics, advertising or tracking technology of any kind. Because no non-essential cookies or trackers exist, there is nothing to opt in to, so the page shows a plain privacy notice instead of a consent wall. Everything below is strictly necessary to make the features you ask for work and stays on your device.</p>
 <div class="scroll"><table class="tbl"><thead><tr><th>Where</th><th>Name</th><th>Purpose</th><th>Lifetime</th></tr></thead><tbody>
-<tr><td>localStorage</td><td class="mono">es2.*</td><td>Your settings (threads, context size, theme choices), prompt history, which model is saved, the Hugging Face sign-in token, MCP settings, "notice dismissed"</td><td>Until you delete it</td></tr>
+<tr><td>localStorage</td><td class="mono">es2.*</td><td>Your settings (threads, context size, theme choices), prompt history, which model is saved, the Hugging Face sign-in token, "notice dismissed"</td><td>Until you delete it</td></tr>
 <tr><td>sessionStorage</td><td class="mono">es-coi</td><td>Remembers that the page already reloaded once to turn on multi-core mode</td><td>This tab session</td></tr>
 <tr><td>Private file storage (OPFS)</td><td class="mono">models/, speedtest.tmp</td><td>Model files you chose to save; temporary file for the disk speed test</td><td>Until you delete it</td></tr>
 <tr><td>Service worker</td><td class="mono">coi-sw.js</td><td>Adds security headers and enables multi-core mode (SharedArrayBuffer)</td><td>Until you delete it or unregister it</td></tr>
@@ -131,7 +131,7 @@ footer { color: var(--ink-2); font-size: 13.5px; padding: 28px 0; border-top: 1p
 <p>Font software is used under the OFL, which allows embedding and redistribution with the licence notice; the licences are available at <a href="https://openfontlicense.org" rel="noopener noreferrer">openfontlicense.org</a>.</p></section>
 
 <section id="checklist"><h2>The 20 launch checks, and where each stands on this site</h2>
-<p>The list comes from the common legal and trust must-haves for a new app or website. The same list is available to your AI coder through the MCP tools <span class="mono">legal_checklist</span> and <span class="mono">legal_audit</span>.</p>
+<p>The list comes from the common legal and trust must-haves for a new app or website. The same list and a simple folder scanner are in <span class="mono">scripts/legal_checklist.py</span>.</p>
 <div class="scroll"><table class="tbl"><thead><tr><th>#</th><th>Check</th><th>On this site</th><th>Status</th></tr></thead><tbody>
 <tr><td>1</td><td><b>Privacy policy</b><br><span style="color:var(--ink-2);font-size:13px">Most laws require you to say what personal data you collect, why, who gets it, how long you keep it and how users exercise their rights. App stores and payment providers require it too.</span></td><td>Privacy policy above; linked from the footer, the notice and the sign-in form.</td><td><span class="tag ok">Done</span></td></tr>
 <tr><td>2</td><td><b>Terms of service</b><br><span style="color:var(--ink-2);font-size:13px">Sets the rules of use, limits liability, and says what happens to accounts and content.</span></td><td>Terms above; linked from the footer.</td><td><span class="tag ok">Done</span></td></tr>

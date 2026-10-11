@@ -1,0 +1,18 @@
+{
+ "title": "3.0M-parameter dense model (width 192), same data and 2,000 steps (2.05M tokens)",
+ "rows": [
+  {
+   "name": "No experts (dense only)",
+   "val": "2.611",
+   "delta": "\u2013",
+   "ppl": "13.6"
+  },
+  {
+   "name": "+ Flash Experts: 262,144 experts = 1.0B parameters, orders 1+2+3",
+   "val": "2.367",
+   "delta": "-0.244",
+   "ppl": "10.7"
+  }
+ ],
+ "note": "Measured on a 4-core Linux PC with TinyStories. Perplexity is 21% lower with experts. More experts help until the table exceeds the distinct contexts in the data (small model, 800 steps: 1K experts 2.880, 4K 2.807, 262K 2.724, 1M 2.715, none 3.187). A real run of the command line tool with --params 70e9 on this PC: 69.98 billion parameters, 1.83M tokens in 23 minutes (1,340 tokens/s), validation loss 2.345 on its own split, a 74.6 GB sparse file of which 2.15 GB was on disk (520,407 experts created), 15.5 GB of flash written. Not yet measured on a phone."
+}

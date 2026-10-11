@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build the legal and trust page: web/legal/template.html + web/legal/operator.json + the 20-item checklist (mcp/legal.py)
+"""Build the legal and trust page: web/legal/template.html + web/legal/operator.json + the 20-item checklist (scripts/legal_checklist.py)
 -> docs/legal.html and web/legal.html. The page has no scripts, so its CSP is script-src 'none'."""
 import html, json, os, sys, time
 root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-sys.path.insert(0, os.path.join(root, 'mcp'))
-import legal
+sys.path.insert(0, os.path.join(root, 'scripts'))
+import legal_checklist as legal
 rd = lambda p: open(os.path.join(root, p), encoding='utf-8').read()
 op = json.load(open(os.path.join(root, 'web/legal/operator.json'), encoding='utf-8'))
 E = lambda s: html.escape(s or '')
