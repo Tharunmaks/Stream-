@@ -258,7 +258,7 @@ Qwen3-235B-A22B shape at Q2_K: 94 MoE layers × 8 experts × 5.9 MiB is
 ## Expert Craft is part of the MCP server
 The tools of `craft/expertcraft_mcp.py` (design 1M-70B models, scaffold a PyTorch project, train on free Colab/Kaggle GPUs with FSDP, export) are
 merged into `mcp/expertstream_mcp.py` as `craft_guide`, `craft_design_model`, `craft_estimate_model`, `craft_free_compute_plan`,
-`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (47 tools in total with the legal tools below). The standalone
+`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (49 tools in total with the Boss and legal tools). The standalone
 `craft/expertcraft_mcp.py` still works on its own. Projects live in `~/expertcraft` (`EXPERTCRAFT_HOME`), and paths outside it are refused.
 
 ## Legal and trust checks (the 20 must-haves before launch)
@@ -270,3 +270,17 @@ engineering checklist, not legal advice.
 The website now has `legal.html` (privacy, terms, refunds, cookies and storage, data deletion, accessibility, operator, licences, and the status of all 20 checks on this
 site), a privacy notice, Settings > Privacy > "Delete all my data", consent text on the Hugging Face sign-in, a skip link, keyboard fixes and contrast fixes.
 Fill `web/legal/operator.json` (e-mail, postal address, governing law, code licence) and run `python3 scripts/build_legal.py` to publish your own details.
+
+## The Boss: any model from 1,000 to 37 billion parameters, free, on your own device
+The MCP server now acts as a boss for the AI that connects to it. `boss_orders(target_params)` is the first call for any "make me a model" request. It never answers
+"no", never tells the user to rent a GPU, and returns binding orders: the technology for that size, the numbers for this device (measured training speed, disk, RAM),
+the exact tool calls in order, what to teach the user at each step, and an honest description of the file that will be delivered.
+- **Up to about 150M parameters:** trained from scratch on the device (real backpropagation, Adam).
+- **Bigger, up to 37B: sparse upcycling + expert streaming.** A small base is trained on the device (`train_model`), then `upcycle_model` copies each feed-forward block into
+  thousands of experts (Mixture-of-Experts, a router picks 2 per word) and writes a 4/8-bit GGUF straight to disk. Every expert starts as an exact copy, so the big model
+  answers exactly like the trained base (`scripts/test_upcycle.py` checks that in the real engine). A 37B file is about 21 GB (4-bit), uses roughly 25-110M parameters
+  per word and reads only a few MB of experts per word, so ExpertStream runs it from flash on a phone. Measured here: a 37B-parameter file loads in 0.2 s with 96 MB RAM.
+  If the disk is too small the tool writes the largest file that fits instead of refusing.
+- **Honest limit (the Boss makes the AI say it):** the file has 37B parameters but answers like the small base until that base is trained on more text and upcycled again.
+  It is not a dense 37B model trained on trillions of tokens.
+Tools: `boss_orders`, `upcycle_model`, the existing `prepare_data`, `train_model`, `evaluate_model`, `load_model`; agents `model-boss` and `upcycle-engineer`; rule R11.

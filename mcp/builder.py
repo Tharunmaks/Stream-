@@ -6,6 +6,9 @@
  * grow_depth     - function-preserving growth: a trained small model becomes a deeper one that gives the same
                     answers, then training continues (the cheap path to large models)
  * write_gguf     - streams any size (up to 37B) to disk in F16/F32, loadable by the ExpertStream engine
+ * upcycle_plan / write_gguf_moe - SPARSE UPCYCLING: a trained small dense model becomes a Mixture-of-Experts model with up to 37B total
+                    parameters (every expert starts as a copy of the trained FFN, so answers are unchanged) written in 4/8-bit,
+                    and the engine streams the few active experts from flash. No GPU, no rented hardware.
 Needs NumPy for training/growing (pkg install python-numpy). Design, estimates and writing big files need none.
 """
 import json, math, os, re, struct, time
@@ -268,17 +271,21 @@ def tensor_list(c):
         T += [(f'blk.{l}.attn_norm.weight', (D,), f'{l}.an', 1), (f'blk.{l}.attn_q.weight', (D, D), f'{l}.q', 2), (f'blk.{l}.attn_k.weight', (kv, D), f'{l}.k', 2), (f'blk.{l}.attn_v.weight', (kv, D), f'{l}.v', 2),
               (f'blk.{l}.attn_output.weight', (D, D), f'{l}.o', 2), (f'blk.{l}.ffn_norm.weight', (D,), f'{l}.fn', 1), (f'blk.{l}.ffn_gate.weight', (F, D), f'{l}.g', 2), (f'blk.{l}.ffn_up.weight', (F, D), f'{l}.u', 2), (f'blk.{l}.ffn_down.weight', (D, F), f'{l}.d', 2)]
     return T
-def write_gguf(path, c, tok, P=None, dtype='f16', name='expertstream-model', seed=0, progress=None, sparse=False):
-    """P=None writes a randomly initialised model (valid at any size, streamed so RAM stays small)."""
-    if count_params(c) > MAX_PARAMS: raise ValueError('over the 37B limit')
-    tl = tensor_list(c); es = 2 if dtype == 'f16' else 4; D = c['dim']
-    meta = [('general.architecture', 'str', 'llama'), ('general.name', 'str', name), ('general.description', 'str', 'Created from scratch with ExpertStream Builder' + ('' if P is not None else ' (random initialisation, not trained)')),
+def _gguf_meta(c, tok, name, desc, extra=()):
+    D = c['dim']
+    return [('general.architecture', 'str', 'llama'), ('general.name', 'str', name), ('general.description', 'str', desc),
             ('llama.context_length', 'u32', c['ctx']), ('llama.embedding_length', 'u32', D), ('llama.block_count', 'u32', c['layers']), ('llama.feed_forward_length', 'u32', c['ffn']),
             ('llama.attention.head_count', 'u32', c['heads']), ('llama.attention.head_count_kv', 'u32', c['kv_heads']), ('llama.attention.layer_norm_rms_epsilon', 'f32', c['eps']),
             ('llama.rope.freq_base', 'f32', c['rope_base']), ('llama.rope.dimension_count', 'u32', D // c['heads']), ('llama.vocab_size', 'u32', c['vocab']),
             ('tokenizer.ggml.model', 'str', 'gpt2'), ('tokenizer.ggml.pre', 'str', 'gpt-2'), ('tokenizer.ggml.tokens', 'arr_str', tok['tokens'] + ['<pad%d>' % i for i in range(c['vocab'] - len(tok['tokens']))]),
             ('tokenizer.ggml.token_type', 'arr_i32', [1] * 256 + [1] * (len(tok['tokens']) - 256 - len(tok['specials'])) + [3] * len(tok['specials']) + [1] * (c['vocab'] - len(tok['tokens']))),
-            ('tokenizer.ggml.merges', 'arr_str', tok['merges']), ('tokenizer.ggml.eos_token_id', 'u32', len(tok['tokens']) - 1), ('tokenizer.ggml.add_bos_token', 'u32', 0)]
+            ('tokenizer.ggml.merges', 'arr_str', tok['merges']), ('tokenizer.ggml.eos_token_id', 'u32', len(tok['tokens']) - 1), ('tokenizer.ggml.add_bos_token', 'u32', 0)] + list(extra)
+
+def write_gguf(path, c, tok, P=None, dtype='f16', name='expertstream-model', seed=0, progress=None, sparse=False):
+    """P=None writes a randomly initialised model (valid at any size, streamed so RAM stays small)."""
+    if count_params(c) > MAX_PARAMS: raise ValueError('over the 37B limit')
+    tl = tensor_list(c); es = 2 if dtype == 'f16' else 4; D = c['dim']
+    meta = _gguf_meta(c, tok, name, 'Created from scratch with ExpertStream Builder' + ('' if P is not None else ' (random initialisation, not trained)'))
     if len(tok['tokens']) > c['vocab']: raise ValueError('tokenizer larger than model vocab')
     head = b'GGUF' + struct.pack('<IQQ', 3, len(tl), len(meta)) + b''.join(_kv(*m) for m in meta)
     infos, off = [], 0
@@ -307,4 +314,118 @@ def write_gguf(path, c, tok, P=None, dtype='f16', name='expertstream-model', see
             if sparse and P is None and nd == 2: f.seek(padn, 1)
             if progress: progress(written / max(1, total))
         if sparse: f.truncate(len(head) + total)
+    return os.path.getsize(path)
+
+
+# ---------------------------------------------------------------- sparse upcycling: dense -> Mixture of Experts (any size to 37B)
+GT_Q4_0, GT_Q8_0 = 2, 8
+
+def quantize_rows(M, kind):
+    """ggml Q8_0 / Q4_0 byte layout for a float matrix (rows, cols); cols must be a multiple of 32."""
+    need_np(); rows, cols = M.shape
+    if cols % 32: raise ValueError('width %d is not a multiple of 32' % cols)
+    x = M.astype(np.float32).reshape(rows, cols // 32, 32)
+    if kind == 'q8_0':
+        amax = np.abs(x).max(-1); d = (amax / 127.0).astype(np.float16); df = d.astype(np.float32); idv = np.where(df > 0, 1.0 / np.where(df > 0, df, 1), 0)
+        q = np.clip(np.rint(x * idv[..., None]), -127, 127).astype(np.int8)
+        out = np.empty((rows, cols // 32), np.dtype([('d', '<f2'), ('q', 'i1', (32,))])); out['d'] = d; out['q'] = q
+        return out.tobytes()
+    if kind == 'q4_0':
+        i = np.abs(x).argmax(-1); mx = np.take_along_axis(x, i[..., None], -1)[..., 0]; d = (mx / -8.0).astype(np.float16); df = d.astype(np.float32)
+        idv = np.where(df != 0, 1.0 / np.where(df != 0, df, 1), 0); q = np.minimum(15, (x * idv[..., None] + 8.5).astype(np.int32)).astype(np.uint8)
+        out = np.empty((rows, cols // 32), np.dtype([('d', '<f2'), ('q', 'u1', (16,))])); out['d'] = d; out['q'] = q[..., :16] | (q[..., 16:] << 4)
+        return out.tobytes()
+    raise ValueError('kind must be q8_0 or q4_0')
+
+def _quant_row_bytes(kind, cols): return {'q8_0': 34, 'q4_0': 18, 'f16': 2 * 32}[kind] * cols // 32
+
+def _q32(c):
+    """make width and FFN multiples of 32 (needed for 4/8-bit blocks) and keep heads dividing the width"""
+    c = dict(c); D = max(32, ((c['dim'] + 15) // 32) * 32); h = c['heads']
+    while D % h: h -= 1
+    kvh = c['kv_heads']
+    while h % kvh: kvh -= 1
+    c.update(dim=D, heads=h, kv_heads=kvh, ffn=max(32, int(round(D * 8 / 3 / 32)) * 32)); c['params'] = count_params(c); return c
+
+def moe_count(c, E):
+    D, F, L = c['dim'], c['ffn'], c['layers']; ffnp = L * 3 * D * F
+    return count_params(c) - ffnp + L * E * 3 * D * F + L * E * D
+
+def upcycle_plan(target, top_k=2, quant='q4_0', vocab=4096, ctx=1024, max_experts=1024, base_params=None, flops=1e11, base_config=None):
+    """Pick a small dense BASE (trainable on the device) and an expert count so that base -> MoE reaches `target` total parameters.
+    Total = what the file holds; ACTIVE = what one word uses (this is why a phone can run it)."""
+    if not (MIN_PARAMS <= target <= MAX_PARAMS): raise ValueError('target must be between %d and %d parameters (37 billion is the supported maximum)' % (MIN_PARAMS, MAX_PARAMS))
+    top_k = max(1, int(top_k)); best = None
+    if base_config:   # a base the user already trained: only the expert count is chosen
+        c = dict(base_config); D, F, L = c['dim'], c['ffn'], c['layers']; ffnp = L * 3 * D * F
+        E = int((target - (count_params(c) - ffnp)) // (ffnp + L * D))
+        if E < 2: raise ValueError('target is too small for this base: it already has %d parameters (use a bigger target or a smaller base)' % count_params(c))
+        best = (c, E)
+    cands = [base_params] if base_params else [x for x in (4e5, 1e6, 2e6, 5e6, 1e7, 2e7, 3e7, 4e7, 6e7, 1e8)]
+    for b in ([] if best else cands):
+        if b > target: continue
+        c = _q32(design_config(b, vocab=vocab, ctx=ctx, tied=True)); D, F, L = c['dim'], c['ffn'], c['layers']; ffnp = L * 3 * D * F
+        nonexp = count_params(c) - ffnp; E = int((target - nonexp) // (ffnp + L * D))
+        if E < 2: continue
+        if E <= max_experts or base_params: best = (c, E); break
+    if best is None:   # even the largest base needs more than max_experts: allow more experts rather than refusing
+        c = _q32(design_config(max(cands), vocab=vocab, ctx=ctx, tied=True)); D, F, L = c['dim'], c['ffn'], c['layers']; ffnp = L * 3 * D * F
+        best = (c, max(2, int((target - (count_params(c) - ffnp)) // (ffnp + L * D))))
+    c, E = best; top_k = min(top_k, E); total = moe_count(c, E); D, F, L = c['dim'], c['ffn'], c['layers']
+    active = count_params(c) - L * 3 * D * F + L * top_k * 3 * D * F + L * E * D
+    exp_b = L * E * 3 * F * _quant_row_bytes(quant, D) if quant != 'f16' else L * E * 3 * F * D * 2
+    core_b = (count_params(c) - L * 3 * D * F) * 2
+    return dict(base=c, base_params=count_params(c), experts=E, top_k=top_k, total_params=total, active_params=active, quant=quant,
+                file_gb=round((exp_b + core_b) / 1e9, 2), per_word_read_mb=round((L * top_k * 3 * F * _quant_row_bytes(quant, D) if quant != 'f16' else L * top_k * 6 * F * D) / 1e6, 1),
+                base_train_flops_chinchilla=6.0 * count_params(c) * 20 * count_params(c), base_train_hours_at=round(6.0 * count_params(c) * 20 * count_params(c) / flops / 3600, 2),
+                technology='sparse upcycling + expert streaming')
+
+def write_gguf_moe(path, c, tok, P, n_experts, top_k=2, quant='q4_0', name='expertstream-moe', progress=None, sparse_experts=False, note=''):
+    """Write a dense trained model as a Mixture-of-Experts GGUF. Every expert is a copy of the dense FFN, and the router weights are small,
+    so the top-k mix of identical experts equals the dense answer exactly (engine renormalises the top-k weights). The expert bytes are computed
+    once per layer and written n_experts times, so even 37B costs only disk time. sparse_experts=True leaves expert bytes as file holes (tests only)."""
+    need_np(); E, k = int(n_experts), int(top_k); D, F, L, V = c['dim'], c['ffn'], c['layers'], c['vocab']
+    total = moe_count(c, E)
+    if total > MAX_PARAMS * 1.0001: raise ValueError('over the 37B limit (%d)' % total)
+    if quant not in ('q4_0', 'q8_0', 'f16'): raise ValueError('quant must be q4_0, q8_0 or f16')
+    if quant != 'f16' and (D % 32 or F % 32): quant = 'f16'   # 4/8-bit blocks need widths that are multiples of 32; fall back rather than fail
+    if not (1 <= k <= E): raise ValueError('top_k must be between 1 and the number of experts')
+    qt = {'q4_0': GT_Q4_0, 'q8_0': GT_Q8_0, 'f16': GT_F16}[quant]
+    meta = _gguf_meta(c, tok, name, 'Sparse-upcycled Mixture-of-Experts: %d experts per layer, %d used per word, each expert initialised from one trained dense FFN (%s)' % (E, k, note or 'ExpertStream Builder'),
+                      [('llama.expert_count', 'u32', E), ('llama.expert_used_count', 'u32', k)])
+    tl = [('token_embd.weight', (V, D), 'tok', 2, GT_F16), ('output_norm.weight', (D,), 'norm', 1, GT_F32)]
+    if not c.get('tied', True): tl.append(('output.weight', (V, D), 'out', 2, GT_F16))
+    kv = c['kv_heads'] * (D // c['heads'])
+    for l in range(L):
+        tl += [(f'blk.{l}.attn_norm.weight', (D,), f'{l}.an', 1, GT_F32), (f'blk.{l}.attn_q.weight', (D, D), f'{l}.q', 2, GT_F16), (f'blk.{l}.attn_k.weight', (kv, D), f'{l}.k', 2, GT_F16),
+               (f'blk.{l}.attn_v.weight', (kv, D), f'{l}.v', 2, GT_F16), (f'blk.{l}.attn_output.weight', (D, D), f'{l}.o', 2, GT_F16), (f'blk.{l}.ffn_norm.weight', (D,), f'{l}.fn', 1, GT_F32),
+               (f'blk.{l}.ffn_gate_inp.weight', (E, D), f'{l}.r', 2, GT_F32), (f'blk.{l}.ffn_gate_exps.weight', (E, F, D), f'{l}.g', 3, qt), (f'blk.{l}.ffn_up_exps.weight', (E, F, D), f'{l}.u', 3, qt),
+               (f'blk.{l}.ffn_down_exps.weight', (E, D, F), f'{l}.d', 3, qt)]
+    def nbytes(sh, nd, t):
+        n = math.prod(sh)
+        if t == GT_F32: return n * 4
+        if t == GT_F16: return n * 2
+        return sh[0] * (sh[1] * _quant_row_bytes(quant, sh[2]))
+    head = b'GGUF' + struct.pack('<IQQ', 3, len(tl), len(meta)) + b''.join(_kv(*m) for m in meta); off = 0; infos = []
+    for n, sh, key, nd, t in tl:
+        infos.append(_s(n.encode()) + struct.pack('<I', len(sh)) + b''.join(struct.pack('<Q', d) for d in reversed(sh)) + struct.pack('<IQ', t, off)); off += (nbytes(sh, nd, t) + 31) // 32 * 32
+    head += b''.join(infos); head += b'\0' * ((-len(head)) % 32); r = np.random.default_rng(0); written = 0
+    with open(path, 'wb') as f:
+        f.write(head)
+        for n, sh, key, nd, t in tl:
+            sz = nbytes(sh, nd, t)
+            if nd == 3:
+                l, m = key.split('.'); W = P[key]
+                blob = quantize_rows(W, quant) if quant != 'f16' else W.astype(np.float16).tobytes()
+                if sparse_experts: f.seek(sz, 1)
+                else:
+                    for _ in range(E): f.write(blob)
+            elif key.endswith('.r'): f.write((r.standard_normal((E, D)) * 0.02).astype(np.float32).tobytes())
+            elif t == GT_F32: f.write(P[key].astype(np.float32).tobytes())
+            else: f.write(P[key].astype(np.float16).tobytes())
+            padn = (-sz) % 32
+            if padn: (f.seek(padn, 1) if sparse_experts and nd == 3 else f.write(b'\0' * padn))
+            written += sz + padn
+            if progress: progress(written / max(1, off))
+        f.truncate(len(head) + off)
     return os.path.getsize(path)

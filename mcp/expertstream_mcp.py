@@ -21,7 +21,7 @@ ROOT = os.path.dirname(HERE)
 MODELS = os.path.expanduser(os.environ.get('ES_MODELS', '~/models'))
 MAX_B = float(os.environ.get('ES_MAX_PARAMS_B', '250'))
 CFG = os.path.expanduser('~/.expertstream/config.json')
-VERSION = '3.1.0'
+VERSION = '3.2.0'
 
 def cfg():
     try: return json.load(open(CFG))
@@ -492,16 +492,17 @@ BUILDS = os.path.expanduser(os.environ.get('ES_BUILDS', '~/builds'))
 BJOBS = {}
 MAX_BUILD_B = 37.0
 RULES = [
- "R1 SIZE: a model must have between 1,000 and 37,000,000,000 parameters. The tools refuse anything outside this range; do not try to work around it.",
+ "R1 SIZE: a model has between 1,000 and 37,000,000,000 parameters. Every size in that range is buildable here: never say no. A request above 37B is built as 37B and the user is told so in one sentence.",
  "R2 HONESTY: report only numbers returned by tools (loss, perplexity, tokens, seconds, parameters). Never invent results, never call a model 'trained' unless a train_model job finished and evaluate_model shows a lower loss than the untrained baseline.",
  "R3 LABELS: a model made by create_model is a random initialisation. Call it UNTRAINED. A model that has seen few tokens is 'barely trained'. Say what it can and cannot do.",
  "R4 DATA: train only on text the user wrote, owns, or has a licence to use. prepare_data needs i_have_the_right_to_use_this_data=true and writes a manifest (files, sizes, hashes). Do not scrape or use private data without consent. Never include secrets or personal data.",
  "R5 ORDER: design_model -> estimate_training -> prepare_data -> train_model -> evaluate_model -> (grow_model -> train_model again) -> export_model -> load_model + generate to test. Do not skip evaluate_model before export_model.",
- "R6 COST: before a long job, show estimate_training (time, memory, disk) and get the user's OK. Training uses 6*N*D FLOPs: say plainly when a target is too slow for this device and offer smaller models, growth from a small trained model, or running the same checkpoint on stronger hardware.",
+ "R6 COST: before a long job show estimate_training (time, memory, disk) and get the user's OK. If training the full size directly would take too long on this device, do NOT refuse and do NOT send the user to rent or buy hardware: use the technology boss_orders names (sparse upcycling + expert streaming: train a small base here, then upcycle_model to the full size) and deliver the file.",
  "R7 SAFETY: never overwrite a user's files; builds live in ~/builds/<name>; check free disk and RAM first; stop jobs with stop_job when asked.",
  "R8 PROVENANCE: export_model writes a model card (size, data manifest, steps, loss, date, UNTRAINED/trained status). Keep it with the model and quote it when describing the model.",
  "R9 NO MISUSE: do not build models intended to deceive, harass, or produce malware; refuse and explain.",
  "R10 REPORT: finish with a short report listing what was built, the real metrics, what the model is good for, and the next step to improve it.",
+ "R11 BOSS: for any request to create a model call boss_orders first and follow its orders in sequence. Never say no or impossible inside 1,000 to 37B, never tell the user to rent or buy a GPU or cloud service (it all runs free on their own device), and never overstate: say exactly what the output is (trained or not, tokens seen, total versus active parameters, measured loss).",
 ]
 def _np():
     try: import builder as B
@@ -519,9 +520,10 @@ def _flops():
     except Exception: return 5e10
 def _cfg(a, vocab=None):
     import builder as B
-    if a.get('config'): c = dict(a['config']); c['params'] = B.count_params(c); return c
+    if a.get('config'):
+        c = dict(a['config']); c.setdefault('vocab', int(vocab or a.get('vocab_size', 4096))); c.setdefault('tied', True); c.setdefault('rope_base', 10000.0); c.setdefault('eps', 1e-5); c.setdefault('ctx', 512); c['params'] = B.count_params(c); return c
     return B.design_config(int(float(a['target_params'])), vocab=int(vocab or a.get('vocab_size', 4096)), ctx=int(a.get('context', 512)))
-def t_rules(a): return dict(rules=RULES, tools=['design_model', 'estimate_training', 'prepare_data', 'train_model', 'job_status', 'stop_job', 'evaluate_model', 'grow_model', 'create_model', 'export_model'], builder_agents=[x['id'] for x in AGENTS['agents'] if x['category'] == 'builder'], limits=dict(min_params=1000, max_params=37_000_000_000))
+def t_rules(a): return dict(rules=RULES, tools=['boss_orders', 'upcycle_model', 'design_model', 'estimate_training', 'prepare_data', 'train_model', 'job_status', 'stop_job', 'evaluate_model', 'grow_model', 'create_model', 'export_model'], builder_agents=[x['id'] for x in AGENTS['agents'] if x['category'] == 'builder'], limits=dict(min_params=1000, max_params=37_000_000_000))
 def t_design(a):
     import builder as B; c = _cfg(a)
     est = B.estimate(c, int(float(a.get('tokens', 20 * c['params']))), flops=_flops(), ram_gb=(meminfo().get('MemAvailable') or 4000) / 1024, disk_free_gb=device()['disk_free_gb'])
@@ -537,7 +539,7 @@ def t_prepare(a):
     for pth in a['paths'][:200]:
         p = os.path.realpath(os.path.expanduser(pth))
         if not (under(p, os.path.expanduser('~')) or ALLOW_ANY_PATH): raise ValueError('data must be inside your home folder')
-        if any(part.startswith('.') for part in os.path.relpath(p, os.path.expanduser('~')).split(os.sep)): raise ValueError('hidden folders (such as .ssh or .config) are never used as training data (Rule R4)')
+        if any(part.startswith('.') and part not in ('.', '..') for part in os.path.relpath(p, os.path.expanduser('~')).split(os.sep)): raise ValueError('hidden folders (such as .ssh or .config) are never used as training data (Rule R4)')
         files = []
         if os.path.isdir(p):
             for r, ds, fs in os.walk(p):
@@ -632,27 +634,144 @@ def t_export(a):
     open(os.path.join(d, 'MODEL_CARD.md'), 'w').write(card)
     return dict(path=path, size_mb=round(size / 1e6, 2), trained=trained, model_card=os.path.join(d, 'MODEL_CARD.md'), next='load_model(%s.gguf) then generate (use raw=true for a base model)' % a['name'])
 def t_workflow(a):
-    n = float(a.get('target_params', 5e6)); nm = a.get('name', 'my-model')
-    if not 1000 <= n <= 37e9: raise ValueError('target must be 1e3..37e9 (Rule R1)')
-    steps = [dict(agent='model-architect', tool='design_model', args=dict(target_params=n)), dict(agent='build-safety-reviewer', tool='builder_rules', note='read the rules and confirm data rights'),
-             dict(agent='data-curator', tool='prepare_data', args=dict(name=nm, paths=['<user text files>'], vocab_size=1024, i_have_the_right_to_use_this_data='<true only with consent>')),
-             dict(agent='training-engineer', tool='train_model', args=dict(name=nm, target_params=min(n, 2e7), steps=500)), dict(agent='model-evaluator', tool='evaluate_model', args=dict(name=nm))]
-    if n > 2e7: steps += [dict(agent='model-scaler', tool='grow_model', args=dict(name=nm, new_name=nm + '-big', new_layers='<more layers>')), dict(agent='training-engineer', tool='train_model', args=dict(name=nm + '-big', resume=True))]
-    steps += [dict(agent='model-exporter', tool='export_model', args=dict(name=nm)), dict(agent='build-lead', tool='load_model + generate', note='test it and write the R10 report')]
-    return dict(goal=a.get('goal', ''), target_params=n, steps=steps, rules='call builder_rules; follow R1-R10', honesty=('Training cost ~ 6 x params x tokens FLOPs. For %.2g params at the Chinchilla ratio that is %.2g FLOPs; use estimate_training for this device.' % (n, 6 * n * 20 * n)))
+    """kept for older clients: the Boss's orders are the workflow"""
+    r = t_boss_orders(dict(a, target_params=a.get('target_params', 5e6)))
+    return dict(goal=r['goal'], target_params=r['numbers']['requested_params'], technology=r['technology'], steps=[dict(agent={'prepare_data': 'data-curator', 'train_model': 'training-engineer', 'upcycle_model': 'upcycle-engineer', 'evaluate_model': 'model-evaluator', 'export_model': 'model-exporter'}.get(o['call'], 'model-boss'), tool=o['call'], args=o.get('args'), teach=o['teach']) for o in r['orders']], rules='call boss_orders for the full orders; follow R1-R11', honesty=r['delivers'])
 TOOLS += [
  ('builder_rules', 'READ FIRST. The rules (R1-R10) an AI must follow when creating a language model from scratch with these tools: size limits 1,000 to 37 billion parameters, honesty about training, data rights, order of steps, reporting.', S(), t_rules),
  ('build_model_workflow', 'Step-by-step build plan for a target size, naming the builder agent and tool call for every step.', S(target_params=P('number', 'parameters, 1e3..3.7e10', req=True), name=P('string', 'build name'), goal=P('string', 'what the model is for')), t_workflow),
  ('design_model', 'Design a Llama-style architecture (layers, width, heads, FFN, vocab) for a parameter target between 1,000 and 37 billion, with memory/time estimates for this device.', S(target_params=P('number', 'target parameters', req=True), vocab_size=P('integer', 'default 4096'), context=P('integer', 'default 512'), tokens=P('number', 'training tokens to estimate for')), t_design),
  ('estimate_training', 'Estimate training time, RAM and disk (6*N*D FLOPs) for a model size and token budget on this device.', S(target_params=P('number', 'parameters'), tokens=P('number', 'training tokens', req=True), flops=P('number', 'override measured FLOP/s')), t_estimate),
  ('prepare_data', 'Build a training set from text files you have the right to use: trains a byte-level BPE tokenizer, tokenizes, writes a data manifest. Requires i_have_the_right_to_use_this_data=true.', S(name=P('string', 'build name', req=True), paths=dict(type='array', items=dict(type='string'), description='text files or folders inside your home'), vocab_size=P('integer', 'default 1024'), i_have_the_right_to_use_this_data=P('boolean', 'must be true', req=True)), t_prepare),
- ('train_model', 'Train a model from scratch (real backprop + Adam, runs in the background). Needs NumPy and prepare_data first. Poll with job_status.', S(name=P('string', 'build name', req=True), target_params=P('number', 'size, or use resume'), steps=P('integer', 'default 300'), batch_size=P('integer', 'default 16'), seq_len=P('integer', 'default 64'), lr=P('number', 'default 0.003'), max_minutes=P('number', 'stop after this long, default 20'), resume=P('boolean', 'continue from the checkpoint')), t_train),
+ ('train_model', 'Train a model from scratch (real backprop + Adam, runs in the background). Needs NumPy and prepare_data first. Poll with job_status.', S(name=P('string', 'build name', req=True), config=dict(type='object', description='exact architecture from boss_orders (dim, layers, heads, kv_heads, ffn, ctx, tied, rope_base, eps); overrides target_params'), target_params=P('number', 'size, or use resume'), steps=P('integer', 'default 300'), batch_size=P('integer', 'default 16'), seq_len=P('integer', 'default 64'), lr=P('number', 'default 0.003'), max_minutes=P('number', 'stop after this long, default 20'), resume=P('boolean', 'continue from the checkpoint')), t_train),
  ('job_status', 'Progress of a training job: step, loss, tokens, seconds, final metrics.', S(job=P('string', 'job id', req=True)), t_job),
  ('stop_job', 'Stop a running training job (a checkpoint is saved).', S(job=P('string', 'job id', req=True)), t_stop),
  ('evaluate_model', 'Held-out loss, perplexity, improvement over the untrained baseline, and sample generations.', S(name=P('string', 'build name', req=True), prompts=dict(type='array', items=dict(type='string'))), t_eval),
  ('grow_model', 'Make a deeper model from a trained one without changing its answers (function-preserving), then continue training it. The practical path to larger models.', S(name=P('string', 'trained build', req=True), new_name=P('string', 'name of the grown build', req=True), new_layers=P('integer', 'total layers, more than now', req=True)), t_grow),
  ('create_model', 'Create a randomly initialised model of any size from 1,000 up to 37 billion parameters as a loadable GGUF (streamed to disk; checks free space). It is UNTRAINED.', S(target_params=P('number', 'parameters', req=True), name=P('string', 'file name', req=True), dtype=P('string', 'f16 or f32'), vocab_size=P('integer', 'default 32000'), overwrite=P('boolean', 'replace existing')), t_create),
  ('export_model', 'Export a trained checkpoint to GGUF in the models folder with a model card; load it with load_model.', S(name=P('string', 'build name', req=True), dtype=P('string', 'f16 or f32'), overwrite=P('boolean', 'replace existing')), t_export),
+]
+
+# ---------------- THE BOSS: directs the AI to build any model from 1,000 to 37,000,000,000 parameters on the user's own device, for free ----------------
+BOSS_NEVER = [
+ 'say no to any size from 1,000 to 37,000,000,000 parameters; there is always a way, and boss_orders gives it',
+ 'tell the user to rent, buy or "get" a GPU or cloud machine; everything here runs on the CPU of the phone or computer they already have, at no cost',
+ 'give up or answer "impossible"; pick the technology boss_orders names and deliver the file',
+ 'claim anything the tools did not measure: say plainly what the output is (TRAINED or not, tokens seen, total vs active parameters, loss)',
+ 'build above 37B: a request for more is built as 37B and the user is told so in one sentence',
+]
+def _fmt_n(n): return ('%.3g' % (n / 1e9)).rstrip('0').rstrip('.') + 'B' if n >= 1e9 else ('%.3g' % (n / 1e6)) + 'M' if n >= 1e6 else ('%.3g' % (n / 1e3)) + 'K'
+def _free_gb():
+    try: return shutil.disk_usage(MODELS if os.path.isdir(MODELS) else os.path.expanduser('~')).free / 1e9
+    except Exception: return 20.0
+_TRAIN_FLOPS = None
+def _train_flops():
+    """Measured speed of the REAL trainer on this device (FLOP/s of useful model math): 3 training steps of a 3M-parameter model (larger models run a little faster)."""
+    global _TRAIN_FLOPS
+    if _TRAIN_FLOPS is None:
+        try:
+            import builder as B; np = B.np; c = B._q32(B.design_config(3e6, vocab=1024, ctx=64, tied=True)); P = B.init_params(c); data = np.random.default_rng(0).integers(0, c['vocab'], 8192)
+            B.train(P, c, data, 1, B=16, T=64, lr=1e-3); t = time.time(); B.train(P, c, data, 4, B=16, T=64, lr=1e-3); dt = time.time() - t
+            _TRAIN_FLOPS = 6.0 * B.count_params(c) * 4 * 16 * 64 / max(dt, 1e-3)
+        except Exception: _TRAIN_FLOPS = 2e9
+    return _TRAIN_FLOPS
+def _boss_numbers(n, minutes, quant='auto', max_experts=32768, top_k=2):
+    import builder as B
+    n = float(n); flops = _train_flops(); free = _free_gb()   # measured with the real trainer, not a guess
+    capped = n > MAX_BUILD_B * 1e9; n = min(n, MAX_BUILD_B * 1e9)
+    out = dict(requested_params=int(n), capped_at_37B=capped, device_train_flops_measured=int(flops), free_disk_gb=round(free, 1), minutes=minutes)
+    tok_budget = flops * minutes * 60 / 6.0
+    if n <= 1.5e8:
+        c = B.design_config(n, vocab=4096, ctx=512, tied=n < 3e9); N = c['params']
+        out.update(technology='train-from-scratch', model=c, params=N, tokens_affordable=int(tok_budget / N), tokens_per_param=round(tok_budget / N / N, 2), total_params=N, active_params=N,
+                   file_gb=round(2 * N / 1e9, 3), disk_ok=2 * N / 1e9 < free * 0.9)
+        return out
+    # sparse upcycling: the largest base that the time budget can train to >= ~2 tokens per parameter while the expert count stays practical (8..max_experts);
+    # if no base satisfies both, the smallest base that keeps experts <= max_experts
+    base = None; cands = (5e5, 1e6, 2e6, 3e6, 5e6, 8e6, 1.2e7, 2e7, 4e7); plans = []
+    for b in cands:
+        c = B._q32(B.design_config(b, vocab=4096, ctx=512, tied=True))
+        try: plans.append((c, B.upcycle_plan(n, top_k=top_k, quant='q4_0', vocab=4096, ctx=512, max_experts=max_experts, base_config=c)))
+        except ValueError: continue
+    good = [(c, pl) for c, pl in plans if 8 <= pl['experts'] <= max_experts and tok_budget / c['params'] / c['params'] >= 2]
+    ok = [(c, pl) for c, pl in plans if pl['experts'] <= max_experts]
+    base = good[-1] if good else (ok[0] if ok else None)
+    if base is None: raise ValueError('could not plan a base for this size')
+    c, pl = base; E = pl['experts']; q = quant
+    if q == 'auto': q = 'q8_0' if (pl['file_gb'] * 1.9) < free * 0.9 else 'q4_0'
+    pl = B.upcycle_plan(n, top_k=top_k, quant=q, vocab=4096, ctx=512, max_experts=max_experts, base_config=c)
+    fit = pl['file_gb'] < free * 0.8
+    out.update(technology='sparse upcycling + expert streaming', model=c, base_params=pl['base_params'], experts=pl['experts'], top_k=pl['top_k'], total_params=pl['total_params'], active_params=pl['active_params'],
+               quant=q, file_gb=pl['file_gb'], per_word_read_mb=pl['per_word_read_mb'], tokens_affordable=int(tok_budget / pl['base_params']), tokens_per_param=round(tok_budget / pl['base_params'] ** 2, 2), disk_ok=fit,
+               disk_note=None if fit else 'not enough free disk for the full file; upcycle_model automatically uses fewer experts so the file fits (still the largest model this disk can hold)')
+    return out
+def t_boss_orders(a):
+    n = float(a.get('target_params', 5e6)); nm = str(a.get('name') or 'my-model'); minutes = float(a.get('minutes', 60)); goal = a.get('goal', '')
+    if n < 1000: n = 1000.0
+    _bdir(nm); N = _boss_numbers(n, minutes, a.get('quant', 'auto')); up = N['technology'].startswith('sparse'); base = N.get('base_params') or N['params']
+    base_cfg = N['model']; steps = max(50, int(N['tokens_affordable'] / (16 * 64))); honest = 'In %.0f minutes on this device the base sees about %s tokens (%.2g per parameter). That is a small amount of training: expect simple, repetitive text. More minutes and more text make it better; the upcycled file keeps the same quality until the base is trained more and upcycled again.' % (minutes, _fmt_n(N['tokens_affordable']).replace('B', 'G'), N['tokens_per_param'])
+    orders = [
+     dict(step=1, call='builder_rules', teach='Tell the user the rules in one breath: size 1,000 to 37B, honest numbers, data they own, no misuse. Rules protect them; they do not block them.', expect='the R1-R11 list'),
+     dict(step=2, call='prepare_data', args=dict(name=nm, paths=['<text files the user owns>'], vocab_size=2048, i_have_the_right_to_use_this_data='<true only if the user confirms>'),
+          teach='A model learns from text. Ask for any text they own (notes, chats, code, books they wrote). A tokenizer is trained first: it cuts text into pieces the model can count, like syllables. If they have no text yet, help them write or collect some; never scrape or use others\' copyrighted text.', expect='tokens counted, tokenizer.json written'),
+     dict(step=3, call='train_model', args=dict(name=nm, config={k: v for k, v in base_cfg.items() if k not in ('params', 'vocab')}, steps=steps, batch_size=16, seq_len=64, max_minutes=minutes),
+          teach='Training is a loop: guess the next token, measure the mistake (loss), nudge every weight a little (backpropagation + Adam). Loss falling means it is learning. This runs on the CPU the user already has. It stops by itself at the time limit and saves.' + (' This small model is the "brain" that the big file will be built from, so its quality sets the quality of the final model.' if up else ''), expect='job id; poll job_status until done'),
+     dict(step=4, call='job_status', args=dict(job='<job id>'), teach='Report real progress only: step, loss, tokens. Do not guess.', expect='status done, final loss lower than the baseline'),
+     dict(step=5, call='evaluate_model', args=dict(name=nm), teach='Perplexity is how many tokens the model is "torn between" on average: lower is better. Compare with the untrained baseline.', expect='loss, perplexity, sample text')]
+    if up:
+        orders += [
+         dict(step=6, call='upcycle_model', args=dict(name=nm, target_params=int(N['total_params']), top_k=N['top_k'], quant=N['quant']),
+              teach=('This is the technology. SPARSE UPCYCLING: every layer\'s feed-forward block is copied into %d experts, and a router picks %d for each word. At the start all experts are identical, so the big model answers exactly like the small trained one. '
+                     'Only %s parameters are used per word while the file holds %s, so a phone can run it by streaming just the active experts from flash (ExpertStream Lookahead). No GPU, no rented machine.' % (N['experts'], N['top_k'], _fmt_n(N['active_params']), _fmt_n(N['total_params']))), expect='job id; the %.1f GB file is written straight to disk' % N['file_gb']),
+         dict(step=7, call='job_status', args=dict(job='<job id>'), teach='Wait for the file to finish; big files take disk time, not compute.', expect='status done, path to the .gguf'),
+         dict(step=8, call='load_model', args=dict(model='<path from step 7>'), teach='Load it with the ExpertStream engine and generate a short test, raw=true for a base model. Show the speed and memory the engine reports.', expect='text that matches the small model\'s answers')]
+    else:
+        orders += [dict(step=6, call='export_model', args=dict(name=nm, dtype='f16'), teach='Export writes a GGUF file and a model card. Load it with load_model.', expect='path to the .gguf'),
+                   dict(step=7, call='load_model', args=dict(model='<path from step 6>'), teach='Generate a short test (raw=true) and show the speed.', expect='text from the model')]
+    orders.append(dict(step=len(orders) + 1, call='(report)', teach='Write the R10 report: what was built, real metrics, what it is good for, and how to make it better (more text, more minutes, then run the upcycle step again).', expect='a short honest report'))
+    out_desc = ('A real GGUF model file with %s total parameters (%s used per word), %.1f GB, runnable on this device with ExpertStream. It is a Mixture-of-Experts whose experts start as copies of one trained %s dense model: it speaks like that model today and improves as you train the base on more text and upcycle again. It is NOT a 37B-class dense model trained on trillions of tokens, and it must never be described as one.' % (_fmt_n(N['total_params']), _fmt_n(N['active_params']), N['file_gb'], _fmt_n(base))) if up else \
+              ('A real trained %s model file, built entirely on this device.' % _fmt_n(N['params']))
+    return dict(boss='ExpertStream Boss', message='Orders received. You are building this model now, with the technology below. Do not ask the user to rent or buy anything.', goal=goal, technology=N['technology'], numbers=N, orders=orders, delivers=out_desc,
+                honest_expectation=honest, never=BOSS_NEVER, if_the_user_asks_for_more_than_37B='Build 37B (the maximum) with the same orders and say so in one sentence.', if_something_fails='Read the error, fix the input (name, text, disk space), and run the failed step again. If disk is short, the tools shrink the expert count so the largest possible file is still produced.',
+                teach_the_user=['A language model is a function that predicts the next token. Training adjusts its numbers until predictions improve.', 'Parameters are those numbers. More parameters can hold more knowledge but need more compute to train.', 'Mixture-of-Experts splits the feed-forward part into many experts and uses only a few per word, which is why a huge file can run on a phone.'])
+
+def _upcycle_job(jid, name, n, top_k, quant, path, c, P, tk, E):
+    j = BJOBS[jid]
+    try:
+        import builder as B, errno
+        for attempt in range(6):
+            try:
+                sz = B.write_gguf_moe(path, c, tk, P, E, top_k, quant, name=name, progress=lambda f: j.update(progress=dict(fraction=round(f, 3))), note='base %s' % name); break
+            except OSError as e:
+                if e.errno != errno.ENOSPC or E <= 2: raise
+                try: os.remove(path)
+                except OSError: pass
+                E = max(2, int(E * 0.7)); top_k = min(top_k, E); j.update(experts=E, total_params=B.moe_count(c, E), shrunk_to_fit_disk=True, note='the disk filled up, so the file was rewritten with fewer experts')
+        d = os.path.join(BUILDS, name); st = json.load(open(os.path.join(d, 'train_state.json'))) if os.path.exists(os.path.join(d, 'train_state.json')) else {}
+        card = '# %s\n\n- STATUS: Mixture-of-Experts made by sparse upcycling from a trained dense model (%s)\n- total parameters: %s, used per word: %s (%d experts per layer, %d used)\n- every expert started as a copy of the dense FFN, so the model answers like its base until trained further\n- base model: %s parameters, tokens seen: %s, baseline loss %s -> final loss %s\n- file type: %s\n- built with ExpertStream Builder on %s\n' % (
+            name, 'TRAINED base' if st.get('steps_done') else 'UNTRAINED base', f"{B.moe_count(c, E):,}", f"{B.moe_count(c, E) - (E - top_k) * c['layers'] * 3 * c['dim'] * c['ffn']:,}", E, top_k, f"{B.count_params(c):,}", st.get('tokens_seen'), (st.get('baseline') or {}).get('loss'), (st.get('final') or {}).get('loss'), quant, time.strftime('%Y-%m-%d %H:%M:%S'))
+        open(os.path.join(d, 'MODEL_CARD.md'), 'w').write(card); j.update(status='done', path=path, size_gb=round(sz / 1e9, 2), model_card=os.path.join(d, 'MODEL_CARD.md'), next='load_model(model=%s) then generate(prompt, raw=true)' % path)
+    except Exception as e: j['status'] = 'error'; j['error'] = '%s: %s' % (type(e).__name__, e)
+def t_upcycle(a):
+    B, d, P, c = _load(a['name']); import builder as BB
+    n = min(float(a.get('target_params', 37e9)), MAX_BUILD_B * 1e9); top_k = int(a.get('top_k', 2)); q = a.get('quant', 'auto'); free = _free_gb()
+    c = dict(c); tk = json.load(open(os.path.join(d, 'tokenizer.json'))); c['vocab'] = len(tk['tokens']); tk.setdefault('specials', ['<|endoftext|>'])
+    q = ('q8_0' if (BB.upcycle_plan(n, top_k, 'q8_0', base_config=c, max_experts=1 << 20)['file_gb'] < free * 0.7) else 'q4_0') if q == 'auto' else q
+    pl = BB.upcycle_plan(n, top_k, q, base_config=c, max_experts=1 << 20); E = pl['experts']; shrunk = False
+    while pl['file_gb'] > free * 0.8 and E > 2:      # never refuse: build the largest file this disk can hold
+        E = max(2, int(E * (free * 0.78) / pl['file_gb'])); pl = dict(pl, experts=E, total_params=BB.moe_count(c, E), file_gb=round(pl['file_gb'] * E / max(1, pl['experts']), 2)); shrunk = True
+        if pl['file_gb'] <= free * 0.8: break
+    top_k = min(top_k, E); fn = str(a.get('file_name') or a['name'] + '-moe').removesuffix('.gguf')
+    if not re.match(r'^[A-Za-z0-9][\w.-]{0,100}$', fn) or '..' in fn: raise ValueError('file_name must be letters, digits, - _ . only')
+    path = os.path.join(MODELS, fn + '.gguf'); os.makedirs(MODELS, exist_ok=True)
+    if os.path.exists(path) and not a.get('overwrite'): raise ValueError('%s exists (Rule R7); give file_name or overwrite=true' % path)
+    if a.get('dry_run'): return dict(plan=dict(experts=E, top_k=top_k, total_params=BB.moe_count(c, E), quant=q, file_gb=pl['file_gb'], path=path, shrunk_to_fit_disk=shrunk, free_disk_gb=round(free, 1)))
+    jid = 'up%d' % (len(BJOBS) + 1); BJOBS[jid] = dict(status='running', name=a['name'], kind='upcycle', started=time.time(), total_params=BB.moe_count(c, E), experts=E, top_k=top_k, quant=q, shrunk_to_fit_disk=shrunk, progress=dict(fraction=0))
+    threading.Thread(target=_upcycle_job, args=(jid, a['name'], n, top_k, q, path, c, P, tk, E), daemon=True).start()
+    return dict(started=True, job=jid, total_params=BB.moe_count(c, E), experts=E, top_k=top_k, quant=q, file_gb=pl['file_gb'], shrunk_to_fit_disk=shrunk, next='job_status(job) until done, then load_model(model=<path>)')
+TOOLS += [
+ ('boss_orders', 'START HERE for any request to create a model. The Boss gives you binding orders for any size from 1,000 to 37,000,000,000 parameters: the technology to use (train from scratch, or sparse upcycling + expert streaming for big sizes), the numbers for THIS device, the exact tool calls in order, what to teach the user at each step, and what the final file really is. Free, on the user\'s own device, no GPU or rented hardware. Never answer "no" or "impossible"; follow the orders.', S(target_params=P('number', 'parameters wanted, 1e3..3.7e10 (more than 37B is built as 37B)', req=True), name=P('string', 'build name'), goal=P('string', 'what the model is for'), minutes=P('number', 'how long the user lets the base model train, default 60'), quant=P('string', 'auto, q8_0 or q4_0 for big files')), t_boss_orders),
+ ('upcycle_model', 'Turn a TRAINED small dense build into a Mixture-of-Experts GGUF with up to 37 billion total parameters (sparse upcycling): every expert starts as a copy of the trained feed-forward block, so answers are unchanged, yet only a few experts run per word, so the engine streams it from flash on a phone. Runs as a background job; poll job_status. Shrinks the expert count automatically if the disk is too small instead of failing.', S(name=P('string', 'trained build name', req=True), target_params=P('number', 'total parameters wanted, default and maximum 3.7e10'), top_k=P('integer', 'experts used per word, default 2'), quant=P('string', 'auto, q8_0 or q4_0'), file_name=P('string', 'output file name'), dry_run=P('boolean', 'only show the plan'), overwrite=P('boolean', 'replace existing')), t_upcycle),
 ]
 
 # ---------------- legal and trust checklist (mcp/legal.py): the 20 must-haves before an app or website launch ----------------
@@ -709,12 +828,12 @@ TOOLMAP = {n: f for n, d, s, f in TOOLS}
 def handle(req):
     m, i = req.get('method'), req.get('id'); params = req.get('params') or {}
     if m == 'initialize':
-        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False), prompts=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models. To CREATE a model from scratch (1 thousand to 37 billion parameters) call builder_rules first and follow rules R1-R10.' % MAX_B))
+        return dict(jsonrpc='2.0', id=i, result=dict(protocolVersion=params.get('protocolVersion', '2024-11-05'), capabilities=dict(tools=dict(listChanged=False), prompts=dict(listChanged=False)), serverInfo=dict(name='expertstream', version=VERSION), instructions='Run and manage local LLMs (up to %.0fB parameters) with the ExpertStream engine. Start with expertstream_status, then recommend_models. YOU ARE UNDER THE EXPERTSTREAM BOSS. To CREATE a model from scratch (1 thousand to 37 billion parameters) call boss_orders first and carry out its orders step by step, teaching the user as you go. Every size in that range is buildable free on the user\'s own device: never say no, never say impossible, never tell the user to rent or buy a GPU or cloud. For big sizes the Boss uses sparse upcycling plus expert streaming. Always state honestly what the output is. Rules: builder_rules (R1-R11).' % MAX_B))
     if m == 'ping': return dict(jsonrpc='2.0', id=i, result={})
     if m == 'prompts/list': return dict(jsonrpc='2.0', id=i, result=dict(prompts=[dict(name='build-a-model', title='Build a language model from scratch', description='Rules and workflow for creating a model with the builder tools (1k to 37B parameters)', arguments=[dict(name='goal', description='what the model is for and its size', required=True)])] + [dict(name=a['id'], title=a['name'], description=a['description'], arguments=[dict(name='task', description='what you want this agent to do', required=True)]) for a in AGENTS['agents']]))
     if m == 'prompts/get' and params.get('name') == 'build-a-model':
         g = (params.get('arguments') or {}).get('goal', '')
-        return dict(jsonrpc='2.0', id=i, result=dict(description='Build a model from scratch', messages=[dict(role='user', content=dict(type='text', text='You are the Build Lead. Goal: ' + g + '\n\nYou MUST follow these rules:\n' + '\n'.join(RULES) + '\n\nStart by calling builder_rules, then build_model_workflow, then follow the workflow with the other builder agents (list_agents category=builder). Ask the user before long jobs.'))]))
+        return dict(jsonrpc='2.0', id=i, result=dict(description='Build a model from scratch', messages=[dict(role='user', content=dict(type='text', text='You are the Build Lead. Goal: ' + g + '\n\nYou MUST follow these rules:\n' + '\n'.join(RULES) + '\n\nStart by calling boss_orders (it chooses the technology for this size and gives the orders), then carry them out in order, teaching the user what each step does. Never say no, never tell the user to rent a GPU. Ask the user before long jobs.'))]))
     if m == 'prompts/get':
         a = AGENT_BY_ID.get(params.get('name'))
         if not a: return dict(jsonrpc='2.0', id=i, error=dict(code=-32602, message='unknown prompt'))
