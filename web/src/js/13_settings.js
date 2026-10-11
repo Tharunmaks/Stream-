@@ -5,9 +5,12 @@ function slider(key, label, min, max, step, def, fmt, note) { const v = h('b', {
 /* ----- Expert Craft ----- */
 function craftCard() {
   return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'Expert Craft · free · on this phone'), h('h3', {}, 'Train a 70-billion-parameter model on your phone'),
-    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Expert Craft keeps a small model in RAM and puts up to 70 billion parameters in millions of page-sized experts in a file on flash. Each word reads, trains and rewrites only a handful of them, so the work per word is that of a small model. It runs in Termux with Python and NumPy, no GPU and no account.'),
+    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Expert Craft keeps a small model in RAM and puts up to 70 billion parameters in millions of page-sized experts in a file on flash. Each word reads, trains and rewrites only a handful of them, so the work per word is that of a small model. It runs in Termux with Python and NumPy (plus small C kernels it compiles itself), no GPU and no account.'),
     h('div', { class: 'note' }, h('b', {}, 'Honest limit. '), 'The parameters are really trained here, but the quality of the text follows how many words your phone can process and the size of the small model, not the file size. See the plan for your own device before you start.'),
-    cmdBlock('git clone https://github.com/Tharunmaks/Stream-.git ~/Stream-\npkg install -y python python-numpy\npython3 ~/Stream-/craft/expertcraft.py phone-plan 70e9 --minutes 600'),
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'Give it to your AI as a skill (no MCP). Claude Code, on a PC or in Termux:'),
+    cmdBlock('/plugin install expert-craft --marketplace Tharunmaks/Stream-'),
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'Any other agent that reads a skills folder, or by hand:'),
+    cmdBlock('curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh\n# by hand:\npkg install -y python python-numpy clang\npython3 ~/.claude/skills/expert-craft/scripts/expertcraft.py phone-plan 70e9 --minutes 600'),
     h('div', { class: 'row' }, h('a', { class: 'btn', href: 'craft.html' }, 'Open Expert Craft')));
 }
 /* ----- agents browser ----- */

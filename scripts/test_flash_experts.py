@@ -7,15 +7,16 @@
  4. a new layer is an exact no-op (loss identical to the model without it) and training with it lowers the loss
  5. a project can be created, trained, stopped, resumed and sampled (the phone workflow)
  6. a 70-billion-parameter expert file is a sparse file: apparent size ~75 GB, disk use only for experts that were touched
+ 7. the native C kernels (compiled on this device) give the same outputs, gradients, updates and Adam steps as the NumPy reference
 """
 import json, os, shutil, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, 'craft', 'phone'))
+sys.path.insert(0, os.path.join(ROOT, 'craft', 'skills', 'expert-craft', 'scripts', 'phone'))
 try:
     import numpy as np
 except ImportError:
     sys.exit('SKIP: needs numpy')
-import builder as B, flashexperts as F, phonetrain as PT
+import builder as B, flashexperts as F, phonetrain as PT, native
 
 ok = True
 def check(name, cond, detail=''):
@@ -80,7 +81,7 @@ try:
     d3, mh3 = 64, F.hidden_per_page(64); fs = F.FlashStore(os.path.join(tmp, 'e.bin'), 256, d3, mh3, seed=1, create=True)
     ids3 = np.array([3, 7, 200]); ex = fs.load(ids3); check('3a never-used experts load as shared-pool up-projection and zero down-projection', ex.fresh.all() and not ex.dn.any() and ex.up.std() > 0)
     g = lambda s: rng.standard_normal((3, mh3, d3)).astype(np.float32) * s
-    gu, gd = g(1e-3), g(1e-3); w, acc = fs._step(ex, gu, gd, 0.05); fs.apply(ex, gu, gd, 0.05, rng=np.random.default_rng(2)); back = fs.load(ids3)
+    gu, gd = g(1e-3), g(1e-3); e0 = (fs.ema.copy(), fs.ema_n); w, acc = fs._step(ex, gu, gd, 0.05); fs.ema, fs.ema_n = e0; fs.apply(ex, gu, gd, 0.05, rng=np.random.default_rng(2)); back = fs.load(ids3)
     step = np.abs(w).max(-1, keepdims=True) / 127.0; err = np.abs(np.concatenate([back.up, back.dn], 1) - w)
     check('3b one update then reload agrees with the float result to one 8-bit step', (err <= step * 1.001 + 1e-9).all() and not back.fresh.any() and np.allclose(back.acc, acc),
           'max error %.2e, step %.2e' % (err.max(), step.max()))
@@ -124,6 +125,41 @@ try:
         used = big.materialized_bytes() / 1e9; touched = big.stats['pages_written'] * 4096 / 1e9
         check('6 a %.0fB-parameter expert file is sparse' % (lay['total_params'] / 1e9), 70 < apparent < 80 and used < 0.1 and used <= touched * 1.5 + 0.01,
               'apparent %.1f GB, on disk %.3f GB, %d experts created' % (apparent, used, big.stats['experts_created'])); big.close()
+    # ---- 7. native kernels against the NumPy reference
+    if native.lib() is None: print('SKIP 7 (%s)' % native.why())
+    else:
+        d7 = 64; mh7 = F.hidden_per_page(d7); r7 = np.random.default_rng(3)
+        A7 = F.FlashStore(os.path.join(tmp, 'n1.bin'), 4096, d7, mh7, seed=5, create=True)
+        L0 = F.FlashExpertLayer('t', d7, 64, A7, route='hash', orders=(1, 2, 3), vocab=50); L0.native = False; L0.lr_e = .01
+        P7 = L0.init_params(r7); P7['t.mg'][:] = r7.standard_normal(P7['t.mg'].shape) * .3
+        for _ in range(3):
+            L0.forward(P7, r7.standard_normal((256, d7)).astype(np.float32), train=True, ids=r7.integers(0, 50, (8, 32)))
+            L0.backward(P7, {k: np.zeros_like(v) for k, v in P7.items()}, r7.standard_normal((256, d7)).astype(np.float32))
+        A7.flush(); shutil.copy(os.path.join(tmp, 'n1.bin'), os.path.join(tmp, 'n2.bin'))
+        B7 = F.FlashStore(os.path.join(tmp, 'n2.bin'), 4096, d7, mh7, seed=5); B7.ema = A7.ema.copy(); B7.ema_n = A7.ema_n
+        LN = F.FlashExpertLayer('t', d7, 64, A7, route='hash', orders=(1, 2, 3), vocab=50); LN.lr_e = .01
+        LP = F.FlashExpertLayer('t', d7, 64, B7, route='hash', orders=(1, 2, 3), vocab=50); LP.native = False; LP.lr_e = .01
+        ids7 = r7.integers(0, 60, (8, 32)); x7 = r7.standard_normal((256, d7)).astype(np.float32); dy7 = r7.standard_normal((256, d7)).astype(np.float32)
+        LN.update = LP.update = False
+        yN, yP = LN.forward(P7, x7, train=True, ids=ids7), LP.forward(P7, x7, train=True, ids=ids7)
+        GN = {k: np.zeros_like(v) for k, v in P7.items()}; GP = {k: np.zeros_like(v) for k, v in P7.items()}; dN, dP = LN.backward(P7, GN, dy7), LP.backward(P7, GP, dy7)
+        rr = lambda a, b: float(np.abs(a - b).max() / (np.abs(b).max() + 1e-12))
+        gN = {e: (u, w) for e, u, w in zip(LN.grads[0][0].tolist(), LN.grads[0][1], LN.grads[0][2])}
+        gP = [(e, u, w) for ids_, us, ws in LP.grads for e, u, w in zip(ids_.tolist(), us, ws)]
+        eg = max(max(rr(gN[e][0], u), rr(gN[e][1], w)) for e, u, w in gP)
+        check('7a native forward, input gradient and expert gradients equal the NumPy reference', rr(yN, yP) < 1e-5 and rr(dN, dP) < 1e-5 and eg < 1e-4 and len(gN) == len(gP),
+              'y %.1e, dx %.1e, expert grads %.1e' % (rr(yN, yP), rr(dN, dP), eg))
+        LN.update = LP.update = True; u7 = np.unique(LN.hash_ids(ids7))
+        for L_ in (LN, LP): L_.forward(P7, x7, train=True, ids=ids7); L_.backward(P7, {k: np.zeros_like(v) for k, v in P7.items()}, dy7)
+        a7, b7 = A7.load(u7, count=False), B7.load(u7, count=False); wa, wb = np.concatenate([a7.up, a7.dn], 1), np.concatenate([b7.up, b7.dn], 1)
+        stp = np.abs(wb).max(-1, keepdims=True) / 127
+        check('7b a native update equals the NumPy update to within 8-bit stochastic rounding', bool((np.abs(wa - wb) <= 2 * stp + 1e-7).all()) and rr(a7.acc, b7.acc) < 1e-5,
+              'max difference %.2f quantisation steps' % float((np.abs(wa - wb) / (stp + 1e-12)).max())); A7.close(); B7.close()
+        Pa = {'w': r7.standard_normal((300, 70)).astype(np.float32), 'b': r7.standard_normal(70).astype(np.float32)}; Pb = {k: v.copy() for k, v in Pa.items()}; oa, ob = B.Adam(Pa), B.Adam(Pb)
+        for _ in range(5):
+            Ga = {k: r7.standard_normal(v.shape).astype(np.float32) for k, v in Pa.items()}; oa.step(Pa, Ga, 1e-2)
+            sv = B._native; B._native = lambda: None; ob.step(Pb, Ga, 1e-2); B._native = sv
+        check('7c native Adam step equals NumPy Adam', max(float(np.abs(Pa[k] - Pb[k]).max()) for k in Pa) < 1e-5)
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 print('ALL PASSED' if ok else 'SOME FAILED'); sys.exit(0 if ok else 1)

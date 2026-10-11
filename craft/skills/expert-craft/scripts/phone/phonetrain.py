@@ -102,14 +102,16 @@ def io_bench(folder, pages=20000, size_mb=512):
         except OSError: pass
 
 
-def bench(c, lay, seconds=6.0, folder='.'):
+def bench(c, lay, seconds=4.0, folder='.'):
     """tokens/second of the REAL trainer (dense backbone + expert layer, small file) on this device"""
     d = c['dim']; mh = F.hidden_per_page(d); nk = 128; path = os.path.join(folder, '.bench_experts.bin')
     st = F.FlashStore(path, nk * nk, d, mh, create=True)
     try:
         P = B.init_params(c); L = F.FlashExpertLayer(str(c['layers'] // 2), d, nk, st, heads=lay['heads'], topk=lay['topk'], route=lay['route'], orders=tuple(lay['orders']), vocab=c['vocab'])
         P.update(L.init_params(np.random.default_rng(0))); mem = {c['layers'] // 2: L}; opt = B.Adam(P, 1e-3)
-        data = np.random.default_rng(0).integers(0, c['vocab'], 20000); rng = np.random.default_rng(0); Bt, T = 8, 64; n = 0; t0 = time.time(); k = 0
+        data = np.random.default_rng(0).integers(0, c['vocab'], 20000); rng = np.random.default_rng(0); Bt, T = 16, 64
+        x, y = B.get_batch(data, Bt, T, rng); _, _, s = B.forward(P, c, x, y, cache=True, mem=mem); B.backward(P, c, s)   # warm up (compiles the kernels once)
+        n = 0; t0 = time.time(); k = 0
         while time.time() - t0 < seconds or k < 3:
             x, y = B.get_batch(data, Bt, T, rng); _, _, s = B.forward(P, c, x, y, cache=True, mem=mem); G = B.backward(P, c, s); opt.step(P, G, 1e-3); k += 1; n += Bt * T
         return n / (time.time() - t0)
@@ -123,14 +125,24 @@ def plan(target_params, minutes=600.0, home='.', vocab=2048, layers=1, topk=8, h
     target_params = float(target_params)
     if not (1e6 <= target_params <= MAX_PARAMS): raise ValueError('target must be between 1M and 70B parameters')
     dev = device_info(home); out = dict(device=dev, target_params=target_params, minutes=minutes)
-    # first guess at speed from the cores, refined by the real benchmark
-    guess = 400.0 * dev['cores'] / 4
     free = None if oversubscribe else dev['disk_free_gb']
-    c0 = backbone_for(guess * minutes * 60, vocab, width=width); lay0 = expert_layout(c0, target_params, layers, topk, heads, free, route, orders)
-    tps = bench(c0, lay0, folder=home) if run_bench else guess
+    rungs = B.ladder(vocab, 128)
+    if width or not run_bench:
+        c = backbone_for(400.0 * dev['cores'] / 4 * minutes * 60, vocab, width=width); lay = expert_layout(c, target_params, layers, topk, heads, free, route, orders)
+        tps = bench(c, lay, folder=home) if run_bench else 400.0 * dev['cores'] / 4
+    else:
+        # speed depends on the dense width: time per token ~ a + b * params. Measure two widths, then pick the largest width that still gets
+        # about 20 tokens per parameter in the time given (compute-optimal), and measure that one for the final numbers
+        lo, hi = rungs[0], rungs[3]
+        t_lo = 1.0 / bench(lo, expert_layout(lo, target_params, layers, topk, heads, free, route, orders), folder=home)
+        t_hi = 1.0 / bench(hi, expert_layout(hi, target_params, layers, topk, heads, free, route, orders), folder=home)
+        b_ = max((t_hi - t_lo) / (hi['params'] - lo['params']), 1e-15); a_ = max(t_lo - b_ * lo['params'], 0.0)
+        c = rungs[0]
+        for r in rungs:
+            if minutes * 60 / (a_ + b_ * r['params']) >= 20 * r['params']: c = r
+        c = dict(c); lay = expert_layout(c, target_params, layers, topk, heads, free, route, orders)
+        tps = 1.0 / t_lo if c['dim'] == lo['dim'] else (1.0 / t_hi if c['dim'] == hi['dim'] else bench(c, lay, folder=home))
     tokens = tps * minutes * 60
-    c = backbone_for(tokens, vocab, width=width); lay = expert_layout(c, target_params, layers, topk, heads, free, route, orders)
-    if c['params'] != c0['params'] and run_bench: tps = bench(c, lay, folder=home); tokens = tps * minutes * 60
     pages_tok = layers * lay['per_token']; bytes_tok = pages_tok * F.PAGE
     active = c['params'] + pages_tok * lay['params_per_expert']
     day_tb = tps * 86400 * bytes_tok / 1e12
@@ -158,7 +170,7 @@ def honest(p):
         'In %.0f minutes this phone processes about %s tokens (%s per second). Each expert is used about %.1f times in that time.' % (
             p['minutes'], fmt(p['tokens_affordable']), fmt(p['tokens_per_second']), p['visits_per_expert']),
         'Quality follows the tokens seen and the dense backbone, not the file size: expect a small-model level of text. More minutes and more text help; the huge expert pool adds capacity that fills up as training continues.',
-        'The file grows as experts are first used, up to %.0f GB. Training writes about %.0f GB of flash per hour (%.1f TB per day of nonstop training, about %.2f%% of the write life of a flash rated for %d TB, if that rating is right). Use --max-wear-gb to cap it.' % (
+        'The file grows as experts are first used, up to %.0f GB. Training rewrites up to %.0f GB of pages per hour (%.1f TB per day of nonstop training, %.2f%% of the life of a flash rated for %d TB). That is an upper bound: the system merges repeated writes to the same page, and phone-status shows the real amount written (on a Linux test PC it was about a third). Use --max-wear-gb to cap it.' % (
             p['file_gb'], p['tokens_per_second'] * 3600 * p['flash_kb_per_token_each_way'] * 1024 / 1e9, p['wear_tb_per_day'], p['wear_percent_of_assumed_life_per_day'], ASSUMED_TBW),
     ]
 
@@ -243,6 +255,16 @@ def _load_state(proj, P, opt, stores):
     return True
 
 
+def io_written():
+    """bytes this process really sent to storage (Linux/Android /proc/self/io); repeated writes to a page before the OS flushes it count once"""
+    try:
+        for line in open('/proc/self/io'):
+            if line.startswith('write_bytes:'): return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
+
 def train(proj, minutes=None, steps=None, min_battery=0, max_temp=0, max_wear_gb=None, save_every=120.0, log=print, stop=lambda: False, min_free_gb=None):
     pth = _paths(proj); meta = json.load(open(pth['meta'])); ids = np.load(pth['ids']).astype(np.int64)
     nv = max(20000, len(ids) // 50); tr, va = ids[:-nv], ids[-nv:]
@@ -252,6 +274,12 @@ def train(proj, minutes=None, steps=None, min_battery=0, max_temp=0, max_wear_gb
     horizon = meta['horizon']; Bt, T = meta['batch'], meta['seq']; step = meta['step']
     reserve = min_free_gb if min_free_gb is not None else max(1.0, 0.02 * shutil.disk_usage(proj).total / 1e9)
     t0 = time.time(); t_save = t0; stopped = 'finished'; tok0 = step * Bt * T; first_loss = last_loss = None
+    io0 = io_written(); pw0 = sum(s.stats['pages_written'] for s in stores); before = meta.get('flash_written_gb', 0.0)
+    def wear_gb():     # all sessions: real bytes written to storage when the system reports it, else every page write counted (an upper bound)
+        io = io_written()
+        now = (io - io0) / 1e9 if io is not None and io0 is not None else (sum(s.stats['pages_written'] for s in stores) - pw0) * F.PAGE / 1e9
+        meta['flash_written_gb'] = round(before + now, 3)
+        return before + now
     log('%s: %s parameters (%s on flash). step %d of %d%s' % (os.path.basename(proj), fmt(meta['plan']['total_params']), fmt(meta['experts']['total_params']), step, horizon, ' (resumed)' if resumed else ''))
     def val():
         r = np.random.default_rng(5); ls = []
@@ -264,7 +292,7 @@ def train(proj, minutes=None, steps=None, min_battery=0, max_temp=0, max_wear_gb
             if minutes and time.time() - t0 >= minutes * 60: stopped = 'time budget reached'; break
             free_gb = shutil.disk_usage(proj).free / 1e9      # a full disk kills a memory-mapped writer (SIGBUS), so stop while there is still room
             if free_gb < reserve: stopped = 'disk almost full (%.1f GB free); stopped safely, free some space and run again' % free_gb; break
-            w = sum(s.stats['pages_written'] for s in stores) * F.PAGE / 1e9
+            w = wear_gb()
             if max_wear_gb and w >= max_wear_gb: stopped = 'flash write budget reached (%.1f GB)' % w; break
             ok, why = power_ok(min_battery, max_temp)
             if not ok:
@@ -279,15 +307,15 @@ def train(proj, minutes=None, steps=None, min_battery=0, max_temp=0, max_wear_gb
             if step % 20 == 0 or step == horizon:
                 el = time.time() - t0; pr = sum(s.stats['pages_read'] for s in stores); pw = sum(s.stats['pages_written'] for s in stores)
                 rec = dict(step=step, loss=round(loss, 4), tokens=step * Bt * T, tok_s=round((step * Bt * T - tok0) / max(el, 1e-9), 0), pages_read=pr, pages_written=pw,
-                           experts_used=sum(s.stats['experts_created'] for s in stores), flash_written_gb=round(pw * F.PAGE / 1e9, 2), disk_gb=round(sum(s.materialized_bytes() for s in stores) / 1e9, 2))
+                           experts_used=sum(s.stats['experts_created'] for s in stores), page_writes_gb=round(pw * F.PAGE / 1e9, 2), flash_written_gb=round(wear_gb(), 2), disk_gb=round(sum(s.materialized_bytes() for s in stores) / 1e9, 2))
                 if step % 100 == 0 or step == horizon: rec['val_loss'] = round(val(), 4)
                 open(pth['log'], 'a').write(json.dumps(rec) + '\n'); log(json.dumps(rec))
             if time.time() - t_save > save_every: _save(proj, meta, P, opt, stores); t_save = time.time()
     except KeyboardInterrupt:
         stopped = 'interrupted'
-    _save(proj, meta, P, opt, stores)
+    wear_gb(); _save(proj, meta, P, opt, stores)
     res = dict(status=stopped, step=step, horizon=horizon, first_loss=first_loss, last_loss=last_loss, val_loss=round(val(), 4), seconds=round(time.time() - t0, 1),
-               flash_written_gb=round(sum(s.stats['pages_written'] for s in stores) * F.PAGE / 1e9, 2), disk_gb=round(sum(s.materialized_bytes() for s in stores) / 1e9, 2),
+               flash_written_gb=round(wear_gb(), 2), page_writes_gb=round(sum(s.stats['pages_written'] for s in stores) * F.PAGE / 1e9, 2), disk_gb=round(sum(s.materialized_bytes() for s in stores) / 1e9, 2),
                experts_used=sum(s.stats['experts_created'] for s in stores))
     for s in stores: s.close()
     return res

@@ -109,18 +109,33 @@ details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f
     <h1>Expert<em>Craft</em></h1>
     <p class="muted">Train a language model with up to <b>70 billion parameters</b> on your own phone. A small model stays in RAM. The other parameters live in millions of page-sized experts in a file on flash, and each word reads, trains and rewrites only a handful of them. No GPU, no account, no cloud.</p>
     <div class="row">
-      <a class="btn primary" href="#start">Start on your phone</a>
+      <a class="btn primary" href="#install">Give it to your AI</a>
+      <a class="btn" href="#start">Start by hand</a>
       <a class="btn" href="#plan">Plan for your phone</a>
       <a class="btn" href="#honest">What you really get</a>
       <a class="btn" href="https://github.com/Tharunmaks/Stream-/tree/claude/expertstream-moe-android-oegt59/craft" rel="noopener">Source on GitHub</a>
     </div>
   </section>
 
+  <section class="card hot" id="install">
+    <span class="eyebrow">Install as a skill · no MCP</span>
+    <h2>Give it to your AI in one step</h2>
+    <p class="muted">Expert Craft is a skill: a folder with instructions and the trainer that an AI agent reads and runs on your device. No server, no MCP, no account.</p>
+    <h3>Claude Code (PC, or Termux on the phone)</h3>
+    <div class="code"><pre id="i-cc">/plugin install expert-craft --marketplace Tharunmaks/Stream-</pre><button class="btn copy" data-copy="i-cc">Copy</button></div>
+    <p class="dim" style="font-size:13px">Older Claude Code: <span class="mono">/plugin marketplace add Tharunmaks/Stream-</span> then <span class="mono">/plugin install expert-craft@expertstream</span>. No GitHub SSH key on this device? Start Claude Code with <span class="mono">CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1</span>.</p>
+    <h3>Any agent that reads a skills folder</h3>
+    <div class="code"><pre id="i-sh">curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh</pre><button class="btn copy" data-copy="i-sh">Copy</button></div>
+    <p class="dim" style="font-size:13px">Installs into ~/.claude/skills/expert-craft. For another agent, pass its skills folder: <span class="mono">sh install-skill.sh ~/.agent/skills/expert-craft</span>. Apps that take a skill upload: <a href="expert-craft-skill.zip" download>expert-craft-skill.zip</a>.</p>
+    <h3>Or just tell your AI</h3>
+    <div class="code"><pre id="i-say" style="white-space:pre-wrap;padding-right:72px">Install the Expert Craft skill from github.com/Tharunmaks/Stream- (folder craft/skills/expert-craft), then use it to plan and train a 70B model on this phone and explain every step to me.</pre><button class="btn copy" data-copy="i-say">Copy</button></div>
+  </section>
+
   <section class="grid4" aria-label="How it works">
     <div class="card"><div class="num">1</div><h3>Small model in RAM</h3><p class="muted">An ordinary transformer of a few million parameters, trained the normal way with hand-written, gradient-checked backpropagation.</p></div>
     <div class="card"><div class="num">2</div><h3>Experts on flash</h3><p class="muted">Each expert is a tiny network that fills exactly one 4 KB flash page. About 18 million of them make 70 billion parameters. The file is sparse, so unused experts take no space.</p></div>
     <div class="card"><div class="num">3</div><h3>Routing by hash</h3><p class="muted">The last 1, 2 and 3 tokens each pick one expert by hash, so the same context always reaches the same page and every occurrence trains it (hashed n-gram memory, as in Engram and the Byte Latent Transformer). A learned product-key router is available with --route pk.</p></div>
-    <div class="card"><div class="num">4</div><h3>Train in place</h3><p class="muted">Only those 3 pages are read, updated (row-wise Adagrad, 8-bit stochastic rounding) and written back. The work per word is that of the small model.</p></div>
+    <div class="card"><div class="num">4</div><h3>Train in place</h3><p class="muted">Only those 3 pages are read, updated (row-wise Adagrad, 8-bit stochastic rounding) and written back by native kernels your device compiles for itself. The work per word is that of the small model.</p></div>
   </section>
 
   <section class="card hot" id="plan">
@@ -133,7 +148,7 @@ details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f
     <input type="range" id="f-range" min="0" max="1000" step="1" aria-label="Parameters wanted">
     <div class="grid2">
       <label class="dim" style="display:grid;gap:4px">Minutes of training <input id="f-min" type="number" min="5" step="5" value="600" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
-      <label class="dim" style="display:grid;gap:4px">Tokens per second on your phone <input id="f-tps" type="number" min="20" step="20" value="400" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
+      <label class="dim" style="display:grid;gap:4px">Tokens per second on your phone <input id="f-tps" type="number" min="20" step="20" value="1500" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
       <label class="dim" style="display:grid;gap:4px">Free storage, GB <input id="f-disk" type="number" min="1" step="5" value="100" style="background:var(--bg-2);color:var(--ink);border:1px solid var(--line-2);border-radius:10px;padding:8px"></label>
       <div class="dim" style="font-size:13px;align-self:end">The speed is a guess. Run <span class="mono">phone-plan</span> on your phone: it measures the real figure and your storage speed.</div>
     </div>
@@ -182,7 +197,7 @@ python3 craft/expertcraft.py phone-status mymodel</pre><button class="btn copy" 
       <li><b>Cost:</b> every word reads and rewrites 3 flash pages (12 KB). Nonstop training therefore writes terabytes per day; the planner shows it and <span class="mono">--max-wear-gb</span> caps it. Use a charger and keep the phone cool.</li>
       <li><b>Not done:</b> there is no GPU path for the experts and no export to the fast C engine yet; a trained model is used with <span class="mono">phone-sample</span> (NumPy). It was tested on a 4-core Linux PC, not yet on a phone, so measure with <span class="mono">phone-plan</span> first.</li>
     </ul>
-    <h3>Measured on the test PC</h3>
+    <h3>Measured on the test PC (v2)</h3>
     @@RESULTS@@
   </section>
 

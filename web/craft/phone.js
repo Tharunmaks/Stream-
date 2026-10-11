@@ -7,7 +7,7 @@
     var b = document.createElement("button"); b.textContent = p[0]; b.dataset.t = p[1]; b.onclick = function () { fT = p[1]; fset(); }; $("f-presets").appendChild(b);
   });
   function fset() {
-    var minutes = Math.max(5, +$("f-min").value || 600), tps = Math.max(1, +$("f-tps").value || 400), free = Math.max(1, +$("f-disk").value || 100);
+    var minutes = Math.max(5, +$("f-min").value || 600), tps = Math.max(1, +$("f-tps").value || 1500), free = Math.max(1, +$("f-disk").value || 100);
     var tokens = tps * 60 * minutes, bb = BB[0];
     BB.forEach(function (r) { if (r[0] <= tokens / 20) bb = r; });
     var bp = bb[0], per = 2 * bb[3] * bb[1], shrunk = false, want = fT;

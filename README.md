@@ -16,22 +16,17 @@ model and opens the same app backed by the native engine
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
 ```
 
-**Expert Craft: train a model with up to 70 billion parameters on your phone, free** (`craft/expertcraft.py`, Python + NumPy, no GPU, no account):
+**Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
+Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
+`curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.
+Or tell your AI: *"Install the Expert Craft skill from github.com/Tharunmaks/Stream- (folder craft/skills/expert-craft) and train a 70B model on this phone."*
 
-```sh
-pkg install -y python python-numpy                                     # Termux
-python3 craft/expertcraft.py phone-plan 70e9 --minutes 600             # measures your phone, explains what 70B means on it
-python3 craft/expertcraft.py phone-train mymodel --dataset tinystories --params 70e9 --minutes 600 --max-wear-gb 2000
-python3 craft/expertcraft.py phone-sample mymodel --prompt "Once upon a time"
-```
-
-How: a small dense model stays in RAM; up to 70 billion more parameters live in ~18 million page-sized experts (one 4 KB flash page each, 8-bit) in a
-sparse file. The last 1, 2 and 3 tokens each pick an expert by hash, and only those 3 pages per word are read, trained (row-wise Adagrad, stochastic
-rounding) and written back, so the work per word is that of the small model. Measured on the test PC, same data and steps: the 3.0M dense model reaches
-validation perplexity 13.6, and with 1.0B parameters of experts 10.7 (21% lower). Honest limits: each word uses about 0.004% of the parameters, quality
-follows the tokens your phone can process (tens of millions a day) and the dense model rather than the file size, nonstop training writes terabytes of
-flash per day (the plan prints it, `--max-wear-gb` caps it), and it is tested on a PC, not yet on a phone. Details, numbers and the free Colab/Kaggle
-route: [`craft/README.md`](craft/README.md) and `docs/craft.html`.
+How: a small dense model stays in RAM; up to 70 billion more parameters live in ~18 million page-sized experts (one 4 KB page each, 8-bit) in a
+sparse file. The last 1, 2 and 3 tokens each pick an expert by hash, and only those 3 pages per word are read, trained and written back by native
+C kernels the device compiles for itself (NumPy fallback). v2 measured on a 4-core PC with the full 70B-parameter file: 6,534 tokens/s (v1: ~1,150),
+and v1's 8-minute quality reached in 110 s instead of 463 s. Experts lower validation perplexity by 21% against the same dense model alone.
+Honest limits: each word uses under 0.005% of the parameters, quality follows the tokens processed and the dense model rather than the file
+size, training rewrites flash pages (capped by `--max-wear-gb`), and it is not yet measured on a phone. Details: [`craft/README.md`](craft/README.md).
 
 **Speed (measured, 4-core x86 test PC, SmolLM2-135M, greedy, `es_chat -j 4`, default build, no `-march=native`)**:
 Q4_K_M 107-111 tok/s, Q4_0 103-114 tok/s (127-138 with Turbo on), Q8_0 about 90 tok/s (memory-bandwidth bound).
@@ -114,8 +109,9 @@ docs/index.html       copy of web/index.html for GitHub Pages
 scripts/setup.sh      install, build, download, import, start the app
 scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
 scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
-craft/expertcraft.py  Expert Craft command line (phone training, free-GPU planning, project scaffolding)
-craft/phone/          Flash Experts: flashexperts.py (layer + flash store), builder.py (trainer), phonetrain.py (plan/train/sample)
+craft/skills/expert-craft/  Expert Craft skill: SKILL.md, reference.md, scripts/ (CLI, Flash Experts, C kernels, trainer)
+.claude-plugin/       plugin marketplace (Claude Code: /plugin install expert-craft --marketplace Tharunmaks/Stream-)
+scripts/install-skill.sh  installs the skill for any agent that reads a skills folder
 scripts/test_flash_experts.py  tests: gradients, 8-bit store, resume, 70B sparse file
 docs/expert_format.md format spec and design notes
 ```

@@ -1,0 +1,14 @@
+{
+  "name": "expertstream",
+  "description": "ExpertStream tools: Expert Craft trains language models with up to 70 billion parameters on your own phone, for free.",
+  "owner": {
+    "name": "Tharunmaks"
+  },
+  "plugins": [
+    {
+      "name": "expert-craft",
+      "source": "./craft",
+      "description": "Train a model with up to 70B parameters on a phone or PC, free: small dense model in RAM + page-sized Flash Experts on storage, native kernels."
+    }
+  ]
+}

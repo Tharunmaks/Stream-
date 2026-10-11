@@ -73,13 +73,16 @@ class _Base:
         size of its gradient instead of always being a full-size step."""
         mh = self.mh; ge = np.empty((len(ex.ids), 2 * mh), self.dtype)
         np.einsum('umd,umd->um', gup, gup, out=ge[:, :mh]); np.einsum('umd,umd->um', gdn, gdn, out=ge[:, mh:]); ge /= self.d
-        cur = np.array([ge[:, :mh].mean(), ge[:, mh:].mean()]) if len(ge) else self.ema
-        self.ema = cur if self.ema_n == 0 else 0.98 * self.ema + 0.02 * cur; self.ema_n += 1
-        acc0 = np.where(ex.acc > 0, ex.acc, np.repeat(self.ema, mh).astype(self.dtype)[None, :])
+        start = ge if self.ema_n == 0 else np.repeat(self.ema, mh).astype(self.dtype)[None, :]
+        acc0 = np.where(ex.acc > 0, ex.acc, start)
+        if len(ge): self.ema_update(ge[:, :mh].mean(), ge[:, mh:].mean())
         acc = acc0 + ge; inv = lr / (np.sqrt(acc) + 1e-30)
         w = np.empty((len(ex.ids), 2 * mh, self.d), self.dtype)
         np.subtract(ex.up, gup * inv[:, :mh, None], out=w[:, :mh]); np.subtract(ex.dn, gdn * inv[:, mh:, None], out=w[:, mh:])
         return w, acc
+
+    def ema_update(self, up, dn):
+        cur = np.array([up, dn]); self.ema = cur if self.ema_n == 0 else 0.98 * self.ema + 0.02 * cur; self.ema_n += 1
 
     def meta(self): return dict(ema=self.ema.tolist(), ema_n=self.ema_n, stats=self.stats)
     def set_meta(self, m): self.ema = np.array(m['ema']); self.ema_n = m['ema_n']; self.stats.update(m.get('stats', {}))
@@ -111,7 +114,7 @@ class DenseStore(_Base):
 class FlashStore(_Base):
     """the real thing: one 4096-byte page per expert in a sparse file, 8-bit weights with per-row scale, memory-mapped.
     layout of a page: magic u32 | pad u32 | scale f32[2mh] | acc f32[2mh] | int8 up[mh*d] | int8 down[mh*d] | zero padding"""
-    def __init__(self, path, n_experts, d, mh, seed=0, create=False, threads=4, page=PAGE):
+    def __init__(self, path, n_experts, d, mh, seed=0, create=False, threads=None, page=PAGE):
         super().__init__(n_experts, d, mh, seed)
         self.path, self.page = path, page
         need = 8 + 16 * mh + 2 * mh * d
@@ -125,6 +128,16 @@ class FlashStore(_Base):
                 os.remove(path); raise OSError("this folder does not support sparse files (SD card / FAT?). Use the phone's internal storage (Termux home).")
         elif os.path.getsize(path) != size: raise ValueError('%s has the wrong size for %d experts' % (path, self.E))
         self.mm = np.memmap(path, dtype=np.uint8, mode='r+', shape=(self.E, page))
+        # experts are read at random: turn off the kernel's readahead, which would otherwise read (or zero-fill) 16-32 neighbouring pages
+        # for every page we touch and multiply flash traffic by that much
+        try:
+            import mmap as _m
+            self.mm._mmap.madvise(_m.MADV_RANDOM)
+        except Exception:
+            pass
+        if threads is None:
+            from layout import fast_cores
+            threads = fast_cores()
         self.pool_threads = ThreadPoolExecutor(threads) if threads > 1 else None
         self.so, self.ao, self.po = 8, 8 + 8 * mh, 8 + 16 * mh      # byte offsets of scales, acc, payload
 
@@ -165,6 +178,10 @@ class FlashStore(_Base):
         self._write(ex.ids, raw)
         self.stats['experts_created'] += int(ex.fresh.sum()); self.stats['applies'] += 1; self.stats['pages_written'] += n
 
+    def native_args(self):
+        """base pointer, page size, d, mh, shared pool, pool rows, seed: what the C kernels need to read and write pages"""
+        return (self.mm.ctypes.data, self.page, self.d, self.mh, self.pool.ctypes.data, len(self.pool), self.seed)
+
     def materialized_bytes(self):
         return os.stat(self.path).st_blocks * 512
 
@@ -196,6 +213,7 @@ class FlashExpertLayer:
         self.p, self.d, self.nk, self.H, self.K, self.kc, self.store, self.chunk = prefix, d, nk, heads, topk, kc, store, chunk
         self.route_kind, self.orders, self.vocab = route, tuple(orders), vocab
         self.mh = store.mh; self.last = None; self.lr_e = 0.05; self.update = True; self.grads = None; self.ctx_ids = None
+        self.native = None          # None: use the C kernels when the store is a FlashStore and they compile; False: always NumPy
         self.M = len(self.orders) if route == 'hash' else heads * topk       # experts used per token
 
     def init_params(self, rng):
@@ -246,9 +264,62 @@ class FlashExpertLayer:
         for u0 in range(0, len(uniq), self.chunk):
             u1 = min(len(uniq), u0 + self.chunk); yield u0, u1, int(first[u0]), int(first[u1]) if u1 < len(uniq) else npairs
 
+    # --- native (C) path: same maths, one pass per expert, threads over disjoint experts
+    def _lib(self):
+        if self.native is False or not isinstance(self.store, FlashStore): return None
+        import native
+        return native.lib()
+
+    def _split(self, first, npairs):
+        """contiguous group ranges with about the same number of pairs, one per thread"""
+        T = self.store.pool_threads._max_workers if self.store.pool_threads else 1; G = len(first)
+        cuts = np.unique(np.searchsorted(first, np.linspace(0, npairs, T + 1)[1:-1]))
+        b = [0] + [int(c) for c in cuts if 0 < c < G] + [G]
+        return [(b[i], b[i + 1]) for i in range(len(b) - 1) if b[i + 1] > b[i]]
+
+    def _run(self, fn, jobs):
+        pool = self.store.pool_threads
+        return list(pool.map(fn, jobs)) if pool and len(jobs) > 1 else [fn(j) for j in jobs]
+
+    def _native_forward(self, L, x, eid):
+        n, M, d, mh = len(x), eid.shape[1], self.d, self.mh
+        ids = eid.reshape(-1); order = np.argsort(ids, kind='stable'); s = np.ascontiguousarray(ids[order], np.int64)
+        first = np.flatnonzero(np.r_[True, s[1:] != s[:-1]]); tok = np.ascontiguousarray(order // M, np.int64)
+        x = np.ascontiguousarray(x, np.float32); P = len(ids); z = np.empty((P, mh), np.float32); o = np.empty((P, d), np.float32)
+        gs = np.r_[first, P].astype(np.int64); A = self.store.native_args()
+        def job(r):
+            return L.fx_forward(*A, int(gs[r[0]]), int(gs[r[1]]), s.ctypes.data, tok.ctypes.data, x.ctypes.data, z.ctypes.data, o.ctypes.data)
+        reads = sum(self._run(job, self._split(first, P)))
+        st = self.store.stats; st['loads'] += 1; st['pages_read'] += int(reads)
+        ou = np.empty_like(o); ou[order] = o
+        return ou.reshape(n, M, d), ('native', order, s, gs, tok, z, x)
+
+    def _native_backward(self, L, cache, do):
+        _, order, s, gs, tok, z, x = cache; n, M, d = do.shape; mh = self.mh; P = len(order); G = len(gs) - 1
+        dog = np.ascontiguousarray(do.reshape(-1, d)[order], np.float32); dxs = np.empty((P, d), np.float32)
+        st = self.store; A = st.native_args(); em = st.ema if st.ema_n > 0 else np.array([-1.0, -1.0])
+        seed = int(np.random.default_rng().integers(1, 2 ** 63)); upd = 1 if self.update else 0
+        gout = np.empty((G, 2 * mh, d), np.float32) if not upd else None
+        jobs = self._split(gs[:-1], P); stats = [np.zeros(3) for _ in jobs]
+        def job(k):
+            g0, g1 = jobs[k]; go = gout[g0:g1].ctypes.data if gout is not None else None
+            return L.fx_backward(*A, g0, g1, gs.ctypes.data, s.ctypes.data, tok.ctypes.data, x.ctypes.data, z.ctypes.data, dog.ctypes.data, dxs.ctypes.data,
+                                 float(self.lr_e), float(em[0]), float(em[1]), seed, upd, go, stats[k].ctypes.data)
+        created = sum(self._run(job, list(range(len(jobs)))))
+        tot = np.sum(stats, 0)
+        if upd:
+            if tot[2] > 0: st.ema_update(tot[0] / tot[2], tot[1] / tot[2])
+            st.stats['experts_created'] += int(created); st.stats['applies'] += 1; st.stats['pages_written'] += G
+        else:
+            self.grads = [(s[gs[:-1]], np.ascontiguousarray(gout[:, :mh]), np.ascontiguousarray(gout[:, mh:]))]
+        dxu = np.empty_like(dxs); dxu[order] = dxs
+        return dxu.reshape(n, M, d).sum(1)
+
     # --- expert evaluation shared by both routers
     def _experts_forward(self, x, eid):
         """x (n,d), eid (n,M) expert ids -> outputs ou (n,M,d) in token order, plus what backward needs"""
+        L = self._lib() if x.dtype == np.float32 else None
+        if L is not None: return self._native_forward(L, x, eid)
         n, M, d, mh = len(x), eid.shape[1], self.d, self.mh
         ids = eid.reshape(-1); order, uniq, first, inv = self._groups(ids); tok = order // M
         dt = x.dtype; o = np.empty((len(ids), d), dt); z = np.empty((len(ids), mh), dt)
@@ -261,6 +332,7 @@ class FlashExpertLayer:
 
     def _experts_backward(self, x, cache, do):
         """do (n,M,d): gradient w.r.t. each expert's output. Trains the experts in place; returns dx (n,d) through the experts"""
+        if isinstance(cache[0], str): return self._native_backward(self._lib(), cache, do)
         order, uniq, first, inv, tok, z, o = cache; n, M, d = do.shape; dt = x.dtype
         dos = do.reshape(-1, d)[order]; dxs = np.empty((len(order), d), dt); self.grads = []
         for u0, u1, p0, p1 in self._chunks(uniq, first, len(order)):

@@ -202,16 +202,35 @@ def backward(P, c, st):
 def get_batch(data, B, T, rng):
     ix = rng.integers(0, len(data) - T - 1, B); x = np.stack([data[i:i + T] for i in ix]); y = np.stack([data[i + 1:i + T + 1] for i in ix]); return x.astype(np.int64), y.astype(np.int64)
 
+def _native():
+    try:
+        import native
+        return native.lib()
+    except Exception:
+        return None
+
 class Adam:
     def __init__(self, P, lr=3e-3, wd=0.01, b1=0.9, b2=0.95):
         self.m = {k: np.zeros_like(v) for k, v in P.items()}; self.v = {k: np.zeros_like(v) for k, v in P.items()}; self.t = 0; self.lr, self.wd, self.b1, self.b2 = lr, wd, b1, b2
     def step(self, P, G, lr, clip=1.0):
-        gn = math.sqrt(sum(float((g * g).sum()) for g in G.values())); sc = min(1.0, clip / (gn + 1e-9)); self.t += 1
-        for k in P:
-            g = G[k] * sc; self.m[k] = self.b1 * self.m[k] + (1 - self.b1) * g; self.v[k] = self.b2 * self.v[k] + (1 - self.b2) * g * g
-            mh = self.m[k] / (1 - self.b1 ** self.t); vh = self.v[k] / (1 - self.b2 ** self.t)
-            P[k] -= lr * (mh / (np.sqrt(vh) + 1e-8) + (self.wd * P[k] if P[k].ndim == 2 else 0))
+        gn = math.sqrt(sum(float(np.vdot(g, g)) for g in G.values())); sc = min(1.0, clip / (gn + 1e-9)); self.t += 1
+        L = _native()
+        if L is not None:      # fused C kernel: one pass per tensor, no temporaries
+            bc1, bc2 = 1 - self.b1 ** self.t, 1 - self.b2 ** self.t
+            for k in P:
+                w, g, m, v = P[k], G[k], self.m[k], self.v[k]
+                if w.dtype == np.float32 and g.dtype == np.float32 and w.flags.c_contiguous and g.flags.c_contiguous and m.flags.c_contiguous and v.flags.c_contiguous:
+                    L.fx_adam(w.ctypes.data, g.ctypes.data, m.ctypes.data, v.ctypes.data, w.size, sc, self.b1, self.b2, bc1, bc2, lr, self.wd if w.ndim == 2 else 0.0, 1e-8)
+                    continue
+                self._one(k, P, G, lr, sc)
+            return gn
+        for k in P: self._one(k, P, G, lr, sc)
         return gn
+
+    def _one(self, k, P, G, lr, sc):
+        g = G[k] * sc; self.m[k] = self.b1 * self.m[k] + (1 - self.b1) * g; self.v[k] = self.b2 * self.v[k] + (1 - self.b2) * g * g
+        mh = self.m[k] / (1 - self.b1 ** self.t); vh = self.v[k] / (1 - self.b2 ** self.t)
+        P[k] -= lr * (mh / (np.sqrt(vh) + 1e-8) + (self.wd * P[k] if P[k].ndim == 2 else 0))
 
 def cosine_lr(step, total, peak, warm=50, floor=0.1):
     if step < warm: return peak * (step + 1) / warm

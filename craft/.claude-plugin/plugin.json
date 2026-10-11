@@ -1,0 +1,10 @@
+{
+  "name": "expert-craft",
+  "description": "Train a language model from scratch for free on your own phone or computer, with up to 70 billion parameters (Flash Experts: a small dense model in RAM plus millions of page-sized experts on flash, trained in place by native kernels).",
+  "author": {
+    "name": "Tharunmaks"
+  },
+  "homepage": "https://tharunmaks.github.io/Stream-/craft.html",
+  "repository": "https://github.com/Tharunmaks/Stream-",
+  "keywords": ["training", "llm", "phone", "termux", "mixture-of-experts", "on-device", "free"]
+}
