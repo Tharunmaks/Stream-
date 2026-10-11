@@ -57,6 +57,17 @@ int  es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
  * when the answer is complete. */
 int  es_engine_next(char *buf, int cap);
 void es_engine_turn_stats(es_turn_stats *s);
+/* ---- Instant: serve apps that resend the whole conversation every turn ----
+ * Render a conversation with the model's own chat template, ending where the assistant answers. roles: system, user, assistant.
+ * Returns the text length, or -1 if it does not fit in cap. */
+typedef struct { const char *role, *content; } es_msg;
+int  es_engine_render(const es_msg *m, int n, char *out, size_t cap);
+/* Make the context exactly `text` (already formatted; BOS added when the model wants it), reusing the longest prefix that is already
+ * computed: the live conversation, or one of a few parked ones (ES_KV_SLOTS, default 4; ES_PREFIX_CACHE=0 turns reuse off).
+ * Only the new tokens are read. *cached = prompt tokens reused. Returns the prompt token count, or -1 if it does not fit. */
+int  es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, void (*progress)(int done, int total, void *ud), void *ud);
+/* Tokens in a text (for trimming a conversation to the context). */
+int  es_engine_count(const char *text);
 /* Testing: feed ids one by one and write each position's logits. */
 int  es_engine_dump_logits(const int32_t *ids, int n, FILE *f);
 long es_rss_mb(void);

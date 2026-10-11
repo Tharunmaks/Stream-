@@ -110,9 +110,10 @@ static void mv_task(int tid, int n, void *arg) {
             while (c >= base + JOBS[j].rows) { base += JOBS[j].rows; j++; }   /* chunks only move forward */
             long b = e < base + JOBS[j].rows ? e : base + JOBS[j].rows;
             /* nb > 1: several activations share this chunk of weight rows, so the weights are read from memory once */
-            for (int q = 0; q < JOBS[j].nb; q++)
-                es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base),
-                          JOBS[j].a + q, JOBS[j].y + (size_t)q * JOBS[j].ys, SCRATCH[tid]);
+            if (JOBS[j].nb > 1)   /* weights unpacked once for all activations (bit-identical to one at a time) */
+                es_matvec_multi(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base), JOBS[j].a, JOBS[j].nb, JOBS[j].y, JOBS[j].ys, SCRATCH[tid]);
+            else
+                es_matvec(JOBS[j].type, JOBS[j].w, JOBS[j].cols, (int)(c - base), (int)(b - base), JOBS[j].a, JOBS[j].y, SCRATCH[tid]);
             c = b;
         }
     }
@@ -693,6 +694,7 @@ static void detect_template(void) {
     const char *t = es_gguf_str(&G, "tokenizer.chat_template");
     if (!t) return;
     if (strstr(t, "<|im_start|>")) TEMPLATE_KIND = "chatml";
+    else if (strstr(t, "<|start_header_id|>")) TEMPLATE_KIND = "llama3";
     else if (strstr(t, "<|user|>")) TEMPLATE_KIND = "tulu";
 }
 static void format_turn(char *out, size_t cap, const char *msg, int first) {
@@ -702,10 +704,34 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
         snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", first ? "" : "<|im_end|>\n", msg);
     else if (!strcmp(TEMPLATE_KIND, "tulu"))
         snprintf(out, cap, "%s<|user|>\n%s\n<|assistant|>\n", first ? "<|endoftext|>" : "<|endoftext|>\n", msg);
+    else if (!strcmp(TEMPLATE_KIND, "llama3"))
+        snprintf(out, cap, "%s<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", first ? "<|begin_of_text|>" : "<|eot_id|>", msg);
     else
         snprintf(out, cap, "%s", msg);
 }
 
+
+int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
+    size_t o = 0;
+#define PUT(...) do { int w_ = snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__); if (w_ < 0 || o + (size_t)w_ >= cap) return -1; o += (size_t)w_; } while (0)
+    const int chatml = !strcmp(TEMPLATE_KIND, "chatml"), tulu = !strcmp(TEMPLATE_KIND, "tulu"), llama3 = !strcmp(TEMPLATE_KIND, "llama3");
+    if (tulu) PUT("<|endoftext|>");
+    if (llama3) PUT("<|begin_of_text|>");
+    for (int i = 0; i < n; i++) {
+        const char *r = m[i].role ? m[i].role : "user", *c = m[i].content ? m[i].content : "";
+        const int sys = !strcmp(r, "system") || !strcmp(r, "developer"), as = !strcmp(r, "assistant");
+        if (chatml) PUT("<|im_start|>%s\n%s<|im_end|>\n", sys ? "system" : as ? "assistant" : "user", c);
+        else if (llama3) PUT("<|start_header_id|>%s<|end_header_id|>\n\n%s<|eot_id|>", sys ? "system" : as ? "assistant" : "user", c);
+        else if (tulu) { if (as) PUT("<|assistant|>\n%s<|endoftext|>\n", c); else PUT("<|%s|>\n%s\n", sys ? "system" : "user", c); }
+        else PUT("%s%s\n\n", sys ? "" : as ? "Assistant: " : "User: ", c);
+    }
+    if (chatml) PUT("<|im_start|>assistant\n");
+    else if (llama3) PUT("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    else if (tulu) PUT("<|assistant|>\n");
+    else PUT("Assistant:");
+#undef PUT
+    return (int)o;
+}
 
 /* ---------------- public API ---------------- */
 static int POS, FIRST = 1, GEN, MAX_NEW = 256, TOP_K = 40, DONE;
@@ -1088,6 +1114,251 @@ int es_engine_next(char *buf, int cap) {
     POS += m + 1;
     GEN++;
     return es_tok_piece(T, next, 0, buf, cap);
+}
+
+/* ---------------- Instant: prefix reuse ----------------
+ * Apps resend the whole conversation each turn. Reading it again costs time proportional to its length before the first word appears;
+ * here only the part after the longest already-computed prefix is read. The KV rows of up to ES_KV_SLOTS other conversations are parked in
+ * RAM (apps send side requests such as "write a title for this chat" between turns, which would otherwise evict the main conversation). */
+typedef struct { int n; int32_t *ids; float *k, *v; uint64_t used; } kv_slot;
+static kv_slot *SLOTS; static int NSLOTS = -1, PREFIX_ON = 1; static size_t SLOT_BYTES_MAX; static uint64_t SLOT_CLOCK;
+
+static int lcp(const int32_t *a, int na, const int32_t *b, int nb) {
+    int i = 0, m = na < nb ? na : nb;
+    while (i < m && a[i] == b[i]) i++;
+    return i;
+}
+static void slots_init(void) {
+    if (NSLOTS >= 0) return;
+    const char *e = getenv("ES_PREFIX_CACHE"); PREFIX_ON = !(e && !strcmp(e, "0"));
+    e = getenv("ES_KV_SLOTS"); NSLOTS = e ? atoi(e) : 4; if (NSLOTS < 0) NSLOTS = 0; if (NSLOTS > 64) NSLOTS = 64;
+    e = getenv("ES_KV_SLOT_MB"); SLOT_BYTES_MAX = (size_t)(e ? atol(e) : 1024) * 1048576u;
+    SLOTS = calloc((size_t)(NSLOTS ? NSLOTS : 1), sizeof *SLOTS);
+}
+static size_t slots_bytes(void) { size_t b = 0; const size_t row = sizeof(float) * (size_t)M.n_layer * M.n_head_kv * M.head_dim * 2; for (int i = 0; i < NSLOTS; i++) b += (size_t)SLOTS[i].n * row; return b; }
+static void slot_free(kv_slot *s) { free(s->ids); free(s->k); free(s->v); memset(s, 0, sizeof *s); }
+/* park the live conversation's first n positions (never into slot `keep`) */
+static void slot_save(int n, int keep) {
+    if (NSLOTS <= 0 || n < 32) return;
+    const int kvd = M.n_head_kv * M.head_dim; const size_t per = sizeof(float) * (size_t)M.n_layer * kvd;
+    for (int i = 0; i < NSLOTS; i++)                     /* already parked (or a longer version of it): just refresh */
+        if (SLOTS[i].n >= n && lcp(SLOTS[i].ids, SLOTS[i].n, HIST, n) == n) { SLOTS[i].used = ++SLOT_CLOCK; return; }
+    int w = -1;
+    for (int i = 0; i < NSLOTS; i++) if (i != keep && (w < 0 || SLOTS[i].used < SLOTS[w].used)) w = i;
+    if (w < 0) return;
+    slot_free(&SLOTS[w]);
+    while (slots_bytes() + (size_t)n * per * 2 > SLOT_BYTES_MAX) {   /* stay inside the RAM budget: drop the oldest */
+        int o = -1;
+        for (int i = 0; i < NSLOTS; i++) if (i != keep && SLOTS[i].n && (o < 0 || SLOTS[i].used < SLOTS[o].used)) o = i;
+        if (o < 0) return;
+        slot_free(&SLOTS[o]);
+    }
+    kv_slot *s = &SLOTS[w];
+    s->ids = malloc(sizeof(int32_t) * (size_t)n); s->k = malloc(per * (size_t)n); s->v = malloc(per * (size_t)n);
+    if (!s->ids || !s->k || !s->v) { slot_free(s); return; }
+    memcpy(s->ids, HIST, sizeof(int32_t) * (size_t)n);
+    for (int l = 0; l < M.n_layer; l++) {
+        memcpy(s->k + (size_t)l * n * kvd, KC + (size_t)l * M.ctx * kvd, sizeof(float) * (size_t)n * kvd);
+        memcpy(s->v + (size_t)l * n * kvd, VC + (size_t)l * M.ctx * kvd, sizeof(float) * (size_t)n * kvd);
+    }
+    s->n = n; s->used = ++SLOT_CLOCK;
+}
+static void slot_restore(int i, int upto) {
+    kv_slot *s = &SLOTS[i]; const int kvd = M.n_head_kv * M.head_dim, n = upto < s->n ? upto : s->n;
+    memcpy(HIST, s->ids, sizeof(int32_t) * (size_t)n);
+    for (int l = 0; l < M.n_layer; l++) {
+        memcpy(KC + (size_t)l * M.ctx * kvd, s->k + (size_t)l * s->n * kvd, sizeof(float) * (size_t)n * kvd);
+        memcpy(VC + (size_t)l * M.ctx * kvd, s->v + (size_t)l * s->n * kvd, sizeof(float) * (size_t)n * kvd);
+    }
+    s->used = ++SLOT_CLOCK; POS = n;
+}
+
+/* ---------------- Instant: prompt prefixes kept on disk ----------------
+ * The KV rows of an expensive prompt (by default: at least 256 new tokens that took 0.5 s or more to read) are written in the
+ * background to $ES_KV_DIR (default ~/.expertstream/kv). Any later request that starts the same way (same app system prompt, same long
+ * document, the same chat after a restart) loads those rows instead of reading the text again. Lossless: the rows are stored as they are.
+ * ES_KV_DISK=0 turns it off, ES_KV_DISK_MB is the space budget (2048, oldest files go first). */
+#ifndef __EMSCRIPTEN__
+#include <dirent.h>
+#include <sys/stat.h>
+#include <utime.h>
+typedef struct { char path[1280]; int n; int32_t *ids; time_t mt; } kv_file;
+static kv_file *DF; static int NDF, DF_ON = -1, DF_MIN = 256; static double DF_MIN_S = 0.5; static size_t DF_BUDGET;
+static char DF_DIR[900]; static uint64_t FINGER; static pthread_mutex_t DF_MU = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long long STAT_DISK_LOADS, STAT_DISK_SAVES;
+
+static uint64_t fnv(uint64_t h, const void *p, size_t n) { const unsigned char *c = p; for (size_t i = 0; i < n; i++) { h ^= c[i]; h *= 0x100000001b3ull; } return h; }
+static void df_init(void) {
+    if (DF_ON >= 0) return;
+    const char *e = getenv("ES_KV_DISK"); DF_ON = !(e && !strcmp(e, "0"));
+    e = getenv("ES_KV_DISK_MB"); DF_BUDGET = (size_t)(e ? atol(e) : 2048) * 1048576u;
+    e = getenv("ES_KV_DISK_MIN"); if (e) DF_MIN = atoi(e);
+    e = getenv("ES_KV_DISK_MIN_S"); if (e) DF_MIN_S = atof(e);
+    if (!DF_ON) return;
+    /* the rows only fit the exact same weights: fingerprint the model by its shape, name and tensor table */
+    uint64_t h = 0xcbf29ce484222325ull; const int shape[6] = {M.n_layer, M.n_embd, M.n_head, M.n_head_kv, M.head_dim, M.n_vocab};
+    h = fnv(h, shape, sizeof shape); h = fnv(h, INFO.name, strlen(INFO.name)); h = fnv(h, &G.file_size, sizeof G.file_size);
+    for (uint64_t i = 0; i < G.n_tensors; i++) { h = fnv(h, G.t[i].name, strlen(G.t[i].name)); h = fnv(h, &G.t[i].offset, sizeof G.t[i].offset); }
+    FINGER = h;
+    e = getenv("ES_KV_DIR");
+    if (e) snprintf(DF_DIR, sizeof DF_DIR, "%s", e);
+    else { const char *home = getenv("HOME"); char d[800]; snprintf(d, sizeof d, "%s/.expertstream", home ? home : "."); mkdir(d, 0700); snprintf(DF_DIR, sizeof DF_DIR, "%s/kv", d); }
+    mkdir(DF_DIR, 0700);
+    DIR *dir = opendir(DF_DIR); if (!dir) { DF_ON = 0; return; }
+    struct dirent *de; char pre[32]; snprintf(pre, sizeof pre, "%016llx-", (unsigned long long)FINGER);
+    while ((de = readdir(dir))) {
+        if (strncmp(de->d_name, pre, 17) || !strstr(de->d_name, ".eskv")) continue;
+        kv_file f = {0}; snprintf(f.path, sizeof f.path, "%s/%s", DF_DIR, de->d_name);
+        FILE *fp = fopen(f.path, "rb"); if (!fp) continue;
+        char mg[8]; uint64_t fg; int hdr[3];
+        if (fread(mg, 1, 8, fp) == 8 && !memcmp(mg, "ESKV1\0\0\0", 8) && fread(&fg, 8, 1, fp) == 1 && fg == FINGER && fread(hdr, sizeof(int), 3, fp) == 3 &&
+            hdr[1] == M.n_layer && hdr[2] == M.n_head_kv * M.head_dim && hdr[0] > 0 && hdr[0] <= 1 << 20) {
+            f.n = hdr[0]; f.ids = malloc(sizeof(int32_t) * (size_t)f.n);
+            if (fread(f.ids, sizeof(int32_t), (size_t)f.n, fp) == (size_t)f.n) {
+                struct stat st; f.mt = stat(f.path, &st) ? 0 : st.st_mtime;
+                DF = realloc(DF, sizeof *DF * (size_t)(NDF + 1)); DF[NDF++] = f;
+            } else free(f.ids);
+        }
+        fclose(fp);
+    }
+    closedir(dir);
+}
+static size_t df_file_bytes(int n) { return 28 + 4 * (size_t)n + 2 * sizeof(float) * (size_t)n * M.n_layer * M.n_head_kv * M.head_dim; }
+typedef struct { int n; int32_t *ids; float *k, *v; } df_job;
+static void *df_writer(void *arg) {               /* background: write, then add to the index and keep inside the budget */
+    df_job *j = arg; const int kvd = M.n_head_kv * M.head_dim;
+    uint64_t h = fnv(0xcbf29ce484222325ull, j->ids, sizeof(int32_t) * (size_t)j->n);
+    char path[1100], tmp[1120]; snprintf(path, sizeof path, "%s/%016llx-%016llx.eskv", DF_DIR, (unsigned long long)FINGER, (unsigned long long)h);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *fp = fopen(tmp, "wb"); int ok = fp != NULL;
+    if (ok) {
+        const int hdr[3] = {j->n, M.n_layer, kvd};
+        ok = fwrite("ESKV1\0\0\0", 1, 8, fp) == 8 && fwrite(&FINGER, 8, 1, fp) == 1 && fwrite(hdr, sizeof(int), 3, fp) == 3 &&
+             fwrite(j->ids, sizeof(int32_t), (size_t)j->n, fp) == (size_t)j->n &&
+             fwrite(j->k, sizeof(float), (size_t)j->n * M.n_layer * kvd, fp) == (size_t)j->n * M.n_layer * kvd &&
+             fwrite(j->v, sizeof(float), (size_t)j->n * M.n_layer * kvd, fp) == (size_t)j->n * M.n_layer * kvd;
+        ok = (fclose(fp) == 0) && ok;
+    }
+    if (ok && rename(tmp, path) == 0) {
+        pthread_mutex_lock(&DF_MU);
+        for (int i = 0; i < NDF; i++)                                       /* an older, shorter version of the same prompt is now redundant */
+            if (DF[i].n <= j->n && lcp(DF[i].ids, DF[i].n, j->ids, j->n) == DF[i].n && strcmp(DF[i].path, path)) { unlink(DF[i].path); free(DF[i].ids); DF[i--] = DF[--NDF]; }
+        int dup = 0; for (int i = 0; i < NDF; i++) if (!strcmp(DF[i].path, path)) dup = 1;
+        if (!dup) { DF = realloc(DF, sizeof *DF * (size_t)(NDF + 1)); kv_file f = {0}; snprintf(f.path, sizeof f.path, "%s", path); f.n = j->n; f.ids = j->ids; j->ids = NULL; f.mt = time(NULL); DF[NDF++] = f; }
+        for (;;) {                                                          /* stay inside the disk budget: remove the least recently used */
+            size_t tot = 0; int o = -1;
+            for (int i = 0; i < NDF; i++) { tot += df_file_bytes(DF[i].n); if (o < 0 || DF[i].mt < DF[o].mt) o = i; }
+            if (tot <= DF_BUDGET || NDF <= 1) break;
+            unlink(DF[o].path); free(DF[o].ids); DF[o] = DF[--NDF];
+        }
+        STAT_DISK_SAVES++;
+        pthread_mutex_unlock(&DF_MU);
+    } else unlink(tmp);
+    free(j->ids); free(j->k); free(j->v); free(j);
+    return NULL;
+}
+static void df_save(int n) {                      /* copy the first n positions now (fast), write them later (slow) */
+    if (!DF_ON || n < 32 || df_file_bytes(n) > DF_BUDGET) return;
+    pthread_mutex_lock(&DF_MU);
+    for (int i = 0; i < NDF; i++) if (DF[i].n >= n - 16 && lcp(DF[i].ids, DF[i].n, HIST, n) >= n - 16) { pthread_mutex_unlock(&DF_MU); return; }   /* already there */
+    pthread_mutex_unlock(&DF_MU);
+    const int kvd = M.n_head_kv * M.head_dim; const size_t per = (size_t)n * kvd;
+    df_job *j = calloc(1, sizeof *j); j->n = n;
+    j->ids = malloc(sizeof(int32_t) * (size_t)n); j->k = malloc(sizeof(float) * per * M.n_layer); j->v = malloc(sizeof(float) * per * M.n_layer);
+    if (!j->ids || !j->k || !j->v) { free(j->ids); free(j->k); free(j->v); free(j); return; }
+    memcpy(j->ids, HIST, sizeof(int32_t) * (size_t)n);
+    for (int l = 0; l < M.n_layer; l++) {
+        memcpy(j->k + (size_t)l * per, KC + (size_t)l * M.ctx * kvd, sizeof(float) * per);
+        memcpy(j->v + (size_t)l * per, VC + (size_t)l * M.ctx * kvd, sizeof(float) * per);
+    }
+    pthread_t th; if (pthread_create(&th, NULL, df_writer, j) == 0) pthread_detach(th); else df_writer(j);
+}
+/* longest stored prefix of toks: returns its length and the file index in *which */
+static int df_best(const int32_t *toks, int nt, int *which) {
+    int bl = 0; *which = -1;
+    pthread_mutex_lock(&DF_MU);
+    for (int i = 0; i < NDF; i++) { const int l = lcp(DF[i].ids, DF[i].n, toks, nt); if (l > bl) { bl = l; *which = i; } }
+    pthread_mutex_unlock(&DF_MU);
+    return bl;
+}
+static int df_load(int i, int upto) {             /* read the first upto rows of file i into the live context; 0 on success */
+    pthread_mutex_lock(&DF_MU);
+    if (i >= NDF) { pthread_mutex_unlock(&DF_MU); return -1; }
+    kv_file f = DF[i]; int32_t *ids = malloc(sizeof(int32_t) * (size_t)f.n); memcpy(ids, DF[i].ids, sizeof(int32_t) * (size_t)f.n); DF[i].mt = time(NULL);
+    pthread_mutex_unlock(&DF_MU);
+    const int kvd = M.n_head_kv * M.head_dim, n = upto < f.n ? upto : f.n; int ok = 1;
+    FILE *fp = fopen(f.path, "rb"); if (!fp) { free(ids); return -1; }
+    const long base = 28 + 4L * f.n; const size_t lay = (size_t)f.n * kvd * sizeof(float);
+    for (int l = 0; l < M.n_layer && ok; l++) {
+        ok = fseek(fp, base + (long)(l * lay), SEEK_SET) == 0 && fread(KC + (size_t)l * M.ctx * kvd, sizeof(float), (size_t)n * kvd, fp) == (size_t)n * kvd;
+        ok = ok && fseek(fp, base + (long)((M.n_layer + l) * lay), SEEK_SET) == 0 && fread(VC + (size_t)l * M.ctx * kvd, sizeof(float), (size_t)n * kvd, fp) == (size_t)n * kvd;
+    }
+    fclose(fp);
+    if (ok) { memcpy(HIST, ids, sizeof(int32_t) * (size_t)n); POS = n; utime(f.path, NULL); STAT_DISK_LOADS++; }
+    free(ids);
+    return ok ? 0 : -1;
+}
+#else
+static void df_init(void) {}
+static void df_save(int n) { (void)n; }
+static int df_best(const int32_t *t, int n, int *w) { (void)t; (void)n; *w = -1; return 0; }
+static int df_load(int i, int u) { (void)i; (void)u; return -1; }
+static int DF_MIN = 256; static double DF_MIN_S = 0.5;
+#endif
+
+int es_engine_count(const char *text) {
+    static int32_t tmp[1 << 16];
+    return es_tok_encode(T, text, 1, tmp, (int)(sizeof tmp / sizeof tmp[0]));
+}
+
+int es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, void (*progress)(int, int, void *), void *ud) {
+    static int32_t *toks; static int cap;
+    slots_init(); df_init();
+    if (!toks) { cap = M.ctx + 64; toks = malloc(sizeof(int32_t) * (size_t)cap); }
+    memset(&ST, 0, sizeof ST);
+    int nt = 0;
+    if (!strcmp(TEMPLATE_KIND, "raw") && es_tok_add_bos(T) && es_tok_bos(T) >= 0) toks[nt++] = es_tok_bos(T);   /* chat templates carry their own */
+    const int m = es_tok_encode(T, text, 1, toks + nt, cap - nt);
+    if (m < 0) return -1;
+    nt += m;
+    if (nt < 1 || nt + 1 >= M.ctx) return -1;
+    int keep = 0;
+    if (PREFIX_ON) {
+        keep = lcp(HIST, POS, toks, nt);
+        int best = -1, bl = keep;
+        for (int i = 0; i < NSLOTS; i++) { const int l = SLOTS[i].n ? lcp(SLOTS[i].ids, SLOTS[i].n, toks, nt) : 0; if (l > bl + 16) { bl = l; best = i; } }
+        int dfi; const int dl = df_best(toks, nt, &dfi);  /* a longer start saved on disk (same system prompt, or before a restart)? */
+        const int use_disk = dfi >= 0 && dl > bl + 64;
+        if (POS - keep >= 64 && (best >= 0 || use_disk || keep < POS)) slot_save(POS, best);   /* a different conversation is about to be overwritten: park it */
+        if (use_disk && df_load(dfi, dl) == 0) keep = dl;
+        else if (best >= 0) { slot_restore(best, bl); keep = bl; }
+        if (keep >= nt) keep = nt - 1;                    /* the last prompt token is read again to get its next-word scores */
+    }
+    POS = keep;
+    for (int i = keep; i < nt && i - keep < ids_cap; i++) ids[i - keep] = toks[i];   /* the ids that will be read now */
+    if (progress) progress(0, nt - keep, ud);
+    H0 = STAT_HITS; M0 = STAT_MISS; R0 = STAT_READ_MB; W0 = STAT_WAIT_S;
+    const uint64_t tp = es_now_ns();
+    for (int i = keep; i < nt; i++) HIST[i] = toks[i];
+    ACCN = ACCI = 0;
+    const int32_t *rest = toks + keep; const int nr = nt - keep;
+    if (BATCH_OK) {
+        for (int i = 0; i < nr; i += BMAX) {
+            const int cnt = nr - i < BMAX ? nr - i : BMAX, last = i + cnt == nr;
+            forward_n(rest + i, cnt, POS, last ? cnt - 1 : cnt);
+            POS += cnt;
+            if (last) memcpy(LOGITS, BLOG, sizeof(float) * (size_t)M.n_vocab);
+            if (progress) progress(i + cnt, nr, ud);
+        }
+    } else
+        for (int i = 0; i < nr; i++) { TRACE_TOKEN = POS; forward(rest[i], POS++, i == nr - 1); if (progress) progress(i + 1, nr, ud); }
+    ST.prompt_tokens = nt;
+    ST.prompt_s = (es_now_ns() - tp) / 1e9;
+    if (PREFIX_ON && nr >= DF_MIN && ST.prompt_s >= DF_MIN_S) df_save(nt);   /* expensive to read: keep it on disk for next time */
+    GEN = 0; DONE = 0; FIRST = 0;
+    T_GEN0 = es_now_ns();
+    if (cached) *cached = keep;
+    return nt;
 }
 
 int es_engine_dump_logits(const int32_t *ids, int n, FILE *f) {

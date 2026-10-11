@@ -12,7 +12,7 @@ ifeq ($(ARCH),aarch64)
 DOTPROD_FLAGS ?= -march=armv8.2-a+dotprod
 endif
 
-BIN  = es_gen es_bench es_kbench es_run es_import es_chat es_serve
+BIN  = es_gen es_bench es_kbench es_run es_import es_chat es_serve es_mtest
 HDRS = $(wildcard src/*.h) tools/es_common.h
 CORE = src/es_io.c src/es_cpu.c src/es_q2k.c src/es_compute.c src/es_cache.c
 
@@ -43,8 +43,11 @@ ENGINE = src/es_engine.c src/es_gguf.c src/es_quant.c src/es_tok.c
 es_chat: tools/es_chat.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_chat.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 
-es_serve: tools/es_serve.c
-	$(CC) $(CFLAGS) -o $@ tools/es_serve.c $(LDFLAGS) $(LDLIBS)
+es_serve: tools/es_serve.c tools/es_json.h $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_serve.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
+
+es_mtest: tools/es_mtest.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_mtest.c $(CORE) src/es_quant.c es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 
 clean:
 	rm -f $(BIN) *.o

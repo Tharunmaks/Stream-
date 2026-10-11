@@ -40,6 +40,8 @@ void es_act_prepare(es_act *a, const float *x, int cols, es_block_q8_K *q8_buf);
 /* y[r] = dot(W[r], x) for r in [r0, r1). scratch holds `cols` floats. */
 void es_matvec(uint32_t type, const void *W, int cols, int r0, int r1, const es_act *a,
                float *y, float *scratch);
+/* Several activations against the same rows (prompt batches): bit-identical to calling es_matvec for each, faster. */
+void es_matvec_multi(uint32_t type, const void *W, int cols, int r0, int r1, const es_act *a, int na, float *y, size_t ystride, float *scratch);
 /* Bytes of one row of `cols` weights of this type. */
 size_t es_row_bytes(uint32_t type, int cols);
 

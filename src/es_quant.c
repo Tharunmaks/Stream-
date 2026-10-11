@@ -658,6 +658,181 @@ AVX2 static void avx_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_b
         out[r] = s;
     }
 }
+/* ---- several activations against the same rows (batched prompt reading, Turbo checks) ----
+ * The weights of a few rows are unpacked once into thread-local scratch; then every activation runs exactly the arithmetic of the
+ * single-activation kernel above (the same operations in the same order), so results are bit-identical. What is saved is unpacking the
+ * same weights again for every activation, which is most of the work for 4-bit, 5-bit and 6-bit rows. */
+static _Thread_local uint8_t *MB; static _Thread_local size_t MBCAP;
+static uint8_t *mb_get(size_t n) {
+    n = (n + 63) & ~(size_t)63;
+    if (n > MBCAP) { free(MB); MB = aligned_alloc(64, n); MBCAP = MB ? n : 0; }
+    return MB;
+}
+AVX2 static void avx_q5_0_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 22; const __m128i m = _mm_set1_epi8(15); const __m256i ones = _mm256_set1_epi8(1);
+    const __m256i shufc = _mm256_setr_epi8(0,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1, 2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3);
+    const __m256i bitm = _mm256_setr_epi8(1,2,4,8,16,32,64,(char)128,1,2,4,8,16,32,64,(char)128, 1,2,4,8,16,32,64,(char)128,1,2,4,8,16,32,64,(char)128);
+    uint8_t *U = mb_get((size_t)4 * nb * 32 + (size_t)4 * nb * sizeof(float)); float *D = (float *)(U + (size_t)4 * nb * 32);
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const blk_q5_0 *x = (const blk_q5_0 *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) {
+                uint32_t qh; memcpy(&qh, x[b].qh, 4);
+                const __m128i q = _mm_loadu_si128((const __m128i *)x[b].qs);
+                const __m256i nib = _mm256_set_m128i(_mm_and_si128(_mm_srli_epi16(q, 4), m), _mm_and_si128(q, m));
+                const __m256i sel = _mm256_and_si256(_mm256_shuffle_epi8(_mm256_set1_epi32((int)qh), shufc), bitm);
+                const __m256i hb = _mm256_and_si256(_mm256_cmpeq_epi8(sel, bitm), _mm256_set1_epi8(16));
+                _mm256_store_si256((__m256i *)(U + ((size_t)i * nb + b) * 32), _mm256_or_si256(nib, hb));
+                D[i * nb + b] = fp16_hw(x[b].d);
+            }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_blk_q80 *y = A[qa].q80; float *out = Y + (size_t)qa * ys;
+            if (nr == 4) {
+                __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+                for (int b = 0; b < nb; b++) {
+                    const __m256i yv = _mm256_loadu_si256((const __m256i *)y[b].qs); const float yd = y[b].d;
+                    const __m256i sy16 = _mm256_slli_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(ones, yv), _mm256_set1_epi16(1)), 4);
+#define Q5M(acc, i) acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_load_si256((const __m256i *)(U + ((size_t)(i) * nb + b) * 32)), yv), _mm256_set1_epi16(1)), sy16)), _mm256_set1_ps(D[(i) * nb + b] * yd), acc)
+                    Q5M(a0, 0); Q5M(a1, 1); Q5M(a2, 2); Q5M(a3, 3);
+                }
+                out[r] = hsum_ps(a0); out[r + 1] = hsum_ps(a1); out[r + 2] = hsum_ps(a2); out[r + 3] = hsum_ps(a3);
+            } else {
+                for (int i = 0; i < nr; i++) {
+                    __m256 acc = _mm256_setzero_ps();
+                    for (int b = 0; b < nb; b++) {
+                        const __m256i yv = _mm256_loadu_si256((const __m256i *)y[b].qs);
+                        const __m256i sy16 = _mm256_slli_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(ones, yv), _mm256_set1_epi16(1)), 4);
+                        const float yd = y[b].d;
+                        Q5M(acc, i);
+                    }
+                    out[r + i] = hsum_ps(acc);
+                }
+            }
+#undef Q5M
+        }
+    }
+}
+AVX2 static void avx_q4_0_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 18; const __m128i m = _mm_set1_epi8(15); const __m256i ones = _mm256_set1_epi8(1);
+    uint8_t *U = mb_get((size_t)4 * nb * 32 + (size_t)4 * nb * sizeof(float)); float *D = (float *)(U + (size_t)4 * nb * 32);
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const blk_q4_0 *x = (const blk_q4_0 *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) { _mm256_store_si256((__m256i *)(U + ((size_t)i * nb + b) * 32), q4_nib(x + b, m)); D[i * nb + b] = fp16_hw(x[b].d); }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_blk_q80 *y = A[qa].q80; float *out = Y + (size_t)qa * ys;
+#define Q4M(acc, i) acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_load_si256((const __m256i *)(U + ((size_t)(i) * nb + b) * 32)), yv), _mm256_set1_epi16(1)), sy8)), _mm256_set1_ps(D[(i) * nb + b] * yd), acc)
+            if (nr == 4) {
+                __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+                for (int b = 0; b < nb; b++) {
+                    const __m256i yv = _mm256_loadu_si256((const __m256i *)y[b].qs); const float yd = y[b].d;
+                    const __m256i sy8 = _mm256_slli_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(ones, yv), _mm256_set1_epi16(1)), 3);
+                    Q4M(a0, 0); Q4M(a1, 1); Q4M(a2, 2); Q4M(a3, 3);
+                }
+                out[r] = hsum_ps(a0); out[r + 1] = hsum_ps(a1); out[r + 2] = hsum_ps(a2); out[r + 3] = hsum_ps(a3);
+            } else {
+                for (int i = 0; i < nr; i++) {
+                    __m256 acc = _mm256_setzero_ps();
+                    for (int b = 0; b < nb; b++) {
+                        const __m256i yv = _mm256_loadu_si256((const __m256i *)y[b].qs);
+                        const __m256i sy8 = _mm256_slli_epi32(_mm256_madd_epi16(_mm256_maddubs_epi16(ones, yv), _mm256_set1_epi16(1)), 3);
+                        const float yd = y[b].d;
+                        Q4M(acc, i);
+                    }
+                    out[r + i] = hsum_ps(acc);
+                }
+            }
+#undef Q4M
+        }
+    }
+}
+/* K-quants: one row at a time like the single kernels; a group of 4 rows is unpacked, then every activation replays the row maths */
+typedef struct { float d, dmin; uint8_t sc[8], mn[8]; } k4_meta;
+AVX2 static void avx_q4_K_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 144; const __m256i m = _mm256_set1_epi8(15);
+    uint8_t *U = mb_get((size_t)4 * nb * 256 + (size_t)4 * nb * sizeof(k4_meta)); k4_meta *K = (k4_meta *)(U + (size_t)4 * nb * 256);
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const blk_q4_K *x = (const blk_q4_K *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) {
+                k4_meta *k = &K[i * nb + b];
+                for (int j = 0; j < 8; j++) scale_min_k4(j, x[b].scales, &k->sc[j], &k->mn[j]);
+                k->d = fp16f(x[b].d); k->dmin = fp16f(x[b].dmin);
+                const uint8_t *q = x[b].qs; uint8_t *o = U + ((size_t)i * nb + b) * 256;
+                for (int c = 0; c < 4; c++, q += 32) {
+                    const __m256i qq = _mm256_loadu_si256((const __m256i *)q);
+                    _mm256_store_si256((__m256i *)(o + 64 * c), _mm256_and_si256(qq, m));
+                    _mm256_store_si256((__m256i *)(o + 64 * c + 32), _mm256_and_si256(_mm256_srli_epi16(qq, 4), m));
+                }
+            }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_block_q8_K *y = A[qa].q8; float *out = Y + (size_t)qa * ys;
+            for (int i = 0; i < nr; i++) {
+                float s = 0;
+                for (int b = 0; b < nb; b++) {
+                    const k4_meta *k = &K[i * nb + b]; const uint8_t *o = U + ((size_t)i * nb + b) * 256; const int8_t *q8 = y[b].qs;
+                    __m256i acc = _mm256_setzero_si256(); int mins = 0;
+                    for (int c = 0; c < 4; c++, q8 += 64) {
+                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_load_si256((const __m256i *)(o + 64 * c)), _mm256_loadu_si256((const __m256i *)q8)), _mm256_set1_epi16(k->sc[2 * c])));
+                        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_load_si256((const __m256i *)(o + 64 * c + 32)), _mm256_loadu_si256((const __m256i *)(q8 + 32))), _mm256_set1_epi16(k->sc[2 * c + 1])));
+                        mins += k->mn[2 * c] * (y[b].bsums[4 * c] + y[b].bsums[4 * c + 1]) + k->mn[2 * c + 1] * (y[b].bsums[4 * c + 2] + y[b].bsums[4 * c + 3]);
+                    }
+                    s += y[b].d * (k->d * (float)hsum_epi32(acc) - k->dmin * (float)mins);
+                }
+                out[r + i] = s;
+            }
+        }
+    }
+}
+AVX2 static void avx_q6_K_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 210; const __m256i m15 = _mm256_set1_epi8(15), m3 = _mm256_set1_epi8(3);
+    uint8_t *U = mb_get((size_t)4 * nb * 256 + (size_t)4 * nb * 20); uint8_t *M6 = U + (size_t)4 * nb * 256;   /* per block: 16 scales + d */
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const blk_q6_K *x = (const blk_q6_K *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) {
+                const uint8_t *ql = x[b].ql, *qh = x[b].qh; uint8_t *o = U + ((size_t)i * nb + b) * 256;
+                for (int h = 0; h < 2; h++, ql += 64, qh += 32, o += 128) {
+                    const __m256i a0 = _mm256_loadu_si256((const __m256i *)ql), a1 = _mm256_loadu_si256((const __m256i *)(ql + 32)), hh = _mm256_loadu_si256((const __m256i *)qh);
+                    _mm256_store_si256((__m256i *)o, _mm256_or_si256(_mm256_and_si256(a0, m15), _mm256_slli_epi16(_mm256_and_si256(hh, m3), 4)));
+                    _mm256_store_si256((__m256i *)(o + 32), _mm256_or_si256(_mm256_and_si256(a1, m15), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hh, 2), m3), 4)));
+                    _mm256_store_si256((__m256i *)(o + 64), _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(a0, 4), m15), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hh, 4), m3), 4)));
+                    _mm256_store_si256((__m256i *)(o + 96), _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(a1, 4), m15), _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hh, 6), m3), 4)));
+                }
+                uint8_t *mm = M6 + ((size_t)i * nb + b) * 20; memcpy(mm, x[b].scales, 16); const float d = fp16f(x[b].d); memcpy(mm + 16, &d, 4);
+            }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_block_q8_K *y = A[qa].q8; float *out = Y + (size_t)qa * ys;
+            for (int i = 0; i < nr; i++) {
+                float s = 0;
+                for (int b = 0; b < nb; b++) {
+                    const uint8_t *o = U + ((size_t)i * nb + b) * 256, *mm = M6 + ((size_t)i * nb + b) * 20; const int8_t *sc = (const int8_t *)mm, *q8 = y[b].qs;
+                    float d; memcpy(&d, mm + 16, 4);
+                    __m256i acc = _mm256_setzero_si256(); int corr = 0;
+                    for (int h = 0; h < 2; h++, sc += 8, q8 += 128, o += 128) {
+                        for (int k = 0; k < 4; k++) {
+                            const __m256i p = _mm256_maddubs_epi16(_mm256_load_si256((const __m256i *)(o + 32 * k)), _mm256_loadu_si256((const __m256i *)(q8 + 32 * k)));
+                            const __m256i sv = _mm256_set_m128i(_mm_set1_epi16(sc[2 * k + 1]), _mm_set1_epi16(sc[2 * k]));
+                            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(p, sv));
+                            const int g = (h * 8 + 2 * k);
+                            corr += sc[2 * k] * y[b].bsums[g] + sc[2 * k + 1] * y[b].bsums[g + 1];
+                        }
+                    }
+                    s += y[b].d * d * (float)(hsum_epi32(acc) - 32 * corr);
+                }
+                out[r + i] = s;
+            }
+        }
+    }
+}
 static int HAVE_AVX2 = -1;
 #endif
 
@@ -667,6 +842,7 @@ void es_mv_q4_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *
 void es_mv_q5_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *);
 void es_mv_q4_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 void es_mv_q6_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+int es_mv_multi_neon(uint32_t, const uint8_t *, int, int, int, const es_act *, int, float *, size_t);
 void es_mv_q3_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 void es_mv_q5_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 static int HAVE_DOT = -1;
@@ -822,6 +998,31 @@ static void wmv_q6_K(const uint8_t *w, int cols, int r0, int r1, const es_block_
     }
 }
 #endif
+
+#if (defined(__x86_64__) && !defined(__EMSCRIPTEN__)) || defined(__aarch64__)
+static int NO_MULTI = -1;   /* ES_NO_MULTI=1: one activation at a time (for comparisons) */
+#endif
+/* several activations against rows [r0, r1): y + q * ys receives activation q's results. Same numbers as calling es_matvec for each. */
+void es_matvec_multi(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, int na, float *y, size_t ys, float *scratch) {
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+    if (HAVE_AVX2 < 0) { __builtin_cpu_init(); HAVE_AVX2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c") && !getenv("ES_NO_AVX2"); }
+    if (NO_MULTI < 0) NO_MULTI = getenv("ES_NO_MULTI") != NULL;
+    if (HAVE_AVX2 && na > 1 && !NO_MULTI) {
+        int q80 = 1, q8 = 1;
+        for (int i = 0; i < na; i++) { q80 &= a[i].q80 != NULL; q8 &= a[i].q8 != NULL; }
+        if (t == GGML_Q5_0 && q80) { if (mb_get((size_t)4 * (cols / 32) * 36)) { avx_q5_0_multi(W, cols, r0, r1, a, na, y, ys); return; } }
+        else if (t == GGML_Q4_0 && q80) { if (mb_get((size_t)4 * (cols / 32) * 36)) { avx_q4_0_multi(W, cols, r0, r1, a, na, y, ys); return; } }
+        else if (t == GGML_Q4_K && q8) { if (mb_get((size_t)4 * (cols / 256) * (256 + sizeof(k4_meta)))) { avx_q4_K_multi(W, cols, r0, r1, a, na, y, ys); return; } }
+        else if (t == GGML_Q6_K && q8) { if (mb_get((size_t)4 * (cols / 256) * 276)) { avx_q6_K_multi(W, cols, r0, r1, a, na, y, ys); return; } }
+    }
+#endif
+#if defined(__aarch64__)
+    if (HAVE_DOT < 0) HAVE_DOT = es_has_dotprod();
+    if (NO_MULTI < 0) NO_MULTI = getenv("ES_NO_MULTI") != NULL;
+    if (HAVE_DOT && na > 1 && !NO_MULTI && es_mv_multi_neon(t, W, cols, r0, r1, a, na, y, ys)) return;
+#endif
+    for (int i = 0; i < na; i++) es_matvec(t, W, cols, r0, r1, a + i, y + (size_t)i * ys, scratch);
+}
 
 void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, float *y,
                float *scratch) {

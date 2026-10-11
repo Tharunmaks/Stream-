@@ -6,16 +6,26 @@ const Brain = {
   worker: null, subs: new Set(), stage: '',
   on(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
   emit() { this.subs.forEach(f => { try { f(); } catch (e) { } }); },
-  async detectNative() {
-    if (!/^https?:$/.test(location.protocol)) return null;
-    try {
-      const c = new AbortController(), t = setTimeout(() => c.abort(), 1500);
-      const r = await fetch('/api/status', { signal: c.signal }); clearTimeout(t);
-      if (!r.ok) return null;
-      const j = await r.json(); if (!j || !j.model) return null;
-      this.native = j; this.mode = 'native'; this.info = j; this.name = j.model; this.ready = true; this.emit();
-      return j;
-    } catch (e) { return null; }
+  base: '',            // '' = this page is served by es_serve; else the address of a local es_serve (Instant), e.g. http://127.0.0.1:8080
+  /* Use the native engine when one is running: first the server this page came from, then a local Instant server
+     (es_serve listens on 127.0.0.1 and allows this site by CORS), so the hosted website gets native speed too. */
+  async detectNative(url) {
+    const tries = url ? [url] : [];
+    if (!url && /^https?:$/.test(location.protocol)) tries.push('');
+    if (!url && store.get('nativeAuto', 1)) tries.push(store.get('nativeUrl', 'http://127.0.0.1:8080'));
+    for (const base of [...new Set(tries)]) {
+      if (base === '' && !/^https?:$/.test(location.protocol)) continue;
+      try {
+        const c = new AbortController(), t = setTimeout(() => c.abort(), 1500);
+        const r = await fetch(base.replace(/\/$/, '') + '/api/status', { signal: c.signal, cache: 'no-store' }); clearTimeout(t);
+        if (!r.ok) continue;
+        const j = await r.json(); if (!j || !j.model) continue;
+        if (this.mode === 'web') this.close();
+        this.base = base.replace(/\/$/, ''); this.native = j; this.mode = 'native'; this.info = j; this.name = j.model; this.ready = true; this.emit();
+        return j;
+      } catch (e) { }
+    }
+    return null;
   },
   relaxed() {
     if (this._rs === undefined) {
@@ -84,7 +94,7 @@ const Brain = {
       });
       else {
         this.ctl = new AbortController();
-        const r = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text, signal: this.ctl.signal });
+        const r = await fetch(this.base + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text, signal: this.ctl.signal });
         if (!r.ok) throw new Error('server said HTTP ' + r.status);
         const rd = r.body.getReader(), dec = new TextDecoder(); let buf = '';
         for (;;) {
@@ -104,6 +114,6 @@ const Brain = {
   stop() { this.stopped = true; if (this.ctl) { try { this.ctl.abort(); } catch (e) { } } },
   async reset() {
     if (this.mode === 'web' && this.worker) this.worker.postMessage({ type: 'reset' });
-    else if (this.mode === 'native') { try { await fetch('/api/reset', { method: 'POST' }); } catch (e) { } }
+    else if (this.mode === 'native') { try { await fetch(this.base + '/api/reset', { method: 'POST' }); } catch (e) { } }
   },
 };

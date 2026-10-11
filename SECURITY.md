@@ -22,7 +22,14 @@ Include steps to reproduce. We aim to answer within a few days.
 - Downloads (`--dataset`, `--url`) must be `https://`. No shell is ever invoked with user text.
 - Flash Experts write only inside the project folder. The wear meter and `--max-wear-gb` limit how much flash a run may write.
 
-**Native app server (`es_serve`)**: binds 127.0.0.1 only and rejects foreign `Host` and `Origin` headers.
+**ExpertStream Instant (`es_serve`)**
+- Binds 127.0.0.1 unless started with `--lan`. Local mode refuses foreign `Host` names (DNS rebinding).
+- Browsers: requests carrying an `Origin` are answered only for local pages, `https://tharunmaks.github.io` and origins given with
+  `--cors`; everything else gets 403. Allowed origins get CORS and Private Network Access headers.
+- `--lan`: every request from another device needs `Authorization: Bearer <key>`; the key is created once in `~/.expertstream/key` (mode 600).
+- Request bodies are capped at 16 MB; JSON is parsed by a bounded parser (depth 64); no shell is ever invoked with request data.
+- Saved prompt caches (`~/.expertstream/kv`, mode 700) hold the model's internal state for prompts you sent: treat them like chat history.
+  Delete the folder to remove them, or run with `ES_KV_DISK=0`.
 
 ## Things to know
 - Model files are data, but a malicious GGUF could try to crash the engine; load files you trust.

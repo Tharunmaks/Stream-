@@ -2,6 +2,32 @@
 const REPO = 'https://github.com/Tharunmaks/Stream-.git', BRANCH = 'claude/expertstream-moe-android-oegt59';
 function cmdBlock(text) { return h('div', { style: 'position:relative' }, h('pre', { class: 'cmd' }, text), h('button', { class: 'btn sm', style: 'position:absolute;top:6px;right:6px', onclick: () => copyText(text) }, 'Copy')); }
 function slider(key, label, min, max, step, def, fmt, note) { const v = h('b', { class: 'mono' }, fmt(store.get(key, def))); return h('label', { class: 'field' }, h('span', { class: 'row', style: 'justify-content:space-between' }, label, v), h('input', { type: 'range', min, max, step, value: store.get(key, def), oninput: e => { store.set(key, +e.target.value); v.textContent = fmt(+e.target.value); } }), note ? h('span', { class: 'dim', style: 'font-size:12px' }, note) : null); }
+/* ----- ExpertStream Instant: the native engine for this site and for any app ----- */
+function instantCard() {
+  const url = h('input', { type: 'text', value: store.get('nativeUrl', 'http://127.0.0.1:8080'), id: 'instant-url', autocomplete: 'off', 'aria-label': 'Address of the local engine' });
+  const st = h('div', { class: 'note' + (Brain.mode === 'native' ? ' ok' : ''), role: 'status' }, Brain.mode === 'native' ? 'Connected: ' + Brain.name + (Brain.base ? ' at ' + Brain.base : ' (this page is served by it)') : 'Not connected. Start the engine (below), then press Connect.');
+  const go_ = h('button', { class: 'btn', onclick: async () => {
+    const u = url.value.trim().replace(/\/$/, ''); store.set('nativeUrl', u); go_.textContent = 'Connecting…';
+    const j = await Brain.detectNative(u); go_.textContent = 'Connect';
+    st.className = 'note' + (j ? ' ok' : ''); st.textContent = j ? 'Connected: ' + j.model + ' at ' + u + '. Chat now uses the native engine.' : 'No engine answered at ' + u + '. Is es_serve running? (Chrome, Edge and Firefox allow this page to reach 127.0.0.1; Safari may not.)';
+    if (j) toast('Connected to the native engine: ' + j.model, 'good');
+  } }, 'Connect');
+  const auto = h('label', { class: 'row', style: 'gap:8px;font-size:14px' }, h('input', { type: 'checkbox', checked: store.get('nativeAuto', 1) ? '' : null, onchange: e => store.set('nativeAuto', e.target.checked ? 1 : 0) }), 'Connect automatically when this site opens');
+  const rows = [['OpenAI-compatible apps and SDKs', 'Base URL http://127.0.0.1:8080/v1 · API key: any text · model: the name in /v1/models'],
+    ['Ollama apps', 'Server address http://127.0.0.1:8080'],
+    ['Other devices (phone ⇄ PC)', 'Start with --lan; it prints the address and an API key (Authorization: Bearer KEY)'],
+    ['Another website', 'Start with --cors https://that.site (this site is allowed already)']];
+  return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'ExpertStream Instant · any browser, any app'), h('h3', {}, 'Fast answers in every app'),
+    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Run the native engine once. This website and any app that speaks the OpenAI or Ollama API can then use it. Answers start quickly because the engine keeps what it has already read: the next turn reads only your new message, side requests do not throw the chat away, and long system prompts are saved to disk so they are instant even after a restart.'),
+    st, h('div', { class: 'grid2' }, url, h('div', { class: 'row' }, go_)), auto,
+    cmdBlock('cd ~/Stream- && make -s\n./es_serve -g ~/models/qwen2.5-0.5b-instruct-q4_k_m.gguf\n# OpenAI: http://127.0.0.1:8080/v1   Ollama: http://127.0.0.1:8080'),
+    h('div', { class: 'table-box' }, ...rows.map(([k, v]) => trow(k, v))),
+    h('details', { class: 'think' }, h('summary', {}, 'Code: curl, Python, JavaScript'),
+      cmdBlock('curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \\\n  -d \'{"model":"local","messages":[{"role":"user","content":"Hi"}],"stream":true}\''),
+      cmdBlock('from openai import OpenAI\nc = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")\nfor ch in c.chat.completions.create(model="local", messages=[{"role": "user", "content": "Hi"}], stream=True):\n    print(ch.choices[0].delta.content or "", end="")'),
+      cmdBlock('const r = await fetch("http://127.0.0.1:8080/v1/chat/completions", {method: "POST", headers: {"Content-Type": "application/json"},\n  body: JSON.stringify({model: "local", messages: [{role: "user", content: "Hi"}]})});\nconsole.log((await r.json()).choices[0].message.content);')),
+    h('div', { class: 'note' }, h('b', {}, 'Measured (4-core PC). '), 'Qwen2.5 0.5B, 750-token system prompt, a chat app that resends the conversation: the first word appears after 0.29 s from the 2nd turn on (15.6 s with the previous engine, 8.1 s without reuse), and after 0.12 s on the first turn after a restart (loaded from disk). A prompt seen for the first time is still read at normal speed (7.6 s here).'));
+}
 /* ----- Expert Craft ----- */
 function craftCard() {
   return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'Expert Craft · free · on this phone'), h('h3', {}, 'Train a 70-billion-parameter model on your phone'),
@@ -34,6 +60,7 @@ async function renderSettings() {
   box.append(accountCard(() => { if (!$('#settings').hidden) renderSettings(); }));
   // engine defaults
   box.append(h('div', { class: 'card' }, h('h3', {}, 'Engine defaults'), h('div', { class: 'grid2' }, slider('temp', 'Creativity (temperature)', 0, 1.5, .05, .7, v => v.toFixed(2), '0 = always the most likely word'), slider('max', 'Longest answer (tokens)', 32, 1024, 32, 256, v => v), slider('ctx', 'Chat memory (tokens)', 256, 4096, 256, 1024, v => v, 'applies when a model loads'), slider('cache', 'Expert cache (MB)', 64, 1024, 32, 384, v => v + ' MB', 'applies when a model loads'), slider('threads', 'CPU cores for the engine', 0, 8, 1, 0, v => v ? String(v) : 'auto', window.crossOriginIsolated ? 'multi-core is available here · applies when a model loads' : 'this page runs on 1 core (multi-core needs the GitHub Pages site)'))));
+  box.append(instantCard());
   box.append(craftCard());
   box.append(agentsCard());
   // storage

@@ -7,6 +7,7 @@ es_run
 es_import
 es_chat
 es_serve
+es_mtest
 build/
 
 # never commit secrets or models

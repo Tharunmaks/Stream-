@@ -16,6 +16,41 @@ model and opens the same app backed by the native engine
 curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
 ```
 
+**ExpertStream Instant: fast answers on a phone or PC, in any browser or app.** One local server (`es_serve`) speaks the OpenAI API
+(`/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming), the Ollama API (`/api/chat`, `/api/generate`, `/api/tags`) and the web app's
+own protocol. Point any app that lets you set an OpenAI base URL or an Ollama server at it; the website (any browser, also when opened from
+GitHub Pages) connects to it by itself.
+
+```sh
+make -s && ./es_serve -g ~/models/qwen2.5-0.5b-instruct-q4_k_m.gguf     # or: curl -fsSL .../scripts/setup.sh | MODEL=fast bash
+# OpenAI apps: base URL http://127.0.0.1:8080/v1 (any API key)   Ollama apps: http://127.0.0.1:8080   web app: http://127.0.0.1:8080
+./es_serve -g model.gguf --lan                                          # other devices too; prints an API key they must send
+```
+
+Why answers start fast:
+- **Prefix reuse.** Chat apps resend the whole conversation every turn. The engine keeps what it has already read and reads only the new part;
+  up to 4 other conversations stay parked in RAM, so side requests ("write a title for this chat") do not throw the main one away.
+- **Prompt cache on disk.** An expensive prompt start (a long system prompt or document) is saved losslessly in `~/.expertstream/kv` in the
+  background; any later request that starts the same way, also after a restart, loads it instead of reading it again (2 GB budget, oldest first).
+- **Faster prompt reading.** In batches, each weight row is unpacked once for all tokens instead of once per token (AVX2 and ARM SDOT kernels
+  for Q4_0, Q5_0, Q4_K, Q6_K). Results are bit-identical (`./es_mtest`); 1.8x faster prompt reading for Qwen2.5 0.5B and Llama 3.2 1B.
+- **Turbo** speculative decoding and **streaming** of every piece as soon as it exists.
+
+Measured on a 4-core x86 PC, a chat app session (840-token system prompt, the conversation resent each turn, a title request after each
+answer), time until the first word appears:
+
+| Model | Turn 2+ without reuse | Turn 2+ with Instant | First turn | First turn after a restart |
+|---|---|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | 15.6 s (old engine) / 8.1 s | **0.29 s** | 7.6 s (was 13 s) | **0.12 s** |
+| SmolLM2 135M Q4_K_M | 6.1 s | **0.23 s** | 4.7 s | **0.075 s** |
+| OLMoE 1B-7B Q2_K (experts streamed) | about 5 min (like turn 1) | **3.4-4.0 s** | 305 s | **0.44 s** |
+
+Reuse never changes an answer: with greedy sampling the answers with and without reuse, and after loading from disk, are identical
+(`python3 scripts/test_instant.py MODEL.gguf`, 21 checks: OpenAI and Ollama clients, streaming, stop strings, context trimming, CORS and
+Private Network Access, DNS-rebinding refusal, LAN key). Honest limits: the first time a prompt is seen it is read at the engine's normal
+speed (big mixture-of-experts models read prompts slowly), it serves one request at a time, and Safari may block a https website from reaching
+127.0.0.1. Websites other than local pages and this project's site are refused unless started with `--cors ORIGIN`.
+
 **Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
 Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
 `curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.
@@ -100,7 +135,10 @@ src/es_quant.{h,c}    dequantize + matvec for F32/F16/Q4_0..Q8_0/Q2_K..Q6_K
 src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
 tools/es_chat.c       text generation: core in RAM, experts streamed + cached
 tools/es_qtest.c      dumps dequantized tensors for checking
-tools/es_serve.c      local web server: the app + live chat API (127.0.0.1 only)
+tools/es_serve.c      ExpertStream Instant: OpenAI + Ollama + web app API, prefix reuse, CORS (127.0.0.1 unless --lan)
+tools/es_json.h       small JSON reader for the server
+tools/es_mtest.c      checks the batched kernels are bit-identical to one-at-a-time
+scripts/test_instant.py  end-to-end tests of the server
 web/index.html        the app (generated, self-contained, engine embedded)
 web/src/              app source: template.html, style.css, js/ modules, workers/
 web/es_wasm.c         WebAssembly entry points (Emscripten, runs in a Worker)

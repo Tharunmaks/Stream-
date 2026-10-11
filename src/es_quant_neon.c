@@ -198,4 +198,158 @@ void es_mv_q5_K_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_
         out[r] = s;
     }
 }
+
+/* ---- several activations against the same rows (batched prompt reading, Turbo checks) ----
+ * A group of rows is unpacked once into thread-local scratch (the same signed bytes the kernels above build in registers); every
+ * activation then runs the very same SDOT/FMA sequence, so results are bit-identical and the unpacking is not repeated per activation. */
+#include <stdlib.h>
+static _Thread_local uint8_t *NMB; static _Thread_local size_t NMBCAP;
+static uint8_t *nmb(size_t n) {
+    n = (n + 63) & ~(size_t)63;
+    if (n > NMBCAP) { free(NMB); NMB = aligned_alloc(64, n); NMBCAP = NMB ? n : 0; }
+    return NMB;
+}
+static void q4q5_multi(int five, const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * (five ? 22 : 18);
+    uint8_t *U = nmb((size_t)4 * nb * 32 + (size_t)4 * nb * sizeof(float)); if (!U) return;
+    float *D = (float *)(U + (size_t)4 * nb * 32);
+    const uint8x16_t m = vdupq_n_u8(15), bits = vld1q_u8(Q5_BITS), i0 = vld1q_u8(Q5_I0), i1 = vld1q_u8(Q5_I1), b16 = vdupq_n_u8(16); const int8x16_t e = vdupq_n_s8(8);
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++)
+            for (int b = 0; b < nb; b++) {
+                int8_t *o = (int8_t *)(U + ((size_t)i * nb + b) * 32);
+                if (five) {
+                    const nb_q5_0 *x = (const nb_q5_0 *)(w + rb * (r + i)) + b;
+                    uint32x4_t qv32 = vdupq_n_u32(0); qv32 = vld1q_lane_u32((const uint32_t *)x->qh, qv32, 0);
+                    const uint8x16_t qv = vreinterpretq_u8_u32(qv32), q = vld1q_u8(x->qs);
+                    const uint8x16_t h0 = vandq_u8(vtstq_u8(vqtbl1q_u8(qv, i0), bits), b16), h1 = vandq_u8(vtstq_u8(vqtbl1q_u8(qv, i1), bits), b16);
+                    vst1q_s8(o, vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(vandq_u8(q, m), h0), b16)));
+                    vst1q_s8(o + 16, vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(vshrq_n_u8(q, 4), h1), b16)));
+                    D[i * nb + b] = es_fp16_to_fp32(x->d);
+                } else {
+                    const nb_q4_0 *x = (const nb_q4_0 *)(w + rb * (r + i)) + b; const uint8x16_t q = vld1q_u8(x->qs);
+                    vst1q_s8(o, vsubq_s8(vreinterpretq_s8_u8(vandq_u8(q, m)), e)); vst1q_s8(o + 16, vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(q, 4)), e));
+                    D[i * nb + b] = es_fp16_to_fp32(x->d);
+                }
+            }
+#define UL(i, b) vld1q_s8((const int8_t *)(U + ((size_t)(i) * nb + (b)) * 32))
+#define UH(i, b) vld1q_s8((const int8_t *)(U + ((size_t)(i) * nb + (b)) * 32 + 16))
+#define MACC(a, i) (a) = vfmaq_n_f32((a), vcvtq_f32_s32(DOT2(UL(i, b), UH(i, b), y0, y1)), D[(i) * nb + b] * yd)
+        for (int qa = 0; qa < na; qa++) {
+            const es_blk_q80 *y = A[qa].q80; float *out = Y + (size_t)qa * ys;
+            if (nr == 4) {
+                float32x4_t a0 = vdupq_n_f32(0), a1 = a0, a2 = a0, a3 = a0;
+                for (int b = 0; b < nb; b++) {
+                    const int8x16_t y0 = vld1q_s8(y[b].qs), y1 = vld1q_s8(y[b].qs + 16); const float yd = y[b].d;
+                    MACC(a0, 0); MACC(a1, 1); MACC(a2, 2); MACC(a3, 3);
+                }
+                out[r] = vaddvq_f32(a0); out[r + 1] = vaddvq_f32(a1); out[r + 2] = vaddvq_f32(a2); out[r + 3] = vaddvq_f32(a3);
+            } else
+                for (int i = 0; i < nr; i++) {
+                    float32x4_t a = vdupq_n_f32(0);
+                    for (int b = 0; b < nb; b++) { const int8x16_t y0 = vld1q_s8(y[b].qs), y1 = vld1q_s8(y[b].qs + 16); const float yd = y[b].d; MACC(a, i); }
+                    out[r + i] = vaddvq_f32(a);
+                }
+        }
+#undef UL
+#undef UH
+#undef MACC
+    }
+}
+typedef struct { float d, dmin; uint8_t sc[8], mn[8]; } nk4_meta;
+static void q4K_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 144; const uint8x16_t m = vdupq_n_u8(15);
+    uint8_t *U = nmb((size_t)4 * nb * 256 + (size_t)4 * nb * sizeof(nk4_meta)); if (!U) return;
+    nk4_meta *K = (nk4_meta *)(U + (size_t)4 * nb * 256);
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const nb_q4_K *x = (const nb_q4_K *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) {
+                nk4_meta *k = &K[i * nb + b]; uint8_t *o = U + ((size_t)i * nb + b) * 256; const uint8_t *q = x[b].qs;
+                for (int j = 0; j < 8; j++) scale_min(j, x[b].scales, &k->sc[j], &k->mn[j]);
+                k->d = es_fp16_to_fp32(x[b].d); k->dmin = es_fp16_to_fp32(x[b].dmin);
+                for (int c = 0; c < 4; c++, q += 32) {
+                    const uint8x16_t qa = vld1q_u8(q), qb = vld1q_u8(q + 16);
+                    vst1q_u8(o + 64 * c, vandq_u8(qa, m)); vst1q_u8(o + 64 * c + 16, vandq_u8(qb, m));
+                    vst1q_u8(o + 64 * c + 32, vshrq_n_u8(qa, 4)); vst1q_u8(o + 64 * c + 48, vshrq_n_u8(qb, 4));
+                }
+            }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_block_q8_K *y = A[qa].q8; float *out = Y + (size_t)qa * ys;
+            for (int i = 0; i < nr; i++) {
+                float s = 0;
+                for (int b = 0; b < nb; b++) {
+                    const nk4_meta *k = &K[i * nb + b]; const int8_t *o = (const int8_t *)(U + ((size_t)i * nb + b) * 256), *q8 = y[b].qs; int32x4_t accv = vdupq_n_s32(0);
+                    for (int c = 0; c < 4; c++, q8 += 64) {
+                        int32x4_t lo = vdotq_s32(vdupq_n_s32(0), vld1q_s8(o + 64 * c), vld1q_s8(q8));
+                        lo = vdotq_s32(lo, vld1q_s8(o + 64 * c + 16), vld1q_s8(q8 + 16));
+                        int32x4_t hi = vdotq_s32(vdupq_n_s32(0), vld1q_s8(o + 64 * c + 32), vld1q_s8(q8 + 32));
+                        hi = vdotq_s32(hi, vld1q_s8(o + 64 * c + 48), vld1q_s8(q8 + 48));
+                        accv = vmlaq_n_s32(accv, lo, k->sc[2 * c]); accv = vmlaq_n_s32(accv, hi, k->sc[2 * c + 1]);
+                    }
+                    s += y[b].d * (k->d * (float)hsum(accv) - k->dmin * (float)kmins(k->mn, y[b].bsums));
+                }
+                out[r + i] = s;
+            }
+        }
+    }
+}
+static void q6K_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 210;
+    const uint8x16_t m15 = vdupq_n_u8(15), m3 = vdupq_n_u8(3); const int8x16_t c32 = vdupq_n_s8(32);
+    uint8_t *U = nmb((size_t)4 * nb * 256 + (size_t)4 * nb * 20); if (!U) return;
+    uint8_t *M6 = U + (size_t)4 * nb * 256;
+    for (int r = r0; r < r1; r += 4) {
+        const int nr = r1 - r < 4 ? r1 - r : 4;
+        for (int i = 0; i < nr; i++) {
+            const nb_q6_K *x = (const nb_q6_K *)(w + rb * (r + i));
+            for (int b = 0; b < nb; b++) {
+                const uint8_t *ql = x[b].ql, *qh = x[b].qh; int8_t *o = (int8_t *)(U + ((size_t)i * nb + b) * 256);
+                for (int h = 0; h < 2; h++, ql += 64, qh += 32)
+                    for (int is = 0; is < 2; is++, o += 64) {
+                        const int l = is * 16;
+                        const uint8x16_t a0 = vld1q_u8(ql + l), a1 = vld1q_u8(ql + l + 32), hh = vld1q_u8(qh + l);
+                        vst1q_s8(o, vsubq_s8(vreinterpretq_s8_u8(vorrq_u8(vandq_u8(a0, m15), vshlq_n_u8(vandq_u8(hh, m3), 4))), c32));
+                        vst1q_s8(o + 16, vsubq_s8(vreinterpretq_s8_u8(vorrq_u8(vandq_u8(a1, m15), vshlq_n_u8(vandq_u8(vshrq_n_u8(hh, 2), m3), 4))), c32));
+                        vst1q_s8(o + 32, vsubq_s8(vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(a0, 4), vshlq_n_u8(vandq_u8(vshrq_n_u8(hh, 4), m3), 4))), c32));
+                        vst1q_s8(o + 48, vsubq_s8(vreinterpretq_s8_u8(vorrq_u8(vshrq_n_u8(a1, 4), vshlq_n_u8(vshrq_n_u8(hh, 6), 4))), c32));
+                    }
+                uint8_t *mm = M6 + ((size_t)i * nb + b) * 20; memcpy(mm, x[b].scales, 16); const float d = es_fp16_to_fp32(x[b].d); memcpy(mm + 16, &d, 4);
+            }
+        }
+        for (int qa = 0; qa < na; qa++) {
+            const es_block_q8_K *y = A[qa].q8; float *out = Y + (size_t)qa * ys;
+            for (int i = 0; i < nr; i++) {
+                float s = 0;
+                for (int b = 0; b < nb; b++) {
+                    const int8_t *o = (const int8_t *)(U + ((size_t)i * nb + b) * 256); const uint8_t *mm = M6 + ((size_t)i * nb + b) * 20;
+                    const int8_t *sc = (const int8_t *)mm, *q8 = y[b].qs; float d; memcpy(&d, mm + 16, 4); int32x4_t accv = vdupq_n_s32(0);
+                    for (int h = 0; h < 2; h++, sc += 8, q8 += 128)
+                        for (int is = 0; is < 2; is++, o += 64) {
+                            const int l = is * 16;
+                            accv = vmlaq_n_s32(accv, vdotq_s32(vdupq_n_s32(0), vld1q_s8(o), vld1q_s8(q8 + l)), sc[is]);
+                            accv = vmlaq_n_s32(accv, vdotq_s32(vdupq_n_s32(0), vld1q_s8(o + 16), vld1q_s8(q8 + l + 32)), sc[is + 2]);
+                            accv = vmlaq_n_s32(accv, vdotq_s32(vdupq_n_s32(0), vld1q_s8(o + 32), vld1q_s8(q8 + l + 64)), sc[is + 4]);
+                            accv = vmlaq_n_s32(accv, vdotq_s32(vdupq_n_s32(0), vld1q_s8(o + 48), vld1q_s8(q8 + l + 96)), sc[is + 6]);
+                        }
+                    s += y[b].d * d * (float)hsum(accv);
+                }
+                out[r + i] = s;
+            }
+        }
+    }
+}
+/* 1 if handled here (the caller falls back to one activation at a time otherwise) */
+int es_mv_multi_neon(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
+    int q80 = 1, q8 = 1;
+    for (int i = 0; i < na; i++) { q80 &= A[i].q80 != NULL; q8 &= A[i].q8 != NULL; }
+    if (t == GGML_Q5_0 && q80 && nmb((size_t)4 * (cols / 32) * 36)) { q4q5_multi(1, w, cols, r0, r1, A, na, Y, ys); return 1; }
+    if (t == GGML_Q4_0 && q80 && nmb((size_t)4 * (cols / 32) * 36)) { q4q5_multi(0, w, cols, r0, r1, A, na, Y, ys); return 1; }
+    if (t == GGML_Q4_K && q8 && nmb((size_t)4 * (cols / 256) * (256 + sizeof(nk4_meta)))) { q4K_multi(w, cols, r0, r1, A, na, Y, ys); return 1; }
+    if (t == GGML_Q6_K && q8 && nmb((size_t)4 * (cols / 256) * 276)) { q6K_multi(w, cols, r0, r1, A, na, Y, ys); return 1; }
+    return 0;
+}
 #endif
