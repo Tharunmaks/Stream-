@@ -97,6 +97,7 @@ async function renderSettings() {
   const usage = await Lib.usage(); let items = []; try { items = await Lib.list(); } catch (e) { }
   box.append(h('div', { class: 'card' }, h('h3', {}, 'Storage and data'), h('div', { class: 'table-box' }, trow('Models saved', String(items.filter(i => i.complete).length)), trow('Used by this site', usage ? fmtB(usage.used) : '?'), trow('Available', usage ? fmtB(usage.quota - usage.used) : '?'), trow('Prompts in history', String(hist.list.length))),
     h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => { hist.list = []; store.set('hist', []); toast('History cleared'); renderSettings(); } }, 'Clear history'), h('button', { class: 'btn sm danger', onclick: async () => { Brain.close(); for (const i of items) await Lib.remove(i.name); toast('All models deleted'); renderSettings(); } }, 'Delete all models'), h('button', { class: 'btn sm danger', onclick: () => { try { Object.keys(localStorage).filter(k => k.startsWith('es2.')).forEach(k => localStorage.removeItem(k)); } catch (e) { } location.reload(); } }, 'Reset everything'))));
+  box.append(privacyCard());
   box.append(h('p', { class: 'dim', style: 'font-size:12.5px;text-align:center' }, 'ExpertStream web 2.2 · engine: ' + (Brain.mode || 'idle') + ' · ' + (Brain.native ? 'native server connected' : 'WebAssembly')));
 }
 pageHooks.settings = renderSettings;

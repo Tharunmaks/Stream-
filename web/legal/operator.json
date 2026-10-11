@@ -1,0 +1,10 @@
+{
+  "name": "Tharunmaks (individual open-source developer, GitHub user Tharunmaks)",
+  "contact": "https://github.com/Tharunmaks/Stream-/issues",
+  "email": "",
+  "postal_address": "",
+  "legal_entity_or_tax_id": "",
+  "governing_law": "",
+  "code_license": "",
+  "_note": "Fill in email, postal_address, legal_entity_or_tax_id, governing_law and code_license, then run: python3 scripts/build_legal.py. Empty fields are shown as 'not published'. Nothing here is invented."
+}

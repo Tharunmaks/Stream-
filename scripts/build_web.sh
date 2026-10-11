@@ -39,3 +39,5 @@ for v in "" "_mt"; do
 done
 fi   # UI_ONLY=1 reuses build/wasm/es_engine.js
 python3 scripts/build_web.py "$OUT/es_engine.js" --mt "$OUT/es_engine_mt.js" --rs "$OUT/es_engine_rs.js" --mt-rs "$OUT/es_engine_mt_rs.js" "$@"
+python3 scripts/build_craft.py
+python3 scripts/build_legal.py

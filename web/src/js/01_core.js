@@ -33,9 +33,13 @@ function toast(msg, kind, ms = 3200) {
 /* bottom sheet */
 function sheet(content) {
   const bg = h('div', { class: 'sheet-bg', onclick: e => { if (e.target === bg) close(); } });
-  const sh = h('div', { class: 'sheet', role: 'dialog' }, content);
+  const sh = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', tabindex: '-1' }, content);
+  const prev = document.activeElement;
   bg.append(sh); document.body.append(bg);
-  function close() { bg.remove(); }
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  function close() { document.removeEventListener('keydown', onKey); bg.remove(); try { prev && prev.focus && prev.focus(); } catch (e) { } }
+  setTimeout(() => { const f = sh.querySelector('button, a[href], input, select, textarea'); (f || sh).focus(); }, 0);
   return { close, el: sh };
 }
 /* tiny markdown for answers */

@@ -655,6 +655,21 @@ TOOLS += [
  ('export_model', 'Export a trained checkpoint to GGUF in the models folder with a model card; load it with load_model.', S(name=P('string', 'build name', req=True), dtype=P('string', 'f16 or f32'), overwrite=P('boolean', 'replace existing')), t_export),
 ]
 
+# ---------------- legal and trust checklist (mcp/legal.py): the 20 must-haves before an app or website launch ----------------
+def t_legal_checklist(a):
+    import legal as L; return L.checklist(a.get('app_type', ''))
+def t_legal_audit(a):
+    import legal as L
+    p = os.path.expanduser(str(a.get('path') or ''))
+    if not p: raise ValueError('give the project folder to audit')
+    p = p if os.path.isabs(p) else os.path.join(os.getcwd(), p)
+    if not ALLOW_ANY_PATH and not under(p, os.path.expanduser('~')) and not under(p, os.getcwd()): raise ValueError('the folder must be inside your home folder or the current folder (set ES_ALLOW_ANY_PATH=1 to allow other places)')
+    return L.audit(p, a.get('app_type', ''))
+TOOLS += [
+ ('legal_checklist', 'The 20 legal and trust must-haves before launching an app or website (privacy policy, terms, refund and cookie policies, consent banner, form consents, data minimisation, third-party SDK audit, dark patterns, hidden fees, fake reviews, unsupported claims, alt text, contrast, keyboard navigation, business details, age consent, unsubscribe link, licensed fonts and images, data deletion): why, how to implement and how to verify each. Engineering checklist, not legal advice.', S(app_type=P('string', 'optional: what kind of app, to focus the advice (shop, saas, blog, kids app, AI app ...)')), t_legal_checklist),
+ ('legal_audit', 'Static audit of a project folder against the 20 legal and trust items. Returns PASS / FAIL / NEEDS-REVIEW / N/A per item with evidence and the fix. Reads source files only; a human or lawyer must review the result.', S(path=P('string', 'project folder (inside your home folder or the current folder)', req=True), app_type=P('string', 'optional app type')), t_legal_audit),
+]
+
 # ---------------- Expert Craft (craft/expertcraft_mcp.py): build models from scratch on free GPUs (Colab / Kaggle) ----------------
 # Same tools as the standalone Expert Craft server, merged in under a craft_ prefix (the NumPy builder above already owns
 # design_model / job_status / stop_job). The craft module keeps its own workspace sandbox (EXPERTCRAFT_HOME, default ~/expertcraft).

@@ -258,5 +258,15 @@ Qwen3-235B-A22B shape at Q2_K: 94 MoE layers × 8 experts × 5.9 MiB is
 ## Expert Craft is part of the MCP server
 The tools of `craft/expertcraft_mcp.py` (design 1M-70B models, scaffold a PyTorch project, train on free Colab/Kaggle GPUs with FSDP, export) are
 merged into `mcp/expertstream_mcp.py` as `craft_guide`, `craft_design_model`, `craft_estimate_model`, `craft_free_compute_plan`,
-`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (45 tools in total). The standalone
+`craft_scaffold_project`, `craft_run_step`, `craft_job_status`, `craft_stop_job`, `craft_connect_guide` (47 tools in total with the legal tools below). The standalone
 `craft/expertcraft_mcp.py` still works on its own. Projects live in `~/expertcraft` (`EXPERTCRAFT_HOME`), and paths outside it are refused.
+
+## Legal and trust checks (the 20 must-haves before launch)
+`legal_checklist` returns the 20 items (privacy policy, terms, refund and cookie policies, consent banner, form consents, data minimisation, third-party SDK
+audit, dark patterns, hidden fees, fake reviews, unsupported claims, alt text, colour contrast, keyboard navigation, business details, age consent,
+unsubscribe link, licensed fonts and images, data deletion) with why, how and how to verify. `legal_audit(path)` scans a project folder and returns
+PASS / FAIL / NEEDS-REVIEW / N/A per item with evidence. 15 agents in the new "Legal & trust" team (e.g. `launch-compliance-auditor`) use them. This is an
+engineering checklist, not legal advice.
+The website now has `legal.html` (privacy, terms, refunds, cookies and storage, data deletion, accessibility, operator, licences, and the status of all 20 checks on this
+site), a privacy notice, Settings > Privacy > "Delete all my data", consent text on the Hugging Face sign-in, a skip link, keyboard fixes and contrast fixes.
+Fill `web/legal/operator.json` (e-mail, postal address, governing law, code licence) and run `python3 scripts/build_legal.py` to publish your own details.

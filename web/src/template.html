@@ -29,6 +29,7 @@
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3987e5"/><stop offset="1" stop-color="#19b07d"/></linearGradient></defs></svg>
 
+<a class="skip" href="#main">Skip to content</a>
 <header class="top"><div class="top-in">
   <button class="logo" data-goto="home" aria-label="ExpertStream home"><i></i><span>Expert<b>Stream</b></span></button>
   <nav class="tabs" role="tablist" aria-label="Pages">
@@ -45,7 +46,7 @@
   <button class="pill" id="pill" aria-label="Current model"><i></i><span id="pill-t">No model</span></button>
 </div></header>
 
-<main>
+<main id="main" tabindex="-1">
   <!-- HOME -->
   <section class="page" id="home" role="tabpanel">
     <div class="hero">
@@ -136,7 +137,8 @@
     <div id="set-body" class="stack"></div>
   </section>
 </main>
-<footer class="foot">ExpertStream · free and open source · speed numbers measured on a 4× A78 + 4× A55 phone with 7.3 GB RAM</footer>
+<footer class="foot">ExpertStream · free and open source · speed numbers measured on a 4× A78 + 4× A55 phone with 7.3 GB RAM
+  <nav aria-label="Legal"><a href="legal.html#privacy">Privacy</a><a href="legal.html#terms">Terms</a><a href="legal.html#refunds">Refunds</a><a href="legal.html#cookies">Cookies &amp; storage</a><a href="legal.html#deletion">Delete my data</a><a href="legal.html#accessibility">Accessibility</a><a href="legal.html#operator">Who runs this</a><a href="legal.html">All 20 checks</a></nav></footer>
 <div id="toasts" aria-live="polite"></div>
 
 <script id="dl-src" type="text/plain">@@DLWORKER@@</script>
