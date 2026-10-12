@@ -1185,6 +1185,7 @@ static const char *template_kind_of(const char *t) {
     if (strstr(t, "<|im_middle|>")) return "kimi";
     if (strstr(t, "<|channel|>") || (strstr(t, "<|start|>") && strstr(t, "<|message|>"))) return "harmony";
     if (strstr(t, DS_USER)) return "deepseek";
+    if (strstr(t, "<|im_start|>") && strstr(t, "reasoning_effort")) return "qwen38";   /* Qwen3.8: a reasoning-effort system line, thinking kept in the history */
     if (strstr(t, "<|im_start|>") && strstr(t, "'<think>\\n' }}")) return "chatml_think";   /* Qwen3.5: the answer starts inside <think> */
     if (strstr(t, "<|im_start|>")) return "chatml";
     if (strstr(t, "<|start_header_id|>")) return "llama3";
@@ -1202,10 +1203,22 @@ static void harmony_system(char *out, size_t cap) {
     snprintf(out, cap, "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: %s\n\n"
              "Reasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>", date);
 }
+/* Qwen3.8's reasoning effort (ES_REASONING = xhigh, the template's default, medium or low): the line its template puts in the system message */
+static const char *qwen38_effort(void) {
+    const char *e = getenv("ES_REASONING");
+    if (e && !strcmp(e, "medium")) return "";
+    if (e && !strcmp(e, "low")) return "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
+    return "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
+}
 static void format_turn(char *out, size_t cap, const char *msg, int first) {
     /* later turns first close the previous answer: its end token was
      * sampled but not fed back into the model */
-    if (TK("chatml") || TK("chatml_think"))
+    if (TK("qwen38")) {
+        const char *ri = qwen38_effort();
+        char sys[512] = "";
+        if (first && *ri) snprintf(sys, sizeof sys, "<|im_start|>system\n%s<|im_end|>\n", ri);
+        snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n<think>\n", first ? sys : "<|im_end|>\n", msg);
+    } else if (TK("chatml") || TK("chatml_think"))
         snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s", first ? "" : "<|im_end|>\n", msg, TK("chatml_think") ? "<think>\n" : "");
     else if (TK("tulu"))
         snprintf(out, cap, "%s<|user|>\n%s\n<|assistant|>\n", first ? "<|endoftext|>" : "<|endoftext|>\n", msg);
@@ -1249,6 +1262,38 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
             else if (m[i].role && (!strcmp(m[i].role, "system") || !strcmp(m[i].role, "developer"))) PUT("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]", c);
             else PUT("[INST]%s[/INST]", c);
         }
+        return (int)o;
+    }
+    if (TK("qwen38")) {   /* follows the template: contents trimmed, thinking kept (preserve_thinking defaults to true) */
+        const char *ri = qwen38_effort();
+        int i0 = 0;
+        if (n > 0 && m[0].role && !strcmp(m[0].role, "system")) {
+            const char *c = m[0].content ? m[0].content : ""; int len;
+            while (*c && strchr(" \t\n\r", *c)) c++;
+            len = (int)strlen(c); while (len && strchr(" \t\n\r", c[len - 1])) len--;
+            if (len) PUT("<|im_start|>system\n%s%s%.*s<|im_end|>\n", ri, *ri ? "\n\n" : "", len, c);
+            else if (*ri) PUT("<|im_start|>system\n%s<|im_end|>\n", ri);
+            i0 = 1;
+        } else if (*ri) PUT("<|im_start|>system\n%s<|im_end|>\n", ri);
+        for (int i = i0; i < n; i++) {
+            const char *r = m[i].role ? m[i].role : "user", *c = m[i].content ? m[i].content : "", *th = "";
+            int thl = 0;
+            if (!strcmp(r, "assistant")) {
+                const char *e = strstr(c, "</think>");
+                if (e) {
+                    const char *b = strstr(c, "<think>");
+                    th = b && b < e ? b + 7 : c; thl = (int)(e - th);
+                    c = e + 8;
+                }
+            }
+            while (thl && strchr(" \t\n\r", *th)) { th++; thl--; }
+            while (thl && strchr(" \t\n\r", th[thl - 1])) thl--;
+            while (*c && strchr(" \t\n\r", *c)) c++;
+            int len = (int)strlen(c); while (len && strchr(" \t\n\r", c[len - 1])) len--;
+            if (!strcmp(r, "assistant")) PUT("<|im_start|>assistant\n<think>\n%.*s\n</think>\n\n%.*s<|im_end|>\n", thl, th, len, c);
+            else PUT("<|im_start|>user\n%.*s<|im_end|>\n", len, c);
+        }
+        PUT("<|im_start|>assistant\n<think>\n");
         return (int)o;
     }
     if (tulu) PUT("<|endoftext|>");
@@ -1902,7 +1947,7 @@ static int draft_tokens(int32_t *out, int max) {
 }
 
 static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop); the prompt opened <think> */
-static void answer_start(void) { ANS_FRESH = 1; ANS_THINK = TK("chatml_think"); H_STATE = HS_FRESH; H_THINK = 0; }
+static void answer_start(void) { ANS_FRESH = 1; ANS_THINK = TK("chatml_think") || TK("qwen38"); H_STATE = HS_FRESH; H_THINK = 0; }
 /* the text of one answer token */
 static int piece_out(int tok, char *buf, int cap) {
     int n = es_tok_piece(T, tok, 0, buf, cap);
