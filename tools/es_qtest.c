@@ -4,11 +4,13 @@
  *
  *   es_qtest model.gguf blk.0.attn_v.weight out.f32 [max_rows]
  *   es_qtest --raw TYPE_ID blocks.bin out.f32      (raw blocks of one type, e.g. from scripts/test_quants.py)
+ *   es_qtest --mv TYPE_ID blocks.bin               (rows of 256 weights: integer kernel vs float, relative error)
  */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <unistd.h>
 
 #include "../src/es_gguf.h"
@@ -32,7 +34,38 @@ static int raw_mode(int type, const char *in, const char *outp) {
     return 0;
 }
 
+static int mv_mode(int type, const char *in) {
+    FILE *f = fopen(in, "rb");
+    if (!f) { perror(in); return 1; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = malloc((size_t)n);
+    if (fread(b, 1, (size_t)n, f) != (size_t)n) return 1;
+    fclose(f);
+    const int cols = 256;
+    const size_t rb = es_row_bytes((uint32_t)type, cols);
+    const int rows = (int)((size_t)n / rb);
+    float x[256], row[256], *y = malloc(sizeof(float) * (size_t)rows), scratch[1024];
+    srand(7);
+    for (int i = 0; i < cols; i++) x[i] = (float)rand() / (float)RAND_MAX - 0.5f;
+    es_act_arena_init(1 << 16);
+    static es_block_q8_K q8[4];
+    es_act a;
+    es_act_prepare(&a, x, cols, q8);
+    es_matvec((uint32_t)type, b, cols, 0, rows, &a, y, scratch);
+    double err = 0, mag = 0;
+    for (int r = 0; r < rows; r++) {
+        es_dequant_row((uint32_t)type, b + rb * (size_t)r, row, cols);
+        double s = 0;
+        for (int i = 0; i < cols; i++) s += (double)row[i] * x[i];
+        if (fabs(y[r] - s) > err) err = fabs(y[r] - s);
+        if (fabs(s) > mag) mag = fabs(s);
+    }
+    printf("%g\n", mag > 0 ? err / mag : err);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--mv")) return mv_mode(atoi(argv[2]), argv[3]);
     if (argc == 5 && !strcmp(argv[1], "--raw")) return raw_mode(atoi(argv[2]), argv[3], argv[4]);
     if (argc < 4) {
         fprintf(stderr, "usage: es_qtest FILE.gguf TENSOR OUT.f32 [max_rows]\n");

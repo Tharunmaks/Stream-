@@ -21,6 +21,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "es_cache.h"
 #include "es_compute.h"
@@ -65,6 +66,7 @@ typedef struct {
     float rope_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow, corr[2];
     const float *rope_freqs;                  /* Llama 3.1 style per-frequency factors, or NULL */
     float kq_scale;
+    float temp_scale; int temp_len;            /* attention temperature by position (Mistral Large 3, Llama 4 style), 0 = off */
     int n_swa;
     /* experts */
     int gating, norm_topk, act_oai, n_group, n_group_used;
@@ -228,6 +230,13 @@ static void prep(es_act *a, const float *x, int cols) {
     es_act_prepare(a, x, cols, q);
 }
 
+/* queries far into a long context get a slightly higher temperature: q *= 1 + scale * log(floor(pos / len) + 1) */
+static void attn_temp(float *q, int n, int pos) {
+    if (M.temp_scale == 0.0f || M.temp_len <= 0) return;
+    const float f = (float)(log(floor((double)pos / M.temp_len) + 1.0) * M.temp_scale + 1.0);
+    for (int i = 0; i < n; i++) q[i] *= f;
+}
+
 /* attention of one query position, parallel over heads */
 typedef struct { int layer, pos; const float *q; float *out; } att_arg;
 static void att_task(int tid, int n, void *arg) {
@@ -310,6 +319,30 @@ static void read_tensor(const es_gguf_tensor *t, uint64_t extra, void *dst, size
     if (SIM_S_PER_BYTE > 0) { struct timespec ts = {0, (long)(n * SIM_S_PER_BYTE * 1e9)}; nanosleep(&ts, NULL); }
     read_at_fd(t->shard ? SH_FD[t->shard] : G.fd, shard_base(t) + t->offset + extra, dst, n);
 }
+/* Zero-copy mode: when the whole model fits in free RAM the files are mapped, and weights and experts are used where they
+ * lie (no expert cache, no copies; the operating system keeps the pages). Bigger models stream experts into the cache. */
+static const uint8_t *MAP[256];   /* per shard, NULL when not mapped */
+static int MAPPED;
+static const uint8_t *tensor_ptr(const es_gguf_tensor *t) { return MAP[t->shard] + shard_base(t) + t->offset; }
+#ifndef __EMSCRIPTEN__
+#include <sys/mman.h>
+static long mem_available_mb(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char line[256]; long kb = -1;
+    while (fgets(line, sizeof line, f)) if (!strncmp(line, "MemAvailable:", 13)) { kb = atol(line + 13); break; }
+    fclose(f);
+    return kb / 1024;
+}
+static int map_shard(int sh, int fd) {
+    struct stat st;
+    if (fstat(fd, &st)) return -1;
+    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (p == MAP_FAILED) return -1;
+    MAP[sh] = p;
+    return 0;
+}
+#endif
 /* expert e of layer l, role r (gate, up, down) into dst */
 static void read_expert_part(int l, int e, int r, void *dst) {
     if (XTE) { const es_gguf_tensor *t = XTE[((size_t)l * M.n_exp + e) * 3 + r]; read_tensor(t, 0, dst, t->nbytes); return; }
@@ -447,6 +480,18 @@ static void warm_start(int want) {
 
 /* Make sure the k experts of layer l are in the RAM cache; fill W views. All k stay protected for this step. */
 static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
+    if (MAPPED) {
+        for (int j = 0; j < k; j++) {
+            W *dst[3] = {&g[j], &u[j], &d[j]};
+            for (int r = 0; r < 3; r++) {
+                const es_gguf_tensor *t = XTE ? XTE[((size_t)l * M.n_exp + sel[j]) * 3 + r] : XT[l * 3 + r];
+                const uint64_t per = XTE ? t->nbytes : t->nbytes / t->ne[2];
+                *dst[r] = (W){t->type, (int)t->ne[1], (int)t->ne[0], tensor_ptr(t) + (XTE ? 0 : per * (uint64_t)sel[j])};
+            }
+        }
+        STAT_HITS += (unsigned long long)k;
+        return;
+    }
     C.step++;
     int *slot = malloc(sizeof(int) * (size_t)k);
     char path[4096];
@@ -707,6 +752,7 @@ static void attention_n(int l, int N, int pos0) {
                 else for (int h = 0; h < M.n_head_kv; h++) rmsnorm(k + h * hd, k + h * hd, L->k_norm.data, hd, M.eps);
             }
             rope(q, M.n_head, hd, pos0 + i); rope(k, M.n_head_kv, hd, pos0 + i);
+            attn_temp(q, qd, pos0 + i);
             memcpy(KC + ((size_t)l * M.ctx + pos0 + i) * kvd, k, sizeof(float) * (size_t)kvd);
             memcpy(VC + ((size_t)l * M.ctx + pos0 + i) * kvd, v, sizeof(float) * (size_t)kvd);
         }
@@ -737,8 +783,10 @@ static void attention_n(int l, int N, int pos0) {
             }
         }
         run_jobs();
-        for (int i = 0; i < N; i++)
+        for (int i = 0; i < N; i++) {
             for (int h = 0; h < H; h++) memcpy(BQM + ((size_t)i * H + h) * M.dk + kvl, BQ + (size_t)i * H * qh + (size_t)h * qh + nope, sizeof(float) * (size_t)rd);
+            attn_temp(BQM + (size_t)i * H * M.dk, H * M.dk, pos0 + i);
+        }
         for (int i = 0; i < N; i++) attend(l, pos0 + i, BQM + (size_t)i * H * M.dk, BATL + (size_t)i * H * kvl);
         arena_reset();
         for (int i = 0; i < N; i++)
@@ -848,8 +896,24 @@ static const char *TEMPLATE_KIND = "raw";
 #define DS_ASSISTANT "<\xef\xbd\x9c" "Assistant\xef\xbd\x9c>"
 #define KIMI_SYS "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>"
 static int TK(const char *k) { return !strcmp(TEMPLATE_KIND, k); }
+/* Mistral v7 templates (Mistral Large 3, Small 3, Magistral) carry a default system prompt for chats that bring none */
+static char *DEFAULT_SYS;
+static void default_sys_from(const char *t) {
+    free(DEFAULT_SYS); DEFAULT_SYS = NULL;
+    const char *k = t ? strstr(t, "set default_system_message = '") : NULL;
+    if (!k) return;
+    k += strlen("set default_system_message = '");
+    size_t n = 0, cap = strlen(k) + 1;
+    DEFAULT_SYS = malloc(cap);
+    for (; *k && *k != '\''; k++) {
+        if (*k == '\\' && k[1]) { k++; DEFAULT_SYS[n++] = *k == 'n' ? '\n' : *k; }
+        else DEFAULT_SYS[n++] = *k;
+    }
+    DEFAULT_SYS[n] = 0;
+}
 static const char *template_kind_of(const char *t) {
     if (!t) return "raw";
+    if (strstr(t, "[SYSTEM_PROMPT]")) return "mistral_v7";
     if (strstr(t, "<|im_middle|>")) return "kimi";
     if (strstr(t, "<|channel|>") || (strstr(t, "<|start|>") && strstr(t, "<|message|>"))) return "harmony";
     if (strstr(t, DS_USER)) return "deepseek";
@@ -860,7 +924,7 @@ static const char *template_kind_of(const char *t) {
     if (strstr(t, "[INST]")) return "mistral";
     return "raw";
 }
-static void detect_template(void) { TEMPLATE_KIND = template_kind_of(es_gguf_str(&G, "tokenizer.chat_template")); }
+static void detect_template(void) { const char *t = es_gguf_str(&G, "tokenizer.chat_template"); TEMPLATE_KIND = template_kind_of(t); default_sys_from(t); }
 static void harmony_system(char *out, size_t cap) {
     char date[32] = "2025-01-01";
     const time_t now = time(NULL);
@@ -882,6 +946,10 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
         snprintf(out, cap, "%s[INST] %s [/INST]", first ? "<s>" : "</s>", msg);
     else if (TK("mistral_sp"))
         snprintf(out, cap, "%s [INST] %s [/INST]", first ? "<s>" : "</s>", msg);
+    else if (TK("mistral_v7")) {
+        if (first && DEFAULT_SYS) snprintf(out, cap, "<s>[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT][INST]%s[/INST]", DEFAULT_SYS, msg);
+        else snprintf(out, cap, "%s[INST]%s[/INST]", first ? "<s>" : "</s>", msg);
+    }
     else if (TK("deepseek"))
         snprintf(out, cap, "%s" DS_USER "%s" DS_ASSISTANT, first ? DS_BOS : DS_EOS, msg);
     else if (TK("kimi"))
@@ -900,6 +968,20 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
 #define PUT(...) do { int w_ = snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__); if (w_ < 0 || o + (size_t)w_ >= cap) return -1; o += (size_t)w_; } while (0)
     const int chatml = TK("chatml"), tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony");
     const char *sp = msp ? " " : "";
+    const int v7 = TK("mistral_v7");
+    if (v7) {   /* <s>[SYSTEM_PROMPT]..[/SYSTEM_PROMPT][INST]user[/INST]answer</s>[INST].. */
+        PUT("<s>");
+        int i0 = 0;
+        if (n > 0 && m[0].role && (!strcmp(m[0].role, "system") || !strcmp(m[0].role, "developer"))) { PUT("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]", m[0].content ? m[0].content : ""); i0 = 1; }
+        else if (DEFAULT_SYS) PUT("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]", DEFAULT_SYS);
+        for (int i = i0; i < n; i++) {
+            const char *c = m[i].content ? m[i].content : "";
+            if (m[i].role && !strcmp(m[i].role, "assistant")) PUT("%s</s>", c);
+            else if (m[i].role && (!strcmp(m[i].role, "system") || !strcmp(m[i].role, "developer"))) PUT("[SYSTEM_PROMPT]%s[/SYSTEM_PROMPT]", c);
+            else PUT("[INST]%s[/INST]", c);
+        }
+        return (int)o;
+    }
     if (tulu) PUT("<|endoftext|>");
     if (llama3) PUT("<|begin_of_text|>");
     if (mistral) PUT("<s>");
@@ -946,8 +1028,10 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
 int es_engine_render_with(const char *chat_template, const es_msg *m, int n, char *out, size_t cap) {
     const char *keep = TEMPLATE_KIND;
     TEMPLATE_KIND = template_kind_of(chat_template);
+    default_sys_from(chat_template);
     const int r = es_engine_render(m, n, out, cap);
     TEMPLATE_KIND = keep;
+    default_sys_from(es_gguf_str(&G, "tokenizer.chat_template"));
     return r;
 }
 const char *es_engine_template_kind(const char *chat_template) { return template_kind_of(chat_template); }
@@ -955,7 +1039,7 @@ const char *es_engine_template_kind(const char *chat_template) { return template
 /* gpt-oss writes "<|channel|>analysis<|message|>thoughts<|end|><|start|>assistant<|channel|>final<|message|>answer".
  * The answer goes out as is, the thoughts inside <think>...</think> (as Qwen3 and DeepSeek-R1 write them), the markup not at all. */
 static int H_START = -1, H_CHANNEL = -1, H_MESSAGE = -1, H_END = -1, H_STATE, H_THINK; static char H_CHAN[24]; static int H_CHANLEN;
-enum { HS_ROLE, HS_CHAN, HS_MSG };
+enum { HS_ROLE, HS_CHAN, HS_MSG, HS_FRESH };
 static void answer_start(void);
 static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap) {
     if (tok == H_START) { H_STATE = HS_ROLE; return 0; }
@@ -970,6 +1054,7 @@ static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap)
         H_STATE = HS_ROLE; return 0;
     }
     if (H_STATE == HS_CHAN) { for (int i = 0; i < pl && H_CHANLEN < (int)sizeof H_CHAN - 1; i++) H_CHAN[H_CHANLEN++] = piece[i]; return 0; }
+    if (H_STATE == HS_FRESH) H_STATE = HS_MSG;   /* an answer that does not start with harmony markup is shown as it is */
     if (H_STATE != HS_MSG) return 0;
     const int n = pl < cap ? pl : cap;
     memmove(buf, piece, (size_t)n);
@@ -1106,6 +1191,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         M.qd = M.od = M.n_head * M.head_dim;
     }
     if (M.kind == AR_GPTOSS) { M.n_swa = (int)HPI("attention.sliding_window", 0); }
+    M.temp_scale = HPF("attention.temperature_scale", 0.0f);
+    M.temp_len = (int)HPI("attention.temperature_length", 0);
+    if (M.temp_scale != 0.0f && M.temp_len <= 0) M.temp_len = (int)HPI("rope.scaling.original_context_length", 0);
 
     /* rotary scaling (llama.cpp's rules, so YaRN models behave the same) */
     {
@@ -1151,11 +1239,25 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
                                         M.n_rot, M.rope_neox, M.rope_base, M.freq_scale, M.ext_factor, M.attn_factor, M.corr[0], M.corr[1], M.n_ctx_orig, M.kq_scale);
     }
 
-    /* copy every non-expert tensor into RAM */
+#ifndef __EMSCRIPTEN__
+    if (!PACK && o->gguf) {   /* zero-copy when the model fits in free RAM (ES_MMAP=1 forces it, ES_MMAP=0 turns it off) */
+        uint64_t total = G.file_size; int nsh = 1;
+        for (int i = 1; i < 256 && SH_FD[i] > 0; i++) { struct stat st; if (!fstat(SH_FD[i], &st)) total += (uint64_t)st.st_size; nsh = i + 1; }
+        const char *ev = getenv("ES_MMAP");
+        const long avail = mem_available_mb();
+        const int want = ev ? atoi(ev) : (avail > 0 && total / 1048576.0 < 0.85 * avail);
+        if (want && map_shard(0, G.fd) == 0) {
+            MAPPED = 1;
+            for (int i = 1; i < nsh; i++) if (map_shard(i, SH_FD[i])) { MAPPED = 0; break; }
+        }
+    }
+#endif
+    /* every non-expert tensor in RAM: copied, or used in place when mapped */
     M.tptr = calloc(G.n_tensors, sizeof(uint8_t *));
     for (uint64_t i = 0; i < G.n_tensors; i++) {
         const es_gguf_tensor *t = &G.t[i];
         if (is_expert_tensor(t->name)) continue;
+        if (MAPPED) { M.tptr[i] = (uint8_t *)tensor_ptr(t); M.core_bytes += t->nbytes; continue; }
         M.tptr[i] = es_alloc(t->nbytes ? t->nbytes : 1);
         if (!M.tptr[i]) ERR("out of memory loading %s", t->name);
         read_tensor(t, 0, M.tptr[i], t->nbytes);
@@ -1306,7 +1408,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     }
     int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
     if (any_moe && nslots < 2 * M.n_used + 2) nslots = 2 * M.n_used + 2;
-    if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache (%d slots of %.1f MB)", nslots, slot_bytes / 1048576.0); }
+    if (MAPPED) nslots = BMAX * M.n_used * 2;   /* only bookkeeping: experts are used where they lie in the mapping */
+    if (any_moe && MAPPED) { if (es_cache_init(&C, nslots, 64, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory"); }
+    else if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache (%d slots of %.1f MB)", nslots, slot_bytes / 1048576.0); }
 #ifndef __EMSCRIPTEN__
     if (any_moe) {
         const char *ev;
@@ -1314,7 +1418,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         SKIP_THR = (ev = getenv("ES_SKIP")) ? (float)atof(ev) : o->skip_thr;
         LOOKAHEAD = (ev = getenv("ES_LOOKAHEAD")) ? atoi(ev) : o->lookahead;
         int nio = (ev = getenv("ES_IOTHREADS")) ? atoi(ev) : (o->io_threads > 0 ? o->io_threads : 4);
-        if (!PACK && nio > 0 && !getenv("ES_SYNC_IO")) {
+        if (!PACK && !MAPPED && nio > 0 && !getenv("ES_SYNC_IO")) {
             gio_start(nio, nslots);
             PFX = malloc(sizeof(float) * (size_t)M.n_embd); PFR = malloc(sizeof(float) * (size_t)(M.n_exp + 1));
             PROF = calloc((size_t)M.n_layer * (size_t)M.n_exp, sizeof(unsigned));
@@ -1372,8 +1476,8 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     if (o->trace_path) TRACE = fopen(o->trace_path, "w");
 
     const char *nm = es_gguf_str(&G, "general.name");
-    INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, nslots,
-                            M.core_bytes / 1e6, any_moe ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv : 0)) / 1e6,
+    INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, MAPPED ? 0 : nslots,
+                            M.core_bytes / 1e6, any_moe && !MAPPED ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv : 0)) / 1e6,
                             (es_now_ns() - t0) / 1e9};
     DONE = 1;
     return 0;
@@ -1425,6 +1529,7 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
     DONE = 0;
     FIRST = 0;
     answer_start();
+    if (raw) H_STATE = HS_MSG;   /* plain text: no chat markup to hide */
     T_GEN0 = es_now_ns();
     return nt;
 }
@@ -1456,7 +1561,7 @@ static int draft_tokens(int32_t *out, int max) {
 }
 
 static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop) */
-static void answer_start(void) { ANS_FRESH = 1; H_STATE = HS_ROLE; H_THINK = 0; }
+static void answer_start(void) { ANS_FRESH = 1; H_STATE = HS_FRESH; H_THINK = 0; }
 /* the text of one answer token */
 static int piece_out(int tok, char *buf, int cap) {
     int n = es_tok_piece(T, tok, 0, buf, cap);

@@ -1,6 +1,9 @@
 #include "es_quant.h"
 #include "es_cpu.h"
 #include "es_iq_tables.h"
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+#include <immintrin.h>
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -494,6 +497,214 @@ static inline int dot8(const int8_t *a, const int8_t *b, int n) {
 #else
     int s = 0; for (int i = 0; i < n; i++) s += (int)a[i] * (int)b[i]; return s;
 #endif
+}
+
+
+/* ---- the low-bit formats of the big models with 8-bit activations: every 32 weights are decoded to int8 (codebook values,
+ * signs) and multiplied with the 32 activation values in integers; only the scales are float. Same numbers as
+ * decoding to float, apart from the activations' 8-bit rounding (as for every other integer kernel here). ---- */
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+static int LB_AVX2 = -1;
+__attribute__((target("avx2"))) static int dot32_avx2(const int8_t *w, const int8_t *a) {
+    const __m256i x = _mm256_loadu_si256((const __m256i *)w), y = _mm256_loadu_si256((const __m256i *)a);
+    const __m256i p = _mm256_madd_epi16(_mm256_maddubs_epi16(_mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x)), _mm256_set1_epi16(1));
+    const __m128i h = _mm_add_epi32(_mm256_castsi256_si128(p), _mm256_extracti128_si256(p, 1));
+    const __m128i q = _mm_add_epi32(h, _mm_shuffle_epi32(h, 0x4e));
+    return _mm_cvtsi128_si32(_mm_add_epi32(q, _mm_shuffle_epi32(q, 0xb1)));
+}
+#endif
+
+/* 32 weights from 16 bytes of 4-bit indices into a 16-entry table (MXFP4, IQ4): one table lookup instruction per 16 weights */
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+__attribute__((target("ssse3"))) static void lut32_ssse3(const uint8_t *qs, const int8_t *lut, int8_t *q) {
+    const __m128i t = _mm_loadu_si128((const __m128i *)lut), x = _mm_loadu_si128((const __m128i *)qs), m = _mm_set1_epi8(15);
+    _mm_storeu_si128((__m128i *)q, _mm_shuffle_epi8(t, _mm_and_si128(x, m)));
+    _mm_storeu_si128((__m128i *)(q + 16), _mm_shuffle_epi8(t, _mm_and_si128(_mm_srli_epi16(x, 4), m)));
+}
+#endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+static inline void lut32(const uint8_t *qs, const int8_t *lut, int8_t *q) {
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+    if (LB_AVX2 > 0) { lut32_ssse3(qs, lut, q); return; }
+#endif
+#if defined(__aarch64__)
+    const int8x16_t t = vld1q_s8(lut);
+    const uint8x16_t x = vld1q_u8(qs);
+    vst1q_s8(q, vqtbl1q_s8(t, vandq_u8(x, vdupq_n_u8(15))));
+    vst1q_s8(q + 16, vqtbl1q_s8(t, vshrq_n_u8(x, 4)));
+    return;
+#endif
+    for (int j = 0; j < 16; j++) { q[j] = lut[qs[j] & 15]; q[j + 16] = lut[qs[j] >> 4]; }
+}
+/* 8 codebook values with 8 sign bits, without branches: per byte (g ^ m) + (m & 1) negates where m = 0xFF.
+ * The IQ2/IQ3 codebooks have no zero entries, so no carry crosses a byte. */
+static uint64_t SIGNMASK[256];
+static void signmask_init(void) {
+    if (SIGNMASK[255]) return;
+    for (int b = 0; b < 256; b++) { uint64_t m = 0; for (int j = 0; j < 8; j++) if (b >> j & 1) m |= 0xFFull << (8 * j); SIGNMASK[b] = m; }
+}
+static inline void sgrid8(int8_t *q, uint64_t g, uint8_t signs) {
+    const uint64_t m = SIGNMASK[signs];
+    g = (g ^ m) + (m & 0x0101010101010101ull);
+    memcpy(q, &g, 8);
+}
+#if defined(__aarch64__)
+static inline int dot32_neon(const int8_t *w, const int8_t *a) {
+    const int8x16_t w0 = vld1q_s8(w), w1 = vld1q_s8(w + 16), a0 = vld1q_s8(a), a1 = vld1q_s8(a + 16);
+    int16x8_t p0 = vmull_s8(vget_low_s8(w0), vget_low_s8(a0)); p0 = vmlal_high_s8(p0, w0, a0);
+    int16x8_t p1 = vmull_s8(vget_low_s8(w1), vget_low_s8(a1)); p1 = vmlal_high_s8(p1, w1, a1);
+    return vaddvq_s32(vaddq_s32(vpaddlq_s16(p0), vpaddlq_s16(p1)));
+}
+#endif
+static inline int dot_n(const int8_t *w, const int8_t *a, int n) {
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+    if (n == 32 && LB_AVX2 > 0) return dot32_avx2(w, a);
+#endif
+#if defined(__aarch64__)
+    if (n == 32) return dot32_neon(w, a);
+#endif
+    if (n % 16) { int t = 0; for (int i = 0; i < n; i++) t += (int)w[i] * (int)a[i]; return t; }
+    return dot8(w, a, n);
+}
+static inline int asum(const int8_t *a, int n) { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }
+#define ES_MULTI_MAX 16
+static int getenv_cached_no_multi(void) { static int v = -1; if (v < 0) v = getenv("ES_NO_MULTI") != NULL; return v; }
+static int lowbit_ok(uint32_t t) {
+    return t == GGML_MXFP4 || t == GGML_IQ4_NL || t == GGML_IQ4_XS || t == GGML_IQ2_XXS || t == GGML_IQ2_XS || t == GGML_IQ2_S ||
+           t == GGML_IQ3_XXS || t == GGML_IQ3_S || t == GGML_IQ1_S || t == GGML_IQ1_M;
+}
+static void mv_lowbit_n(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *const *ys, int na, float *out, size_t ostride) {
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+    if (LB_AVX2 < 0) { __builtin_cpu_init(); LB_AVX2 = __builtin_cpu_supports("avx2") && !getenv("ES_NO_AVX2"); }
+#endif
+    const size_t rb = es_row_bytes(t, cols);
+    int8_t q[32] __attribute__((aligned(32)));
+    signmask_init();
+    for (int r = r0; r < r1; r++) {
+        const uint8_t *p = w + rb * (size_t)r;
+        float s[ES_MULTI_MAX] = {0};
+        switch (t) {
+        case GGML_MXFP4:
+            for (int b = 0; b < cols / 32; b++, p += 17) {
+                lut32(p + 1, ES_KVALUES_FP4, q);
+                { const float sc = e8m0_half(p[0]); for (int k = 0; k < na; k++) s[k] += sc * ys[k][b].d * (float)dot_n(q, ys[k][b].qs, 32); }
+            }
+            break;
+        case GGML_IQ4_NL:
+            for (int b = 0; b < cols / 32; b++, p += 18) {
+                lut32(p + 2, KV_IQ4NL, q);
+                { const float sc = h2f(p); for (int k = 0; k < na; k++) s[k] += sc * ys[k][b].d * (float)dot_n(q, ys[k][b].qs, 32); }
+            }
+            break;
+        case GGML_IQ4_XS:
+            for (int i = 0; i < cols / 256; i++, p += 136) {
+                uint16_t sh; memcpy(&sh, p + 2, 2);
+                const float d = h2f(p);
+                const uint8_t *sl = p + 4, *qs = p + 8;
+                for (int ib = 0; ib < 8; ib++, qs += 16) {
+                    const int ls = ((sl[ib / 2] >> (4 * (ib % 2))) & 0xf) | (((sh >> (2 * ib)) & 3) << 4);
+                    for (int j = 0; j < 16; j++) { q[j] = KV_IQ4NL[qs[j] & 15]; q[j + 16] = KV_IQ4NL[qs[j] >> 4]; }
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * (float)(ls - 32) * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
+        case GGML_IQ2_XXS:
+            for (int i = 0; i < cols / 256; i++, p += 66) {
+                const float d = h2f(p);
+                for (int ib = 0; ib < 8; ib++) {
+                    uint32_t a2[2]; memcpy(a2, p + 2 + 8 * ib, 8);
+                    const uint8_t *a8 = (const uint8_t *)a2;
+                    for (int l = 0; l < 4; l++) sgrid8(q + 8 * l, ES_IQ2XXS_GRID[a8[l]], ES_KSIGNS_IQ2XS[(a2[1] >> 7 * l) & 127]);
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * (0.5f + (float)(a2[1] >> 28)) * 0.25f * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
+        case GGML_IQ2_XS:
+            for (int i = 0; i < cols / 256; i++, p += 74) {
+                const float d = h2f(p);
+                uint16_t qs[32]; memcpy(qs, p + 2, 64);
+                const uint8_t *sc = p + 66;
+                for (int ib = 0; ib < 8; ib++) {
+                    for (int l = 0; l < 4; l++) sgrid8(q + 8 * l, ES_IQ2XS_GRID[qs[4 * ib + l] & 511], ES_KSIGNS_IQ2XS[qs[4 * ib + l] >> 9]);
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * 0.25f * a->d * ((0.5f + (sc[ib] & 0xf)) * (float)dot_n(q, a->qs, 16) + (0.5f + (sc[ib] >> 4)) * (float)dot_n(q + 16, a->qs + 16, 16)); }
+                }
+            }
+            break;
+        case GGML_IQ2_S:
+            for (int i = 0; i < cols / 256; i++, p += 82) {
+                const float d = h2f(p);
+                const uint8_t *qs = p + 2, *signs = p + 34, *qh = p + 66, *sc = p + 74;
+                for (int ib = 0; ib < 8; ib++, qs += 4, signs += 4) {
+                    for (int l = 0; l < 4; l++) sgrid8(q + 8 * l, ES_IQ2S_GRID[qs[l] | ((qh[ib] << (8 - 2 * l)) & 0x300)], signs[l]);
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * 0.25f * a->d * ((0.5f + (sc[ib] & 0xf)) * (float)dot_n(q, a->qs, 16) + (0.5f + (sc[ib] >> 4)) * (float)dot_n(q + 16, a->qs + 16, 16)); }
+                }
+            }
+            break;
+        case GGML_IQ3_XXS:
+            for (int i = 0; i < cols / 256; i++, p += 98) {
+                const float d = h2f(p);
+                const uint8_t *qs = p + 2, *ss = p + 66;
+                for (int ib = 0; ib < 8; ib++, qs += 8) {
+                    uint32_t a2; memcpy(&a2, ss + 4 * ib, 4);
+                    for (int l = 0; l < 4; l++)
+                        sgrid8(q + 8 * l, (uint64_t)ES_IQ3XXS_GRID[qs[2 * l]] | (uint64_t)ES_IQ3XXS_GRID[qs[2 * l + 1]] << 32, ES_KSIGNS_IQ2XS[(a2 >> 7 * l) & 127]);
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * (0.5f + (float)(a2 >> 28)) * 0.5f * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
+        case GGML_IQ3_S:
+            for (int i = 0; i < cols / 256; i++, p += 110) {
+                const float d = h2f(p);
+                const uint8_t *qs = p + 2, *qh = p + 66, *signs = p + 74, *sc = p + 106;
+                for (int ib = 0; ib < 8; ib++, qs += 8, signs += 4) {
+                    const int h = ib & 1, hb = qh[ib];
+                    for (int l = 0; l < 4; l++)
+                        sgrid8(q + 8 * l, (uint64_t)ES_IQ3S_GRID[qs[2 * l] | ((hb << (8 - 2 * l)) & 256)] | (uint64_t)ES_IQ3S_GRID[qs[2 * l + 1] | ((hb << (7 - 2 * l)) & 256)] << 32, signs[l]);
+                                        for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * (float)(1 + 2 * (h ? sc[ib / 2] >> 4 : sc[ib / 2] & 0xf)) * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
+        case GGML_IQ1_S:
+            for (int i = 0; i < cols / 256; i++, p += 50) {
+                const float d = h2f(p);
+                const uint8_t *qs = p + 2;
+                uint16_t qh[8]; memcpy(qh, p + 34, 16);
+                for (int ib = 0; ib < 8; ib++, qs += 4) {
+                    for (int l = 0; l < 4; l++) memcpy(q + 8 * l, ES_IQ1S_GRID + (qs[l] | (((qh[ib] >> 3 * l) & 7) << 8)), 8);
+                    const float delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+                    for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += d * (float)(2 * ((qh[ib] >> 12) & 7) + 1) * a->d * ((float)dot_n(q, a->qs, 32) + delta * (float)asum(a->qs, 32)); }
+                }
+            }
+            break;
+        case GGML_IQ1_M:
+            for (int i = 0; i < cols / 256; i++, p += 56) {
+                const uint8_t *qs = p, *qh = p + 32;
+                uint16_t sc[4]; memcpy(sc, p + 48, 8);
+                const float d = es_fp16_to_fp32((uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000)));
+                for (int ib = 0; ib < 8; ib++, qs += 4, qh += 2) {
+                    const int idx[4] = {qs[0] | ((qh[0] << 8) & 0x700), qs[1] | ((qh[0] << 4) & 0x700), qs[2] | ((qh[1] << 8) & 0x700), qs[3] | ((qh[1] << 4) & 0x700)};
+                    const float delta[4] = {qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA, qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA,
+                                            qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA, qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA};
+                    for (int l = 0; l < 4; l++) memcpy(q + 8 * l, ES_IQ1S_GRID + idx[l], 8);
+                    const float dl1 = (float)(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1), dl2 = (float)(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+                    for (int k = 0; k < na; k++) {
+                        const es_blk_q80 *a = &ys[k][i * 8 + ib];
+                        float part[2] = {0, 0};
+                        for (int l = 0; l < 4; l++) part[l / 2] += (float)dot_n(q + 8 * l, a->qs + 8 * l, 8) + delta[l] * (float)asum(a->qs + 8 * l, 8);
+                        s[k] += a->d * d * (dl1 * part[0] + dl2 * part[1]);
+                    }
+                }
+            }
+            break;
+        }
+        for (int k = 0; k < na; k++) out[(size_t)k * ostride + r] = s[k];
+    }
+}
+static void mv_lowbit(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const es_blk_q80 *ys[1] = {y};
+    mv_lowbit_n(t, w, cols, r0, r1, ys, 1, out, 0);
 }
 
 static void mv_q8_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
@@ -1178,6 +1389,19 @@ static int NO_MULTI = -1;   /* ES_NO_MULTI=1: one activation at a time (for comp
 #endif
 /* several activations against rows [r0, r1): y + q * ys receives activation q's results. Same numbers as calling es_matvec for each. */
 void es_matvec_multi(uint32_t t, const void *W, int cols, int r0, int r1, const es_act *a, int na, float *y, size_t ys, float *scratch) {
+    if (na > 1 && lowbit_ok(t) && !getenv_cached_no_multi()) {   /* low-bit formats: each block decoded once for every activation */
+        int q80 = 1;
+        for (int i = 0; i < na; i++) q80 &= a[i].q80 != NULL;
+        if (q80) {
+            for (int k0 = 0; k0 < na; k0 += ES_MULTI_MAX) {
+                const es_blk_q80 *yy[ES_MULTI_MAX];
+                const int nk = na - k0 < ES_MULTI_MAX ? na - k0 : ES_MULTI_MAX;
+                for (int k = 0; k < nk; k++) yy[k] = a[k0 + k].q80;
+                mv_lowbit_n(t, W, cols, r0, r1, yy, nk, y + (size_t)k0 * ys, ys);
+            }
+            return;
+        }
+    }
 #if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
     if (HAVE_AVX2 < 0) { __builtin_cpu_init(); HAVE_AVX2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("f16c") && !getenv("ES_NO_AVX2"); }
     if (NO_MULTI < 0) NO_MULTI = getenv("ES_NO_MULTI") != NULL;
@@ -1247,6 +1471,7 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
         }
     }
 #endif
+    if (a->q80 && lowbit_ok(t)) { mv_lowbit(t, w, cols, r0, r1, a->q80, y); return; }
     if (a->q80) {
         switch (t) {
         case GGML_Q8_0: mv_q8_0(w, cols, r0, r1, a->q80, y); return;

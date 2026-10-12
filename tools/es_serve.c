@@ -66,7 +66,16 @@ static void bjson(buf *b, const char *s, size_t n) {          /* a JSON string l
         if (c == '"' || c == '\\') { char e[2] = {'\\', (char)c}; bput(b, e, 2); }
         else if (c == '\n') bput(b, "\\n", 2); else if (c == '\r') bput(b, "\\r", 2); else if (c == '\t') bput(b, "\\t", 2);
         else if (c < 0x20) { char e[8]; snprintf(e, sizeof e, "\\u%04x", c); bput(b, e, 6); }
-        else bput(b, (const char *)&s[i], 1);
+        else if (c < 0x80) bput(b, (const char *)&s[i], 1);
+        else {   /* a whole, valid UTF-8 character, or U+FFFD: JSON must be valid UTF-8 whatever bytes the model wrote */
+            const int k = c >= 0xC2 && c <= 0xDF ? 2 : c >= 0xE0 && c <= 0xEF ? 3 : c >= 0xF0 && c <= 0xF4 ? 4 : 0;
+            int ok = k > 0 && i + (size_t)k <= n;
+            for (int j = 1; ok && j < k; j++) ok = ((unsigned char)s[i + j] & 0xC0) == 0x80;
+            if (ok && k == 3) { const unsigned char c1 = (unsigned char)s[i + 1]; ok = !(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0); }
+            if (ok && k == 4) { const unsigned char c1 = (unsigned char)s[i + 1]; ok = !(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90); }
+            if (ok) { bput(b, (const char *)&s[i], (size_t)k); i += (size_t)k - 1; }
+            else bput(b, "\xef\xbf\xbd", 3);
+        }
     }
     bput(b, "\"", 1);
 }

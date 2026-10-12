@@ -58,11 +58,16 @@ for name, scales in TYPES.items():
         if r.returncode:
             print('FAIL', name, r.stderr.strip()); bad += 1; continue
         got = np.fromfile(bo, dtype=np.float32)
+        mv = None
+        if blck >= 32 and (len(raw.reshape(-1)) * blck // size) % 256 == 0:   # matrix-vector product: integer kernel against float
+            r2 = subprocess.run([QT, '--mv', str(int(qt)), bi], capture_output=True, text=True)
+            mv = float(r2.stdout.strip()) if r2.returncode == 0 and r2.stdout.strip() else None
     n = min(len(got), len(want))
     err = float(np.max(np.abs(got[:n] - want[:n]))) if n else 1.0
     scale = float(np.max(np.abs(want))) or 1.0
-    ok = n == len(want) and err <= 1e-6 * scale
+    ok = n == len(want) and err <= 1e-6 * scale and (mv is None or mv < 0.03)
     bad += not ok
-    print('%-4s %-8s %6d values  max diff %.2e (of %.2e)' % ('PASS' if ok else 'FAIL', name, n, err, scale))
+    print('%-4s %-8s %6d values  max diff %.2e (of %.2e)%s' % ('PASS' if ok else 'FAIL', name, n, err, scale,
+          '' if mv is None else '   matvec rel. error %.1e (8-bit activations)' % mv))
 print('ALL PASSED' if not bad else '%d FAILED' % bad)
 sys.exit(1 if bad else 0)

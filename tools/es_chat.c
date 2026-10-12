@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
           in.name, in.arch, in.layers, in.experts, in.used);
     STAGE("      core %.0f MB loaded in %.2f s | expert cache %d slots (%.0f MB) | context %d tokens (%.0f MB)\n",
           in.core_mb, in.load_s, in.cache_slots, in.cache_mb, in.ctx, in.kv_mb);
-    STAGE("      %s | RAM now %ld MB\n", o.pack ? "experts from the pack" : "experts read straight from the GGUF", es_rss_mb());
+    STAGE("      %s | RAM now %ld MB\n", o.pack ? "experts from the pack" : in.experts && !in.cache_slots ? "whole model mapped in RAM (zero copy)" : "experts read straight from the GGUF", es_rss_mb());
 
     if (dump_ids && dump_path) {
         static int32_t ids[1 << 14];
