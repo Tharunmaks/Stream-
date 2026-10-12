@@ -8,10 +8,10 @@
 For each family a small model with random weights is built with Hugging Face transformers, converted to GGUF with
 llama.cpp's converter, and run by es_chat (-D: logits of every position). The logits must match PyTorch's
 (float32 weights, exact float activations).
-Families: gpt-oss (attention sinks, sliding window, YaRN, clamped SwiGLU, expert biases), DeepSeek-V3 (MLA with the absorbed
+Families: Qwen3.5-MoE (Gated DeltaNet linear attention, gated attention, shared expert), gpt-oss (attention sinks, sliding window, YaRN, clamped SwiGLU, expert biases), DeepSeek-V3 (MLA with the absorbed
 projections, sigmoid routing with expert groups and a selection bias, shared expert, dense first layer, YaRN), Mixtral
 (both the merged and the old one-tensor-per-expert layouts) and Llama 3 (rope_freqs).
-Tokenizers are downloaded from Hugging Face (openai/gpt-oss-20b, deepseek-ai/DeepSeek-V3, TinyLlama/TinyLlama-1.1B-Chat-v1.0).
+Tokenizers are downloaded from Hugging Face (openai/gpt-oss-20b, deepseek-ai/DeepSeek-V3, TinyLlama/TinyLlama-1.1B-Chat-v1.0, Qwen/Qwen3.6-35B-A3B).
 """
 import argparse
 import json
@@ -31,6 +31,10 @@ try:
     import torch
     from transformers import (AutoConfig, AutoModelForCausalLM, DeepseekV3Config, DeepseekV3ForCausalLM, GptOssConfig,
                               GptOssForCausalLM, LlamaConfig, LlamaForCausalLM, MixtralConfig, MixtralForCausalLM)
+    try:
+        from transformers import Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM
+    except ImportError:
+        Qwen3_5MoeTextConfig = None
 except ImportError as e:
     sys.exit('SKIP: needs torch and transformers (%s)' % e)
 
@@ -38,7 +42,8 @@ W = args.work
 os.makedirs(W, exist_ok=True)
 TOK = {'gptoss': ('openai/gpt-oss-20b', ['tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'chat_template.jinja']),
        'deepseek': ('deepseek-ai/DeepSeek-V3', ['tokenizer.json', 'tokenizer_config.json']),
-       'llama': ('TinyLlama/TinyLlama-1.1B-Chat-v1.0', ['tokenizer.model', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json'])}
+       'llama': ('TinyLlama/TinyLlama-1.1B-Chat-v1.0', ['tokenizer.model', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json']),
+       'qwen35': ('Qwen/Qwen3.6-35B-A3B', ['tokenizer.json', 'tokenizer_config.json', 'vocab.json', 'merges.txt'])}
 
 
 def tokdir(kind):
@@ -52,7 +57,7 @@ def tokdir(kind):
     return d
 
 
-def build(name, model, kind, extra_cfg=None):
+def build(name, model, kind, extra_cfg=None, convert_args=()):
     out = os.path.join(W, name)
     shutil.rmtree(out, ignore_errors=True)
     torch.manual_seed(0)
@@ -60,6 +65,7 @@ def build(name, model, kind, extra_cfg=None):
         for n, p in model.named_parameters():
             if p.dim() >= 2: p.normal_(0, 0.08)
             elif 'norm' in n: p.fill_(1.0).add_(torch.randn_like(p) * 0.1)
+            elif 'A_log' in n: p.uniform_(0, 2)
             else: p.normal_(0, 0.3)
     model.save_pretrained(out)
     if extra_cfg:
@@ -68,7 +74,7 @@ def build(name, model, kind, extra_cfg=None):
     td = tokdir(kind)
     for f in os.listdir(td): shutil.copy(os.path.join(td, f), out)
     gguf = out + '-f32.gguf'
-    r = subprocess.run([sys.executable, os.path.join(args.llama_cpp, 'convert_hf_to_gguf.py'), out, '--outtype', 'f32', '--outfile', gguf], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, os.path.join(args.llama_cpp, 'convert_hf_to_gguf.py'), out, '--outtype', 'f32', '--outfile', gguf, *convert_args], capture_output=True, text=True)
     if r.returncode: sys.exit('convert failed for %s:\n%s' % (name, r.stderr[-2000:]))
     return out, gguf
 
@@ -109,6 +115,15 @@ def split_experts(src, dst):   # the old Mixtral layout: blk.L.ffn_gate.E.weight
 
 ids = list(range(1, 21))
 cases = []
+if Qwen3_5MoeTextConfig is not None:
+    cases.append(('Qwen3.5-MoE (DeltaNet)', *build('qwen35', Qwen3_5MoeForCausalLM(Qwen3_5MoeTextConfig(
+        vocab_size=248320, hidden_size=128, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=64,
+        linear_conv_kernel_dim=4, linear_key_head_dim=32, linear_value_head_dim=32, linear_num_key_heads=2, linear_num_value_heads=4,
+        moe_intermediate_size=64, shared_expert_intermediate_size=64, num_experts_per_tok=2, num_experts=8, max_position_embeddings=32768,
+        rope_parameters={'rope_theta': 10000000.0, 'partial_rotary_factor': 0.25, 'rope_type': 'default'}, tie_word_embeddings=False)).float(),
+        'qwen35', convert_args=('--no-mtp',)), 248320))
+else:
+    print('SKIP Qwen3.5-MoE: needs a transformers version with Qwen3_5Moe')
 cases.append(('gpt-oss', *build('gptoss', GptOssForCausalLM(GptOssConfig(
     vocab_size=201088, hidden_size=96, intermediate_size=64, num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=32,
     num_local_experts=8, num_experts_per_tok=2, sliding_window=4, max_position_embeddings=131072, rope_theta=150000.0,

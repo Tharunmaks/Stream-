@@ -41,7 +41,7 @@ static int BATCH_OK;
 /* ---------------- weights ---------------- */
 typedef struct { uint32_t type; int rows, cols; const void *data; } W;
 
-enum { AR_STD, AR_GPTOSS, AR_DS2 };
+enum { AR_STD, AR_GPTOSS, AR_DS2, AR_QWEN35 };
 enum { GATE_SOFTMAX, GATE_SIGMOID, GATE_SOFTMAX_CHOSEN };
 
 typedef struct {
@@ -53,7 +53,8 @@ typedef struct {
     W sh_gate, sh_up, sh_down, sh_gate_inp;   /* shared expert (and its sigmoid gate, Qwen2-MoE) */
     W gate_inp_b, exp_probs_b;                /* router bias (gpt-oss); expert selection bias (DeepSeek-V3) */
     W gate_exps_b, up_exps_b, down_exps_b;    /* per-expert biases (gpt-oss) */
-    int moe, swa;
+    W qkv, zgate, conv1d, dt_b, ssm_a, ssm_beta, ssm_alpha, ssm_norm, ssm_out;   /* Gated DeltaNet layer (Qwen3.5) */
+    int moe, swa, recr;
 } layer;
 
 typedef struct {
@@ -73,6 +74,8 @@ typedef struct {
     float w_scale;
     /* MLA */
     int q_lora, kv_lora, nope, rope_d, v_head;
+    /* Gated DeltaNet (Qwen3.5): conv kernel, key heads x key size, value heads x value size; attention layers have an output gate */
+    int recurrent, conv_k, conv_dim, hk, dk_l, hv, dv_l, attn_gated;
     /* attention geometry: dk/dv per head inside attention, kvk/kvv floats per cached position, qd = Q floats per token, od = o input */
     int dk, dv, kvk, kvv, qd, od;
     W tok_embd, output, output_norm;
@@ -217,7 +220,10 @@ static void rope(float *v, int n_heads, int stride, int pos) {
 
 /* ---------------- state ---------------- */
 static float *LOGITS;
-static float *KC, *VC;   /* [layer][ctx][kvk] and [layer][ctx][kvv] (no VC for MLA: values are the start of each key row) */
+static float *KC, *VC;   /* [kv layer][ctx][kvk] and [kv layer][ctx][kvv] (no VC for MLA: values are the start of each key row) */
+static int *KVI, NKVL;   /* cache index of each layer (-1: a recurrent layer, which keeps a state instead) and the number of cached layers */
+static float **SSM, **CONV, **SSM_SNAP, **CONV_SNAP; static int SNAP_POS = -1;   /* recurrent states, and a copy at the end of the last prompt */
+static float *BQKV, *BZ, *BBETA, *BALPHA, *BLIN, *BGATE;
 /* batch buffers: up to BMAX tokens */
 static float *BX, *BXN, *BTMP, *BQ, *BQA, *BKV, *BQM, *BATL, *BATTN, *BGU, *BH, *BYE, *BROUT, *BLOG, *BV2;
 static es_act BACT[BMAX], BACT2[BMAX];
@@ -243,8 +249,8 @@ static void att_task(int tid, int n, void *arg) {
     const att_arg *aa = arg;
     const layer *L = &M.L[aa->layer];
     const int mla = M.kind == AR_DS2, dk = M.dk, dv = M.dv, grp = M.n_head / M.n_head_kv;
-    const float *kc = KC + (size_t)aa->layer * M.ctx * M.kvk;
-    const float *vc = mla ? kc : VC + (size_t)aa->layer * M.ctx * M.kvv;
+    const float *kc = KC + (size_t)KVI[aa->layer] * M.ctx * M.kvk;
+    const float *vc = mla ? kc : VC + (size_t)KVI[aa->layer] * M.ctx * M.kvv;
     const int vstride = mla ? M.kvk : M.kvv;
     float *sc = SCRATCH[tid];
     const float scale = M.kq_scale;
@@ -738,8 +744,15 @@ static void attention_n(int l, int N, int pos0) {
     const int n = M.n_embd;
     if (M.kind != AR_DS2) {
         const int hd = M.head_dim, kvd = M.kvk, qd = M.n_head * hd;
-        jobn(&L->q, BACT, BQ, (size_t)qd, N); jobn(&L->k, BACT, BKV, (size_t)kvd, N); jobn(&L->v, BACT, BV2, (size_t)kvd, N);
+        const int qrow = M.attn_gated ? 2 * qd : qd;
+        jobn(&L->q, BACT, BQ, (size_t)qrow, N); jobn(&L->k, BACT, BKV, (size_t)kvd, N); jobn(&L->v, BACT, BV2, (size_t)kvd, N);
         run_jobs();
+        if (M.attn_gated)   /* split [q | gate] per head: gates aside, queries packed */
+            for (int i = 0; i < N; i++) {
+                const float *src = BQ + (size_t)i * qrow;
+                for (int h = 0; h < M.n_head; h++) memcpy(BGATE + (size_t)i * qd + (size_t)h * hd, src + (size_t)h * 2 * hd + hd, sizeof(float) * (size_t)hd);
+                for (int h = 0; h < M.n_head; h++) memmove(BQ + (size_t)i * qd + (size_t)h * hd, BQ + (size_t)i * qrow + (size_t)h * 2 * hd, sizeof(float) * (size_t)hd);
+            }
         for (int i = 0; i < N; i++) {
             float *q = BQ + (size_t)i * qd, *k = BKV + (size_t)i * kvd, *v = BV2 + (size_t)i * kvd;
             add_bias(q, &L->bq, qd); add_bias(k, &L->bk, kvd); add_bias(v, &L->bv, kvd);
@@ -753,10 +766,12 @@ static void attention_n(int l, int N, int pos0) {
             }
             rope(q, M.n_head, hd, pos0 + i); rope(k, M.n_head_kv, hd, pos0 + i);
             attn_temp(q, qd, pos0 + i);
-            memcpy(KC + ((size_t)l * M.ctx + pos0 + i) * kvd, k, sizeof(float) * (size_t)kvd);
-            memcpy(VC + ((size_t)l * M.ctx + pos0 + i) * kvd, v, sizeof(float) * (size_t)kvd);
+            memcpy(KC + ((size_t)KVI[l] * M.ctx + pos0 + i) * kvd, k, sizeof(float) * (size_t)kvd);
+            memcpy(VC + ((size_t)KVI[l] * M.ctx + pos0 + i) * kvd, v, sizeof(float) * (size_t)kvd);
         }
         for (int i = 0; i < N; i++) attend(l, pos0 + i, BQ + (size_t)i * qd, BATTN + (size_t)i * qd);   /* causal: all earlier rows are written */
+        if (M.attn_gated)
+            for (size_t i = 0; i < (size_t)N * qd; i++) BATTN[i] *= 1.0f / (1.0f + expf(-BGATE[i]));
     } else {
         /* MLA: q = q_b(norm(q_a(x))) per head [nope | rope]; the cache row is [norm(c) | rope(k_pe)], values are c */
         const int H = M.n_head, nope = M.nope, rd = M.rope_d, kvl = M.kv_lora, qh = nope + rd, kvw = kvl + rd;
@@ -770,7 +785,7 @@ static void attention_n(int l, int N, int pos0) {
         }
         static es_act qn[BMAX * 256];
         for (int i = 0; i < N; i++) {
-            float *kv = BKV + (size_t)i * kvw, *row = KC + ((size_t)l * M.ctx + pos0 + i) * M.kvk;
+            float *kv = BKV + (size_t)i * kvw, *row = KC + ((size_t)KVI[l] * M.ctx + pos0 + i) * M.kvk;
             rmsnorm(row, kv, L->kv_a_norm.data, kvl, M.eps);
             memcpy(row + kvl, kv + kvl, sizeof(float) * (size_t)rd);
             rope(row + kvl, 1, rd, pos0 + i);
@@ -804,6 +819,107 @@ static void attention_n(int l, int N, int pos0) {
     for (int i = 0; i < N; i++) add_bias(BTMP + (size_t)i * n, &L->bo, n);
 }
 
+/* Gated DeltaNet (Qwen3.5 linear attention), one token after another: a causal depthwise convolution over [q | k | v], SiLU,
+ * L2-normalised q and k, then per value head a dk x dv state S: S *= exp(g); S += k (beta (v - S^T k))^T; out = S^T q / sqrt(dk);
+ * the output is RMS-normalised per head and gated by SiLU(z). Value head h reads key head h % hk (the GGUF's tiled order). */
+typedef struct { int l; const float *qkv; float *out; const float *beta, *g; } gdn_arg;
+static void gdn_task(int tid, int n, void *arg) {
+    const gdn_arg *ga = arg;
+    const int dk = M.dk_l, dv = M.dv_l, hk = M.hk;
+    const float scale = 1.0f / sqrtf((float)dk);
+    float *kvm = SCRATCH[tid];
+    int h0, h1;
+    es_split(M.hv, tid, n, &h0, &h1);
+    for (int h = h0; h < h1; h++) {
+        const float *q = ga->qkv + (size_t)(h % hk) * dk, *k = ga->qkv + (size_t)hk * dk + (size_t)(h % hk) * dk;
+        const float *v = ga->qkv + (size_t)2 * hk * dk + (size_t)h * dv;
+        float *S = SSM[ga->l] + (size_t)h * dk * dv, *o = ga->out + (size_t)h * dv;
+        const float g = expf(ga->g[h]), b = ga->beta[h];
+        for (int j = 0; j < dv; j++) kvm[j] = 0;
+        for (int i = 0; i < dk; i++) { float *row = S + (size_t)i * dv; for (int j = 0; j < dv; j++) { row[j] *= g; kvm[j] += row[j] * k[i]; } }
+        for (int j = 0; j < dv; j++) kvm[j] = (v[j] - kvm[j]) * b;
+        for (int j = 0; j < dv; j++) o[j] = 0;
+        for (int i = 0; i < dk; i++) {
+            float *row = S + (size_t)i * dv; const float ki = k[i], qi = q[i] * scale;
+            for (int j = 0; j < dv; j++) { row[j] += ki * kvm[j]; o[j] += row[j] * qi; }
+        }
+    }
+}
+static void l2norm(float *x, int n, float eps) {
+    double ss = 0;
+    for (int i = 0; i < n; i++) ss += (double)x[i] * x[i];
+    const float s = (float)(1.0 / sqrt(ss + eps));
+    for (int i = 0; i < n; i++) x[i] *= s;
+}
+static void linear_attn_n(int l, int N) {
+    const layer *L = &M.L[l];
+    const int cd = M.conv_dim, K = M.conv_k, hv = M.hv, dv = M.dv_l, vd = hv * dv;
+    jobn(&L->qkv, BACT, BQKV, (size_t)cd, N); jobn(&L->zgate, BACT, BZ, (size_t)vd, N);
+    jobn(&L->ssm_beta, BACT, BBETA, (size_t)hv, N); jobn(&L->ssm_alpha, BACT, BALPHA, (size_t)hv, N);
+    run_jobs();
+    const float *w = L->conv1d.data, *dtb = L->dt_b.data, *A = L->ssm_a.data, *nw = L->ssm_norm.data;
+    float *cs = CONV[l];
+    for (int t = 0; t < N; t++) {
+        float *x = BQKV + (size_t)t * cd;
+        for (int c = 0; c < cd; c++) {   /* causal convolution over the last K inputs of each channel */
+            const float *wc = w + (size_t)c * K;
+            float y = wc[K - 1] * x[c];
+            for (int j = 0; j < K - 1; j++) y += wc[j] * cs[(size_t)j * cd + c];
+            for (int j = 0; j < K - 2; j++) cs[(size_t)j * cd + c] = cs[(size_t)(j + 1) * cd + c];
+            cs[(size_t)(K - 2) * cd + c] = x[c];
+            x[c] = y / (1.0f + expf(-y));
+        }
+        for (int h = 0; h < M.hk; h++) { l2norm(x + (size_t)h * M.dk_l, M.dk_l, M.eps); l2norm(x + (size_t)(M.hk + h) * M.dk_l, M.dk_l, M.eps); }
+        float beta[256], g[256];
+        for (int h = 0; h < hv; h++) {
+            beta[h] = 1.0f / (1.0f + expf(-BBETA[(size_t)t * hv + h]));
+            const float a = BALPHA[(size_t)t * hv + h] + dtb[h];
+            g[h] = (a > 20.0f ? a : log1pf(expf(a))) * A[h];   /* softplus(a + dt) * -exp(A_log) */
+        }
+        gdn_arg ga = {l, x, BLIN + (size_t)t * vd, beta, g};
+        if (NT == 1) gdn_task(0, 1, &ga); else es_cpool_run(CP, gdn_task, &ga);
+        float *o = BLIN + (size_t)t * vd; const float *z = BZ + (size_t)t * vd;
+        for (int h = 0; h < hv; h++) {
+            rmsnorm(o + (size_t)h * dv, o + (size_t)h * dv, nw, dv, M.eps);
+            for (int j = 0; j < dv; j++) { const float zz = z[(size_t)h * dv + j]; o[(size_t)h * dv + j] *= zz / (1.0f + expf(-zz)); }
+        }
+    }
+    arena_reset();
+    for (int i = 0; i < N; i++) prep(&BACT2[i], BLIN + (size_t)i * vd, vd);
+    jobn(&L->ssm_out, BACT2, BTMP, (size_t)M.n_embd, N);
+    run_jobs();
+}
+static size_t ssm_floats(void) { return (size_t)M.hv * M.dk_l * M.dv_l; }
+static size_t rstate_floats(void);
+static void rstate_pack(float *dst);
+static void rstate_unpack(const float *src);
+static size_t conv_floats(void) { return (size_t)(M.conv_k - 1) * M.conv_dim; }
+static void recurrent_zero(void) {
+    for (int l = 0; l < M.n_layer; l++) if (SSM[l]) { memset(SSM[l], 0, sizeof(float) * ssm_floats()); memset(CONV[l], 0, sizeof(float) * conv_floats()); }
+}
+static void recurrent_copy(int to_snapshot) {
+    for (int l = 0; l < M.n_layer; l++) if (SSM[l]) {
+        if (to_snapshot) { memcpy(SSM_SNAP[l], SSM[l], sizeof(float) * ssm_floats()); memcpy(CONV_SNAP[l], CONV[l], sizeof(float) * conv_floats()); }
+        else { memcpy(SSM[l], SSM_SNAP[l], sizeof(float) * ssm_floats()); memcpy(CONV[l], CONV_SNAP[l], sizeof(float) * conv_floats()); }
+    }
+}
+
+/* the recurrent state at the end of the last prompt, as one block (parked conversations and the disk cache keep it with the rows) */
+static size_t rstate_floats(void) { size_t f = 0; for (int l = 0; l < M.n_layer; l++) if (SSM && SSM[l]) f += ssm_floats() + conv_floats(); return f; }
+static void rstate_pack(float *dst) {
+    for (int l = 0; l < M.n_layer; l++) if (SSM && SSM[l]) {
+        memcpy(dst, SSM_SNAP[l], sizeof(float) * ssm_floats()); dst += ssm_floats();
+        memcpy(dst, CONV_SNAP[l], sizeof(float) * conv_floats()); dst += conv_floats();
+    }
+}
+static void rstate_unpack(const float *src) {   /* into the snapshot and the live state */
+    for (int l = 0; l < M.n_layer; l++) if (SSM && SSM[l]) {
+        memcpy(SSM_SNAP[l], src, sizeof(float) * ssm_floats()); src += ssm_floats();
+        memcpy(CONV_SNAP[l], src, sizeof(float) * conv_floats()); src += conv_floats();
+    }
+    recurrent_copy(0);
+}
+
 /* N tokens through the whole model; logits of tokens logits_from.. go to BLOG rows 0.. */
 static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
     const int n = M.n_embd;
@@ -813,7 +929,7 @@ static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
         layer *L = &M.L[l];
         arena_reset();
         for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
-        attention_n(l, N, pos0);
+        if (L->recr) linear_attn_n(l, N); else attention_n(l, N, pos0);
         for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
         arena_reset();
         for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
@@ -917,6 +1033,7 @@ static const char *template_kind_of(const char *t) {
     if (strstr(t, "<|im_middle|>")) return "kimi";
     if (strstr(t, "<|channel|>") || (strstr(t, "<|start|>") && strstr(t, "<|message|>"))) return "harmony";
     if (strstr(t, DS_USER)) return "deepseek";
+    if (strstr(t, "<|im_start|>") && strstr(t, "'<think>\\n' }}")) return "chatml_think";   /* Qwen3.5: the answer starts inside <think> */
     if (strstr(t, "<|im_start|>")) return "chatml";
     if (strstr(t, "<|start_header_id|>")) return "llama3";
     if (strstr(t, "<|user|>")) return "tulu";
@@ -936,8 +1053,8 @@ static void harmony_system(char *out, size_t cap) {
 static void format_turn(char *out, size_t cap, const char *msg, int first) {
     /* later turns first close the previous answer: its end token was
      * sampled but not fed back into the model */
-    if (TK("chatml"))
-        snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", first ? "" : "<|im_end|>\n", msg);
+    if (TK("chatml") || TK("chatml_think"))
+        snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n%s", first ? "" : "<|im_end|>\n", msg, TK("chatml_think") ? "<think>\n" : "");
     else if (TK("tulu"))
         snprintf(out, cap, "%s<|user|>\n%s\n<|assistant|>\n", first ? "<|endoftext|>" : "<|endoftext|>\n", msg);
     else if (TK("llama3"))
@@ -966,7 +1083,7 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
 int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     size_t o = 0;
 #define PUT(...) do { int w_ = snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__); if (w_ < 0 || o + (size_t)w_ >= cap) return -1; o += (size_t)w_; } while (0)
-    const int chatml = TK("chatml"), tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony");
+    const int cthink = TK("chatml_think"), chatml = TK("chatml") || cthink, tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony");
     const char *sp = msp ? " " : "";
     const int v7 = TK("mistral_v7");
     if (v7) {   /* <s>[SYSTEM_PROMPT]..[/SYSTEM_PROMPT][INST]user[/INST]answer</s>[INST].. */
@@ -995,7 +1112,10 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     for (int i = 0; i < n; i++) {
         const char *r = m[i].role ? m[i].role : "user", *c = m[i].content ? m[i].content : "";
         const int sys = !strcmp(r, "system") || !strcmp(r, "developer"), as = !strcmp(r, "assistant");
-        if (chatml) PUT("<|im_start|>%s\n%s<|im_end|>\n", sys ? "system" : as ? "assistant" : "user", c);
+        if (chatml) {
+            if (as && strstr(c, "</think>")) { c = strstr(c, "</think>") + 8; while (*c == '\n') c++; }   /* earlier thinking is not sent back */
+            PUT("<|im_start|>%s\n%s<|im_end|>\n", sys ? "system" : as ? "assistant" : "user", c);
+        }
         else if (llama3) PUT("<|start_header_id|>%s<|end_header_id|>\n\n%s<|eot_id|>", sys ? "system" : as ? "assistant" : "user", c);
         else if (tulu) { if (as) PUT("<|assistant|>\n%s<|endoftext|>\n", c); else PUT("<|%s|>\n%s\n", sys ? "system" : "user", c); }
         else if (mistral) {
@@ -1013,7 +1133,7 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
             else PUT("<|start|>user<|message|>%s<|end|>", c);
         } else PUT("%s%s\n\n", sys ? "" : as ? "Assistant: " : "User: ", c);
     }
-    if (chatml) PUT("<|im_start|>assistant\n");
+    if (chatml) PUT("<|im_start|>assistant\n%s", cthink ? "<think>\n" : "");
     else if (llama3) PUT("<|start_header_id|>assistant<|end_header_id|>\n\n");
     else if (tulu) PUT("<|assistant|>\n");
     else if (ds) PUT(DS_ASSISTANT);
@@ -1041,6 +1161,7 @@ const char *es_engine_template_kind(const char *chat_template) { return template
 static int H_START = -1, H_CHANNEL = -1, H_MESSAGE = -1, H_END = -1, H_STATE, H_THINK; static char H_CHAN[24]; static int H_CHANLEN;
 enum { HS_ROLE, HS_CHAN, HS_MSG, HS_FRESH };
 static void answer_start(void);
+static int ANS_THINK;
 static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap) {
     if (tok == H_START) { H_STATE = HS_ROLE; return 0; }
     if (tok == H_CHANNEL) { H_STATE = HS_CHAN; H_CHANLEN = 0; return 0; }
@@ -1163,7 +1284,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     else if (!strcmp(a, "llama") || !strcmp(a, "mixtral")) { M.rope_neox = 0; M.norm_topk = 1; }
     else if (!strcmp(a, "gpt-oss")) { M.kind = AR_GPTOSS; M.rope_neox = 1; M.gating = GATE_SOFTMAX_CHOSEN; M.act_oai = 1; }
     else if (!strcmp(a, "deepseek2")) { M.kind = AR_DS2; M.rope_neox = 0; }
-    else ERR("architecture '%s' is not supported yet (llama, mixtral, qwen2, qwen2moe, qwen3, qwen3moe, olmoe, gpt-oss and deepseek2 are)", a);
+    else if (!strcmp(a, "qwen35moe") || !strcmp(a, "qwen35")) { M.kind = AR_QWEN35; M.rope_neox = 1; M.norm_topk = 1; M.attn_gated = 1; }
+    else ERR("architecture '%s' is not supported yet (llama, mixtral, qwen2, qwen2moe, qwen3, qwen3moe, qwen35, qwen35moe, olmoe, gpt-oss and deepseek2 are)", a);
+    M.n_layer -= (int)HPI("nextn_predict_layers", 0);   /* extra next-token-prediction blocks at the end are not part of the model's forward pass */
     snprintf(key, sizeof key, "%s.expert_weights_norm", a);
     if (es_gguf_find(&G, key)) M.norm_topk = (int)es_gguf_int(&G, key, M.norm_topk);
     { const int gf = (int)HPI("expert_gating_func", 0); if (gf == 1) M.gating = GATE_SOFTMAX; else if (gf == 2) M.gating = GATE_SIGMOID; else if (gf != 0) ERR("expert gating function %d is not supported yet", gf); }
@@ -1189,6 +1312,16 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         if (M.n_rot > M.head_dim || M.n_rot % 2) ERR("unsupported rotary size %d for head size %d", M.n_rot, M.head_dim);
         M.dk = M.dv = M.head_dim; M.kvk = M.kvv = M.n_head_kv * M.head_dim;
         M.qd = M.od = M.n_head * M.head_dim;
+    }
+    if (M.kind == AR_QWEN35) {
+        M.conv_k = (int)HPI("ssm.conv_kernel", 4);
+        M.dk_l = (int)HPI("ssm.state_size", 128);
+        M.hk = (int)HPI("ssm.group_count", 16);
+        M.hv = (int)HPI("ssm.time_step_rank", 32);
+        const int inner = (int)HPI("ssm.inner_size", M.hv * M.dk_l);
+        M.dv_l = M.hv ? inner / M.hv : 0;
+        M.conv_dim = 2 * M.hk * M.dk_l + M.hv * M.dv_l;
+        if (M.hv <= 0 || M.hk <= 0 || M.hv % M.hk || M.hv > 256 || M.conv_k < 2 || M.conv_k > 16) ERR("unsupported linear-attention shape");
     }
     if (M.kind == AR_GPTOSS) { M.n_swa = (int)HPI("attention.sliding_window", 0); }
     M.temp_scale = HPF("attention.temperature_scale", 0.0f);
@@ -1270,6 +1403,14 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     M.n_vocab = M.output.rows;
     { const W rf = load_w("rope_freqs.weight", 0); if (rf.data && rf.type == GGML_F32 && rf.cols >= M.n_rot / 2) M.rope_freqs = rf.data; }
     M.L = calloc((size_t)M.n_layer, sizeof(layer));
+    if (M.kind == AR_QWEN35) {
+        uint64_t nr = 0;
+        snprintf(key, sizeof key, "%s.attention.recurrent_layers", M.arch);
+        int32_t *rl = es_gguf_ints(&G, key, &nr);
+        const int interval = (int)HPI("full_attention_interval", 4);
+        for (int l = 0; l < M.n_layer; l++) { M.L[l].recr = rl && (uint64_t)l < nr ? rl[l] != 0 : (l + 1) % interval != 0; if (M.L[l].recr) M.recurrent = 1; }
+        free(rl);
+    }
     const int swa_pat = (int)HPI("attention.sliding_window_pattern", M.kind == AR_GPTOSS ? 2 : 0);
     for (int l = 0; l < M.n_layer; l++) {
         layer *L = &M.L[l];
@@ -1301,6 +1442,12 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
                 L->v_b = (W){kvb.type, H * M.v_head, kl, vb};
             }
             if (L->q_a.data && (!L->q_a_norm.data || !L->q_b.data)) ERR("layer %d: incomplete q projection", l);
+        } else if (L->recr) {
+            T_(qkv, "attn_qkv.weight", 1); T_(zgate, "attn_gate.weight", 1); T_(conv1d, "ssm_conv1d.weight", 1);
+            T_(dt_b, "ssm_dt.bias", 1); T_(ssm_a, "ssm_a", 1); T_(ssm_beta, "ssm_beta.weight", 1); T_(ssm_alpha, "ssm_alpha.weight", 1);
+            T_(ssm_norm, "ssm_norm.weight", 1); T_(ssm_out, "ssm_out.weight", 1);
+            if (L->conv1d.type != GGML_F32 || L->conv1d.cols != M.conv_k || L->conv1d.rows != M.conv_dim || L->dt_b.type != GGML_F32 || L->ssm_a.type != GGML_F32 || L->ssm_norm.type != GGML_F32)
+                ERR("layer %d: unexpected linear-attention tensors", l);
         } else {
             T_(q, "attn_q.weight", 1); T_(k, "attn_k.weight", 1); T_(v, "attn_v.weight", 1);
             T_(q_norm, "attn_q_norm.weight", 0); T_(k_norm, "attn_k_norm.weight", 0);
@@ -1308,7 +1455,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
             if (!L->bq.data != !L->bk.data || !L->bq.data != !L->bv.data) ERR("layer %d has only some of the Q/K/V biases", l);
             T_(sinks, "attn_sinks.weight", 0);
         }
-        T_(o, "attn_output.weight", 1); T_(bo, "attn_output.bias", 0);
+        if (!L->recr) { T_(o, "attn_output.weight", 1); T_(bo, "attn_output.bias", 0); }
         T_(ffn_norm, "ffn_norm.weight", 0);
         if (!L->ffn_norm.data) T_(ffn_norm, "post_attention_norm.weight", 1);
         T_(gate_inp, "ffn_gate_inp.weight", 0); T_(gate_inp_b, "ffn_gate_inp.bias", 0); T_(exp_probs_b, "exp_probs_b.bias", 0);
@@ -1441,7 +1588,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     const size_t gu_rows = (size_t)BMAX * K;
     const int ffg = ffx > ffmax ? ffx : ffmax;
     const int H = M.n_head;
-    const size_t qlen = M.kind == AR_DS2 ? (size_t)H * (M.nope + M.rope_d) : (size_t)M.qd;
+    const size_t qlen = M.kind == AR_DS2 ? (size_t)H * (M.nope + M.rope_d) : (size_t)M.qd * (M.attn_gated ? 2 : 1);
     const size_t kvw = M.kind == AR_DS2 ? (size_t)(M.kv_lora + M.rope_d) : (size_t)M.kvk;
     BX = malloc(sizeof(float) * (size_t)n * BMAX); BXN = malloc(sizeof(float) * (size_t)n * BMAX); BTMP = malloc(sizeof(float) * (size_t)n * BMAX);
     BQ = malloc(sizeof(float) * qlen * BMAX); BKV = malloc(sizeof(float) * kvw * BMAX); BV2 = malloc(sizeof(float) * (size_t)M.kvk * BMAX);
@@ -1452,6 +1599,18 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         BATL = malloc(sizeof(float) * (size_t)H * M.kv_lora * BMAX);
         if (H > 256) ERR("too many attention heads (%d)", H);
     }
+    if (M.attn_gated) BGATE = malloc(sizeof(float) * (size_t)M.qd * BMAX);
+    if (M.recurrent) {
+        BQKV = malloc(sizeof(float) * (size_t)M.conv_dim * BMAX); BZ = malloc(sizeof(float) * (size_t)M.hv * M.dv_l * BMAX);
+        BBETA = malloc(sizeof(float) * (size_t)M.hv * BMAX); BALPHA = malloc(sizeof(float) * (size_t)M.hv * BMAX); BLIN = malloc(sizeof(float) * (size_t)M.hv * M.dv_l * BMAX);
+        SSM = calloc((size_t)M.n_layer, sizeof(float *)); CONV = calloc((size_t)M.n_layer, sizeof(float *));
+        SSM_SNAP = calloc((size_t)M.n_layer, sizeof(float *)); CONV_SNAP = calloc((size_t)M.n_layer, sizeof(float *));
+        for (int l = 0; l < M.n_layer; l++) if (M.L[l].recr) {
+            SSM[l] = calloc(ssm_floats(), sizeof(float)); CONV[l] = calloc(conv_floats(), sizeof(float));
+            SSM_SNAP[l] = calloc(ssm_floats(), sizeof(float)); CONV_SNAP[l] = calloc(conv_floats(), sizeof(float));
+            if (!SSM[l] || !CONV[l] || !SSM_SNAP[l] || !CONV_SNAP[l]) ERR("out of memory for the recurrent state");
+        }
+    }
     BGU = malloc(sizeof(float) * 2 * (size_t)ffg * (gu_rows > BMAX ? gu_rows : BMAX));
     BH = malloc(sizeof(float) * (size_t)ffg * (gu_rows > BMAX ? gu_rows : BMAX));
     BYE = malloc(sizeof(float) * (size_t)n * gu_rows);
@@ -1460,7 +1619,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     LOGITS = malloc(sizeof(float) * (size_t)M.n_vocab);
     RC = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1)); RS = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1));
     {   /* everything prepared between two arena resets: one layer's activations of the whole batch */
-        size_t fl = (size_t)BMAX * ((size_t)2 * n + qlen + (size_t)M.od + (size_t)M.q_lora + gu_rows / BMAX * ffg + ffg);
+        size_t fl = (size_t)BMAX * ((size_t)2 * n + qlen + (size_t)M.od + (size_t)M.q_lora + gu_rows / BMAX * ffg + ffg + (size_t)M.hv * M.dv_l);
         if (M.kind == AR_DS2) fl += (size_t)BMAX * H * (size_t)(M.nope > M.kv_lora ? M.nope : M.kv_lora);
         es_act_arena_init(sizeof(es_blk_q80) * (fl / 32 + 4096));
         Q8K_CAP = fl / 256 + 1024;
@@ -1468,16 +1627,19 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     }
     HIST = calloc((size_t)M.ctx + 64, sizeof(int32_t));
     { const char *ev = getenv("ES_SPEC"); SPEC_MAX = ev ? atoi(ev) : (o->spec == -2 ? 0 : o->spec > 0 ? o->spec : any_moe ? 0 : 7); }
+    if (M.recurrent) SPEC_MAX = 0;   /* a rejected guess would already be folded into the recurrent state */
     BATCH_OK = !getenv("ES_NO_BATCH");
-    size_t kv_bytes = sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvk;
+    KVI = malloc(sizeof(int) * (size_t)M.n_layer); NKVL = 0;
+    for (int l = 0; l < M.n_layer; l++) KVI[l] = M.L[l].recr ? -1 : NKVL++;
+    size_t kv_bytes = sizeof(float) * (size_t)(NKVL ? NKVL : 1) * M.ctx * M.kvk;
     KC = malloc(kv_bytes);
-    VC = M.kvv ? malloc(sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv) : NULL;
+    VC = M.kvv ? malloc(sizeof(float) * (size_t)(NKVL ? NKVL : 1) * M.ctx * M.kvv) : NULL;
     if (!KC || (M.kvv && !VC) || !BGU || !BH || !BYE || !BLOG || !Q8K) ERR("out of memory for a %d-token context; try a smaller context", M.ctx);
     if (o->trace_path) TRACE = fopen(o->trace_path, "w");
 
     const char *nm = es_gguf_str(&G, "general.name");
     INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, MAPPED ? 0 : nslots,
-                            M.core_bytes / 1e6, any_moe && !MAPPED ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv : 0)) / 1e6,
+                            M.core_bytes / 1e6, any_moe && !MAPPED ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)NKVL * M.ctx * M.kvv : 0)) / 1e6,
                             (es_now_ns() - t0) / 1e9};
     DONE = 1;
     return 0;
@@ -1505,6 +1667,8 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
         if (nt + 1 >= M.ctx) return -1;
     }
     for (int i = 0; i < nt && i < ids_cap; i++) ids[i] = toks[i];
+    if (M.recurrent && POS == 0) recurrent_zero();
+    if (POS < SNAP_POS) SNAP_POS = -1;
     H0 = STAT_HITS; M0 = STAT_MISS; R0 = STAT_READ_MB; W0 = STAT_WAIT_S;
     if (progress) progress(0, nt, ud);   /* ids are ready: report them before the slow part */
     uint64_t tp = es_now_ns();
@@ -1529,7 +1693,7 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
     DONE = 0;
     FIRST = 0;
     answer_start();
-    if (raw) H_STATE = HS_MSG;   /* plain text: no chat markup to hide */
+    if (raw) { H_STATE = HS_MSG; ANS_THINK = 0; }   /* plain text: no chat markup to hide */
     T_GEN0 = es_now_ns();
     return nt;
 }
@@ -1560,11 +1724,12 @@ static int draft_tokens(int32_t *out, int max) {
     return 0;
 }
 
-static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop) */
-static void answer_start(void) { ANS_FRESH = 1; H_STATE = HS_FRESH; H_THINK = 0; }
+static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop); the prompt opened <think> */
+static void answer_start(void) { ANS_FRESH = 1; ANS_THINK = TK("chatml_think"); H_STATE = HS_FRESH; H_THINK = 0; }
 /* the text of one answer token */
 static int piece_out(int tok, char *buf, int cap) {
     int n = es_tok_piece(T, tok, 0, buf, cap);
+    if (ANS_THINK && cap > n + 8) { memmove(buf + 8, buf, (size_t)n); memcpy(buf, "<think>\n", 8); n += 8; ANS_THINK = 0; }
     if (TK("harmony")) n = harmony_piece(tok, buf, n, buf, cap);
     if (ANS_FRESH && n > 0) {
         ANS_FRESH = 0;
@@ -1630,7 +1795,7 @@ int es_engine_next(char *buf, int cap) {
  * Apps resend the whole conversation each turn. Reading it again costs time proportional to its length before the first word appears;
  * here only the part after the longest already-computed prefix is read. The KV rows of up to ES_KV_SLOTS other conversations are parked in
  * RAM (apps send side requests such as "write a title for this chat" between turns, which would otherwise evict the main conversation). */
-typedef struct { int n; int32_t *ids; float *k, *v; uint64_t used; } kv_slot;
+typedef struct { int n; int32_t *ids; float *k, *v, *rs; uint64_t used; } kv_slot;
 static kv_slot *SLOTS; static int NSLOTS = -1, PREFIX_ON = 1; static size_t SLOT_BYTES_MAX; static uint64_t SLOT_CLOCK;
 
 static int lcp(const int32_t *a, int na, const int32_t *b, int nb) {
@@ -1645,10 +1810,10 @@ static void slots_init(void) {
     e = getenv("ES_KV_SLOT_MB"); SLOT_BYTES_MAX = (size_t)(e ? atol(e) : 1024) * 1048576u;
     SLOTS = calloc((size_t)(NSLOTS ? NSLOTS : 1), sizeof *SLOTS);
 }
-static size_t slots_bytes(void) { size_t b = 0; const size_t row = sizeof(float) * (size_t)M.n_layer * (M.kvk + M.kvv); for (int i = 0; i < NSLOTS; i++) b += (size_t)SLOTS[i].n * row; return b; }
+static size_t slots_bytes(void) { size_t b = 0; const size_t row = sizeof(float) * (size_t)NKVL * (M.kvk + M.kvv); for (int i = 0; i < NSLOTS; i++) b += (size_t)SLOTS[i].n * row; return b; }
 /* copy the first n cached rows of every layer between the live context and a packed buffer (keys, then values) */
 static void kv_copy(float *k, float *v, int n, int stride_n, int to_live) {
-    for (int l = 0; l < M.n_layer; l++) {
+    for (int l = 0; l < NKVL; l++) {
         float *lk = KC + (size_t)l * M.ctx * M.kvk, *pk = k + (size_t)l * stride_n * M.kvk;
         if (to_live) memcpy(lk, pk, sizeof(float) * (size_t)n * M.kvk); else memcpy(pk, lk, sizeof(float) * (size_t)n * M.kvk);
         if (!M.kvv) continue;
@@ -1656,11 +1821,12 @@ static void kv_copy(float *k, float *v, int n, int stride_n, int to_live) {
         if (to_live) memcpy(lv, pv, sizeof(float) * (size_t)n * M.kvv); else memcpy(pv, lv, sizeof(float) * (size_t)n * M.kvv);
     }
 }
-static void slot_free(kv_slot *s) { free(s->ids); free(s->k); free(s->v); memset(s, 0, sizeof *s); }
+static void slot_free(kv_slot *s) { free(s->ids); free(s->k); free(s->v); free(s->rs); memset(s, 0, sizeof *s); }
 /* park the live conversation's first n positions (never into slot `keep`) */
 static void slot_save(int n, int keep) {
+    if (M.recurrent) n = SNAP_POS;   /* recurrent models: the prompt-end copy is what can be resumed */
     if (NSLOTS <= 0 || n < 32) return;
-    const size_t perk = sizeof(float) * (size_t)M.n_layer * M.kvk, perv = sizeof(float) * (size_t)M.n_layer * M.kvv;
+    const size_t perk = sizeof(float) * (size_t)NKVL * M.kvk, perv = sizeof(float) * (size_t)NKVL * M.kvv;
     for (int i = 0; i < NSLOTS; i++)                     /* already parked (or a longer version of it): just refresh */
         if (SLOTS[i].n >= n && lcp(SLOTS[i].ids, SLOTS[i].n, HIST, n) == n) { SLOTS[i].used = ++SLOT_CLOCK; return; }
     int w = -1;
@@ -1675,15 +1841,18 @@ static void slot_save(int n, int keep) {
     }
     kv_slot *s = &SLOTS[w];
     s->ids = malloc(sizeof(int32_t) * (size_t)n); s->k = malloc(perk * (size_t)n); s->v = malloc(perv * (size_t)n + 1);
+    if (M.recurrent && !(s->rs = malloc(sizeof(float) * rstate_floats()))) { slot_free(s); return; }
     if (!s->ids || !s->k || !s->v) { slot_free(s); return; }
     memcpy(s->ids, HIST, sizeof(int32_t) * (size_t)n);
     kv_copy(s->k, s->v, n, n, 0);
+    if (M.recurrent) rstate_pack(s->rs);
     s->n = n; s->used = ++SLOT_CLOCK;
 }
 static void slot_restore(int i, int upto) {
     kv_slot *s = &SLOTS[i]; const int n = upto < s->n ? upto : s->n;
     memcpy(HIST, s->ids, sizeof(int32_t) * (size_t)n);
     kv_copy(s->k, s->v, n, s->n, 1);
+    if (M.recurrent) { rstate_unpack(s->rs); SNAP_POS = n; }   /* callers use a recurrent slot only whole (upto >= n) */
     s->used = ++SLOT_CLOCK; POS = n;
 }
 
@@ -1726,7 +1895,7 @@ static void df_init(void) {
         FILE *fp = fopen(f.path, "rb"); if (!fp) continue;
         char mg[8]; uint64_t fg; int hdr[3];
         if (fread(mg, 1, 8, fp) == 8 && !memcmp(mg, "ESKV1\0\0\0", 8) && fread(&fg, 8, 1, fp) == 1 && fg == FINGER && fread(hdr, sizeof(int), 3, fp) == 3 &&
-            hdr[1] == M.n_layer && hdr[2] == M.kvk && hdr[0] > 0 && hdr[0] <= 1 << 20) {
+            hdr[1] == NKVL && hdr[2] == M.kvk && hdr[0] > 0 && hdr[0] <= 1 << 20) {
             f.n = hdr[0]; f.ids = malloc(sizeof(int32_t) * (size_t)f.n);
             if (fread(f.ids, sizeof(int32_t), (size_t)f.n, fp) == (size_t)f.n) {
                 struct stat st; f.mt = stat(f.path, &st) ? 0 : st.st_mtime;
@@ -1737,8 +1906,8 @@ static void df_init(void) {
     }
     closedir(dir);
 }
-static size_t df_file_bytes(int n) { return 28 + 4 * (size_t)n + sizeof(float) * (size_t)n * M.n_layer * (M.kvk + M.kvv); }
-typedef struct { int n; int32_t *ids; float *k, *v; } df_job;
+static size_t df_file_bytes(int n) { return 28 + 4 * (size_t)n + sizeof(float) * ((size_t)n * NKVL * (M.kvk + M.kvv) + rstate_floats()); }
+typedef struct { int n; int32_t *ids; float *k, *v, *rs; } df_job;
 static void *df_writer(void *arg) {               /* background: write, then add to the index and keep inside the budget */
     df_job *j = arg; const int kvd = M.kvk;
     uint64_t h = fnv(0xcbf29ce484222325ull, j->ids, sizeof(int32_t) * (size_t)j->n);
@@ -1746,11 +1915,12 @@ static void *df_writer(void *arg) {               /* background: write, then add
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *fp = fopen(tmp, "wb"); int ok = fp != NULL;
     if (ok) {
-        const int hdr[3] = {j->n, M.n_layer, kvd};
+        const int hdr[3] = {j->n, NKVL, kvd};
         ok = fwrite("ESKV1\0\0\0", 1, 8, fp) == 8 && fwrite(&FINGER, 8, 1, fp) == 1 && fwrite(hdr, sizeof(int), 3, fp) == 3 &&
              fwrite(j->ids, sizeof(int32_t), (size_t)j->n, fp) == (size_t)j->n &&
-             fwrite(j->k, sizeof(float), (size_t)j->n * M.n_layer * kvd, fp) == (size_t)j->n * M.n_layer * kvd &&
-             fwrite(j->v, sizeof(float), (size_t)j->n * M.n_layer * M.kvv, fp) == (size_t)j->n * M.n_layer * M.kvv;
+             fwrite(j->k, sizeof(float), (size_t)j->n * NKVL * kvd, fp) == (size_t)j->n * NKVL * kvd &&
+             fwrite(j->v, sizeof(float), (size_t)j->n * NKVL * M.kvv, fp) == (size_t)j->n * NKVL * M.kvv &&
+             (!j->rs || fwrite(j->rs, sizeof(float), rstate_floats(), fp) == rstate_floats());
         ok = (fclose(fp) == 0) && ok;
     }
     if (ok && rename(tmp, path) == 0) {
@@ -1768,19 +1938,22 @@ static void *df_writer(void *arg) {               /* background: write, then add
         STAT_DISK_SAVES++;
         pthread_mutex_unlock(&DF_MU);
     } else unlink(tmp);
-    free(j->ids); free(j->k); free(j->v); free(j);
+    free(j->ids); free(j->k); free(j->v); free(j->rs); free(j);
     return NULL;
 }
 static void df_save(int n) {                      /* copy the first n positions now (fast), write them later (slow) */
+    if (M.recurrent) n = SNAP_POS;                 /* with the recurrent state of that point */
     if (!DF_ON || n < 32 || df_file_bytes(n) > DF_BUDGET) return;
     pthread_mutex_lock(&DF_MU);
     for (int i = 0; i < NDF; i++) if (DF[i].n >= n - 16 && lcp(DF[i].ids, DF[i].n, HIST, n) >= n - 16) { pthread_mutex_unlock(&DF_MU); return; }   /* already there */
     pthread_mutex_unlock(&DF_MU);
     df_job *j = calloc(1, sizeof *j); j->n = n;
-    j->ids = malloc(sizeof(int32_t) * (size_t)n); j->k = malloc(sizeof(float) * (size_t)n * M.kvk * M.n_layer); j->v = malloc(sizeof(float) * (size_t)n * M.kvv * M.n_layer + 1);
-    if (!j->ids || !j->k || !j->v) { free(j->ids); free(j->k); free(j->v); free(j); return; }
+    j->ids = malloc(sizeof(int32_t) * (size_t)n); j->k = malloc(sizeof(float) * (size_t)n * M.kvk * NKVL); j->v = malloc(sizeof(float) * (size_t)n * M.kvv * NKVL + 1);
+    if (M.recurrent) j->rs = malloc(sizeof(float) * rstate_floats());
+    if (!j->ids || !j->k || !j->v || (M.recurrent && !j->rs)) { free(j->ids); free(j->k); free(j->v); free(j->rs); free(j); return; }
     memcpy(j->ids, HIST, sizeof(int32_t) * (size_t)n);
     kv_copy(j->k, j->v, n, n, 0);
+    if (M.recurrent) rstate_pack(j->rs);
     pthread_t th; if (pthread_create(&th, NULL, df_writer, j) == 0) pthread_detach(th); else df_writer(j);
 }
 /* longest stored prefix of toks: returns its length and the file index in *which */
@@ -1799,9 +1972,15 @@ static int df_load(int i, int upto) {             /* read the first upto rows of
     const int n = upto < f.n ? upto : f.n; int ok = 1;
     FILE *fp = fopen(f.path, "rb"); if (!fp) { free(ids); return -1; }
     const long base = 28 + 4L * f.n; const size_t layk = (size_t)f.n * M.kvk * sizeof(float), layv = (size_t)f.n * M.kvv * sizeof(float);
-    for (int l = 0; l < M.n_layer && ok; l++) {
+    for (int l = 0; l < NKVL && ok; l++) {
         ok = fseek(fp, base + (long)(l * layk), SEEK_SET) == 0 && fread(KC + (size_t)l * M.ctx * M.kvk, sizeof(float), (size_t)n * M.kvk, fp) == (size_t)n * M.kvk;
-        if (M.kvv) ok = ok && fseek(fp, base + (long)(M.n_layer * layk + l * layv), SEEK_SET) == 0 && fread(VC + (size_t)l * M.ctx * M.kvv, sizeof(float), (size_t)n * M.kvv, fp) == (size_t)n * M.kvv;
+        if (M.kvv) ok = ok && fseek(fp, base + (long)(NKVL * layk + l * layv), SEEK_SET) == 0 && fread(VC + (size_t)l * M.ctx * M.kvv, sizeof(float), (size_t)n * M.kvv, fp) == (size_t)n * M.kvv;
+    }
+    if (ok && M.recurrent) {   /* the state belongs to the file's full length: only usable whole */
+        float *rs = malloc(sizeof(float) * rstate_floats());
+        ok = rs && n == f.n && fseek(fp, base + (long)(NKVL * (layk + layv)), SEEK_SET) == 0 && fread(rs, sizeof(float), rstate_floats(), fp) == rstate_floats();
+        if (ok) { rstate_unpack(rs); SNAP_POS = n; }
+        free(rs);
     }
     fclose(fp);
     if (ok) { memcpy(HIST, ids, sizeof(int32_t) * (size_t)n); POS = n; utime(f.path, NULL); STAT_DISK_LOADS++; }
@@ -1833,7 +2012,29 @@ int es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, v
     nt += m;
     if (nt < 1 || nt + 1 >= M.ctx) return -1;
     int keep = 0;
-    if (PREFIX_ON) {
+    if (M.recurrent) {   /* a recurrent state cannot be rewound: continue the live one, or restart from a prompt-end copy (live, parked or on disk) */
+        const int k = PREFIX_ON ? lcp(HIST, POS, toks, nt) : 0;
+        const int live = PREFIX_ON && k == POS && POS < nt ? POS : -1, snap = PREFIX_ON && SNAP_POS >= 0 && SNAP_POS <= k && SNAP_POS < nt ? SNAP_POS : -1;
+        int best = -1, bl = -1, dfi = -1, dl = -1;
+        if (PREFIX_ON) {
+            for (int i = 0; i < NSLOTS; i++) if (SLOTS[i].n && SLOTS[i].n < nt && SLOTS[i].n > bl && lcp(SLOTS[i].ids, SLOTS[i].n, toks, nt) >= SLOTS[i].n) { bl = SLOTS[i].n; best = i; }
+#ifndef __EMSCRIPTEN__
+            pthread_mutex_lock(&DF_MU);
+            for (int i = 0; i < NDF; i++) if (DF[i].n < nt && DF[i].n > dl && lcp(DF[i].ids, DF[i].n, toks, nt) >= DF[i].n) { dl = DF[i].n; dfi = i; }
+            pthread_mutex_unlock(&DF_MU);
+#endif
+        }
+        const int own = live > snap ? live : snap;
+        if (own >= bl && own >= dl - 64 && own >= 0) {
+            if (own == live) keep = POS; else { recurrent_copy(0); keep = SNAP_POS; }
+        } else {
+            if (SNAP_POS >= 64 && snap < 0) slot_save(SNAP_POS, best);   /* another conversation is about to be overwritten: park it */
+            if (dl > bl + 64 && df_load(dfi, dl) == 0) keep = dl;
+            else if (best >= 0) { slot_restore(best, nt); keep = bl; }
+            else { keep = 0; recurrent_zero(); }
+        }
+        if (keep < SNAP_POS) SNAP_POS = -1;
+    } else if (PREFIX_ON) {
         keep = lcp(HIST, POS, toks, nt);
         int best = -1, bl = keep;
         for (int i = 0; i < NSLOTS; i++) { const int l = SLOTS[i].n ? lcp(SLOTS[i].ids, SLOTS[i].n, toks, nt) : 0; if (l > bl + 16) { bl = l; best = i; } }
@@ -1852,7 +2053,17 @@ int es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, v
     for (int i = keep; i < nt; i++) HIST[i] = toks[i];
     ACCN = ACCI = 0;
     const int32_t *rest = toks + keep; const int nr = nt - keep;
-    if (BATCH_OK) {
+    if (M.recurrent) {   /* all but the last token, a copy of the state (the next prompt usually starts the same way), then the last token */
+        for (int i = 0; i < nr - 1; i += BMAX) {
+            const int cnt = nr - 1 - i < BMAX ? nr - 1 - i : BMAX;
+            if (BATCH_OK) { forward_n(rest + i, cnt, POS, cnt); POS += cnt; }
+            else for (int j = 0; j < cnt; j++) forward(rest[i + j], POS++, 0);
+            if (progress) progress(i + cnt, nr, ud);
+        }
+        recurrent_copy(1); SNAP_POS = POS;
+        forward(rest[nr - 1], POS++, 1);
+        if (progress) progress(nr, nr, ud);
+    } else if (BATCH_OK) {
         for (int i = 0; i < nr; i += BMAX) {
             const int cnt = nr - i < BMAX ? nr - i : BMAX, last = i + cnt == nr;
             forward_n(rest + i, cnt, POS, last ? cnt - 1 : cnt);
@@ -1873,6 +2084,8 @@ int es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, v
 }
 
 int es_engine_dump_logits(const int32_t *ids, int n, FILE *f) {
+    if (M.recurrent) recurrent_zero();
+    SNAP_POS = -1;
     for (int i = 0; i < n; i++) {
         forward(ids[i], i, 1);
         fwrite(LOGITS, sizeof(float), (size_t)M.n_vocab, f);
