@@ -1,8 +1,14 @@
 /*
- * ExpertStream engine (see es_engine.h). Forward pass: RMSNorm, attention
- * with optional Q/K norm and RoPE, softmax router, top-k experts (SwiGLU),
- * optional dense and shared-expert FFNs. Verified against an independent
- * float64 NumPy implementation of OLMoE to ~1e-6.
+ * ExpertStream engine (see es_engine.h). One forward pass for every supported model family:
+ *  - attention: grouped-query attention with optional Q/K norms, biases, partial RoPE, YaRN scaling,
+ *    sliding windows and attention sinks (gpt-oss), or DeepSeek's multi-head latent attention (MLA,
+ *    with the absorbed K/V projections, so the cache holds one 576-wide latent row per token);
+ *  - experts: softmax, sigmoid (with DeepSeek-V3 group selection and a selection bias) or
+ *    softmax-over-the-chosen routing (gpt-oss), SwiGLU or gpt-oss' clamped SwiGLU, per-expert biases,
+ *    shared experts, dense leading layers.
+ * Tokens are processed in batches: every weight matrix, and every expert a batch needs, is read once
+ * for the whole batch. Checked against llama.cpp on small random models of each family
+ * (scripts/test_archs.py) and, for OLMoE, against an independent float64 NumPy implementation.
  */
 #define _GNU_SOURCE
 #include "es_engine.h"
@@ -26,26 +32,47 @@
 #include "es_tok.h"
 #include "../tools/es_common.h"
 
-#define MAXK 16
-#define MAXJOBS 40
+#define MAXK 32
+#define MAXJOBS 16384
+#define BMAX 16
+static int BATCH_OK;
 
 /* ---------------- weights ---------------- */
 typedef struct { uint32_t type; int rows, cols; const void *data; } W;
 
+enum { AR_STD, AR_GPTOSS, AR_DS2 };
+enum { GATE_SOFTMAX, GATE_SIGMOID, GATE_SOFTMAX_CHOSEN };
+
 typedef struct {
     W attn_norm, q, k, v, o, q_norm, k_norm, ffn_norm, gate_inp;
-    W bq, bk, bv;                            /* optional QKV biases (Qwen2) */
-    W ffn_gate, ffn_up, ffn_down;            /* dense FFN (layers without experts) */
-    W sh_gate, sh_up, sh_down;               /* shared expert, if any */
-    int moe;
+    W bq, bk, bv, bo;                         /* optional biases */
+    W sinks;                                  /* gpt-oss: one extra softmax logit per head */
+    W q_a, q_a_norm, q_b, kv_a, kv_a_norm, k_b, v_b;   /* DeepSeek MLA */
+    W ffn_gate, ffn_up, ffn_down;             /* dense FFN (layers without experts) */
+    W sh_gate, sh_up, sh_down, sh_gate_inp;   /* shared expert (and its sigmoid gate, Qwen2-MoE) */
+    W gate_inp_b, exp_probs_b;                /* router bias (gpt-oss); expert selection bias (DeepSeek-V3) */
+    W gate_exps_b, up_exps_b, down_exps_b;    /* per-expert biases (gpt-oss) */
+    int moe, swa;
 } layer;
 
 typedef struct {
     const char *arch;
+    int kind;
     int n_layer, n_embd, n_head, n_head_kv, head_dim, n_exp, n_used, n_vocab, ctx;
-    float eps, rope_base;
-    int rope_neox;      /* 1: rotate (i, i+d/2) pairs; 0: adjacent pairs */
-    int norm_topk;      /* renormalize the top-k router weights */
+    float eps;
+    /* rotary embeddings */
+    int rope_neox, n_rot, n_ctx_orig;
+    float rope_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow, corr[2];
+    const float *rope_freqs;                  /* Llama 3.1 style per-frequency factors, or NULL */
+    float kq_scale;
+    int n_swa;
+    /* experts */
+    int gating, norm_topk, act_oai, n_group, n_group_used;
+    float w_scale;
+    /* MLA */
+    int q_lora, kv_lora, nope, rope_d, v_head;
+    /* attention geometry: dk/dv per head inside attention, kvk/kvv floats per cached position, qd = Q floats per token, od = o input */
+    int dk, dv, kvk, kvv, qd, od;
     W tok_embd, output, output_norm;
     layer *L;
     uint8_t **tptr;     /* RAM copy of each non-expert tensor, by tensor index */
@@ -72,6 +99,13 @@ static W load_w(const char *name, int required) {
     w.rows = (int)(t->ne[1] * t->ne[2]);
     w.data = M.tptr[t - G.t];
     return w;
+}
+/* rows [r0, r0 + n) of w as a matrix of its own */
+static W rows_of(const W *w, int r0, int n) {
+    W v = *w;
+    v.rows = n;
+    v.data = (const uint8_t *)w->data + es_row_bytes(w->type, w->cols) * (size_t)r0;
+    return v;
 }
 
 long es_rss_mb(void) {
@@ -118,18 +152,19 @@ static void mv_task(int tid, int n, void *arg) {
         }
     }
 }
-static void job(const W *w, const es_act *a, float *y) {
-    JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, a, y, 1, 0};
-}
+static void run_jobs(void);
 static void jobn(const W *w, const es_act *acts, float *y, size_t ystride, int nb) {
+    if (NJOBS == MAXJOBS) run_jobs();   /* only when a batch needs more jobs than fit: run what is queued */
     JOBS[NJOBS++] = (mv_job){w->type, w->data, w->rows, w->cols, acts, y, nb, ystride};
 }
 static void run_jobs(void) {
     TOTAL_ROWS = 0;
     for (int j = 0; j < NJOBS; j++) TOTAL_ROWS += JOBS[j].rows;
     atomic_store(&NEXT_ROW, 0);
-    if (NT == 1) mv_task(0, 1, NULL); /* no thread pool (browser build) */
-    else es_cpool_run(CP, mv_task, NULL);
+    if (NJOBS) {
+        if (NT == 1) mv_task(0, 1, NULL); /* no thread pool (browser build) */
+        else es_cpool_run(CP, mv_task, NULL);
+    }
     NJOBS = 0;
 }
 
@@ -140,20 +175,37 @@ static void rmsnorm(float *o, const float *x, const float *w, int n, float eps) 
     const float s = (float)(1.0 / sqrt(ss / n + eps));
     for (int i = 0; i < n; i++) o[i] = x[i] * s * (w ? w[i] : 1.0f);
 }
+static void add_bias(float *y, const W *b, int n) { if (b->data) { const float *p = b->data; for (int i = 0; i < n; i++) y[i] += p[i]; } }
 
-/* cos/sin of the rotation angles are the same for every head and layer at one position: compute once per token */
-static float *RC, *RS; static int RPOS = -1, RHD;
-static void rope(float *v, int n_heads, int hd, int pos) {
-    if (pos != RPOS || hd != RHD) {
-        if (hd != RHD) { free(RC); free(RS); RC = malloc(sizeof(float) * (size_t)(hd / 2)); RS = malloc(sizeof(float) * (size_t)(hd / 2)); RHD = hd; }
-        for (int i = 0; i < hd / 2; i++) { const float theta = pos * powf(M.rope_base, -2.0f * i / hd); RC[i] = cosf(theta); RS[i] = sinf(theta); }
-        RPOS = pos;
+/* Rotary embeddings (ggml's rope_yarn): cos/sin for one position, shared by every head and layer */
+static float *RC, *RS; static int RPOS = -1;
+static float yarn_ramp(float lo, float hi, int i0) { const float y = (i0 / 2 - lo) / fmaxf(0.001f, hi - lo); return 1 - fminf(1, fmaxf(0, y)); }
+static void rope_cache(int pos) {
+    if (pos == RPOS) return;
+    const int half = M.n_rot / 2;
+    for (int i = 0; i < half; i++) {
+        float theta_extrap = pos * powf(M.rope_base, -2.0f * i / M.n_rot);
+        if (M.rope_freqs) theta_extrap /= M.rope_freqs[i];
+        const float theta_interp = M.freq_scale * theta_extrap;
+        float theta = theta_interp, ms = M.attn_factor;
+        if (M.ext_factor != 0.0f) {
+            const float mix = yarn_ramp(M.corr[0], M.corr[1], 2 * i) * M.ext_factor;
+            theta = theta_interp * (1 - mix) + theta_extrap * mix;
+            ms *= 1.0f + 0.1f * logf(1.0f / M.freq_scale);
+        }
+        RC[i] = cosf(theta) * ms; RS[i] = sinf(theta) * ms;
     }
+    RPOS = pos;
+}
+/* rotate the first n_rot values of n_heads vectors that are `stride` apart */
+static void rope(float *v, int n_heads, int stride, int pos) {
+    rope_cache(pos);
+    const int nr = M.n_rot;
     for (int h = 0; h < n_heads; h++) {
-        float *x = v + h * hd;
-        for (int i = 0; i < hd / 2; i++) {
+        float *x = v + (size_t)h * stride;
+        for (int i = 0; i < nr / 2; i++) {
             const float c = RC[i], s = RS[i];
-            const int a = M.rope_neox ? i : 2 * i, b = M.rope_neox ? i + hd / 2 : 2 * i + 1;
+            const int a = M.rope_neox ? i : 2 * i, b = M.rope_neox ? i + nr / 2 : 2 * i + 1;
             const float x0 = x[a], x1 = x[b];
             x[a] = x0 * c - x1 * s;
             x[b] = x0 * s + x1 * c;
@@ -162,42 +214,62 @@ static void rope(float *v, int n_heads, int hd, int pos) {
 }
 
 /* ---------------- state ---------------- */
-static float *X, *XN, *Q, *K, *V, *ATT, *TMP, *LOGITS, *ROUTER;
-static float *KC, *VC;   /* [layer][ctx][kv_dim] */
-static float *GU, *H, *YE;
-static es_block_q8_K *Q8A, *Q8H;
+static float *LOGITS;
+static float *KC, *VC;   /* [layer][ctx][kvk] and [layer][ctx][kvv] (no VC for MLA: values are the start of each key row) */
+/* batch buffers: up to BMAX tokens */
+static float *BX, *BXN, *BTMP, *BQ, *BQA, *BKV, *BQM, *BATL, *BATTN, *BGU, *BH, *BYE, *BROUT, *BLOG, *BV2;
+static es_act BACT[BMAX], BACT2[BMAX];
+/* Q8_K activation blocks come from a pool that is emptied together with the Q8_0 arena */
+static es_block_q8_K *Q8K; static size_t Q8K_CAP, Q8K_USE;
+static void arena_reset(void) { es_act_arena_reset(); Q8K_USE = 0; }
+static void prep(es_act *a, const float *x, int cols) {
+    es_block_q8_K *q = NULL;
+    if (cols % 256 == 0 && Q8K_USE + (size_t)cols / 256 <= Q8K_CAP) { q = Q8K + Q8K_USE; Q8K_USE += (size_t)cols / 256; }
+    es_act_prepare(a, x, cols, q);
+}
 
-/* attention for one position, parallel over heads */
-typedef struct { int layer, pos; } att_arg;
+/* attention of one query position, parallel over heads */
+typedef struct { int layer, pos; const float *q; float *out; } att_arg;
 static void att_task(int tid, int n, void *arg) {
     const att_arg *aa = arg;
-    const int hd = M.head_dim, kvd = M.n_head_kv * hd, grp = M.n_head / M.n_head_kv;
-    const float *kc = KC + (size_t)aa->layer * M.ctx * kvd, *vc = VC + (size_t)aa->layer * M.ctx * kvd;
+    const layer *L = &M.L[aa->layer];
+    const int mla = M.kind == AR_DS2, dk = M.dk, dv = M.dv, grp = M.n_head / M.n_head_kv;
+    const float *kc = KC + (size_t)aa->layer * M.ctx * M.kvk;
+    const float *vc = mla ? kc : VC + (size_t)aa->layer * M.ctx * M.kvv;
+    const int vstride = mla ? M.kvk : M.kvv;
     float *sc = SCRATCH[tid];
-    const float scale = 1.0f / sqrtf((float)hd);
+    const float scale = M.kq_scale;
+    const int t0 = L->swa && M.n_swa > 0 && aa->pos - M.n_swa + 1 > 0 ? aa->pos - M.n_swa + 1 : 0;
     int h0, h1;
     es_split(M.n_head, tid, n, &h0, &h1);
     for (int h = h0; h < h1; h++) {
-        const float *q = Q + h * hd;
-        const int kh = h / grp;
+        const float *q = aa->q + (size_t)h * dk;
+        const int kh = mla ? 0 : h / grp;
         float mx = -INFINITY;
-        for (int t = 0; t <= aa->pos; t++) {
-            const float *k = kc + (size_t)t * kvd + kh * hd;
+        for (int t = t0; t <= aa->pos; t++) {
+            const float *k = kc + (size_t)t * M.kvk + (size_t)kh * dk;
             float s = 0;
-            for (int i = 0; i < hd; i++) s += q[i] * k[i];
+            for (int i = 0; i < dk; i++) s += q[i] * k[i];
             sc[t] = s * scale;
             if (sc[t] > mx) mx = sc[t];
         }
+        const float sink = L->sinks.data ? ((const float *)L->sinks.data)[h] : -INFINITY;
+        if (sink > mx) mx = sink;
         float sum = 0;
-        for (int t = 0; t <= aa->pos; t++) { sc[t] = expf(sc[t] - mx); sum += sc[t]; }
-        float *o = ATT + h * hd;
-        memset(o, 0, sizeof(float) * (size_t)hd);
-        for (int t = 0; t <= aa->pos; t++) {
+        for (int t = t0; t <= aa->pos; t++) { sc[t] = expf(sc[t] - mx); sum += sc[t]; }
+        if (L->sinks.data) sum += expf(sink - mx);
+        float *o = aa->out + (size_t)h * dv;
+        memset(o, 0, sizeof(float) * (size_t)dv);
+        for (int t = t0; t <= aa->pos; t++) {
             const float p = sc[t] / sum;
-            const float *v = vc + (size_t)t * kvd + kh * hd;
-            for (int i = 0; i < hd; i++) o[i] += p * v[i];
+            const float *v = vc + (size_t)t * vstride + (size_t)kh * dv;
+            for (int i = 0; i < dv; i++) o[i] += p * v[i];
         }
     }
+}
+static void attend(int l, int pos, const float *q, float *out) {
+    att_arg aa = {l, pos, q, out};
+    if (NT == 1) att_task(0, 1, &aa); else es_cpool_run(CP, att_task, &aa);
 }
 
 /* ---------------- experts ---------------- */
@@ -209,8 +281,10 @@ static unsigned long long STAT_HITS, STAT_MISS;
 static FILE *TRACE;
 static int TRACE_TOKEN;
 
-/* direct GGUF mode: the three expert tensors of each layer */
+/* direct GGUF mode: the three expert tensors of each layer (one tensor per role holding every expert),
+ * or, in older Mixtral files, one tensor per expert and role */
 static const es_gguf_tensor **XT;   /* [layer*3 + {gate, up, down}] */
+static const es_gguf_tensor **XTE;  /* [(layer*n_exp + expert)*3 + role] */
 static size_t XOFF[3];              /* offsets of gate/up/down inside a slot */
 
 static const es_tensor_desc *find_role(const es_header *h, uint32_t role) {
@@ -236,6 +310,14 @@ static void read_tensor(const es_gguf_tensor *t, uint64_t extra, void *dst, size
     if (SIM_S_PER_BYTE > 0) { struct timespec ts = {0, (long)(n * SIM_S_PER_BYTE * 1e9)}; nanosleep(&ts, NULL); }
     read_at_fd(t->shard ? SH_FD[t->shard] : G.fd, shard_base(t) + t->offset + extra, dst, n);
 }
+/* expert e of layer l, role r (gate, up, down) into dst */
+static void read_expert_part(int l, int e, int r, void *dst) {
+    if (XTE) { const es_gguf_tensor *t = XTE[((size_t)l * M.n_exp + e) * 3 + r]; read_tensor(t, 0, dst, t->nbytes); return; }
+    const es_gguf_tensor *x = XT[l * 3 + r];
+    const uint64_t per = x->nbytes / x->ne[2];
+    read_tensor(x, per * (uint64_t)e, dst, per);
+}
+static const es_gguf_tensor *expert_tensor(int l, int r) { return XTE ? XTE[(size_t)l * M.n_exp * 3 + r] : XT[l * 3 + r]; }
 
 /* ================= ExpertStream Lookahead =================
  * 1. parallel loader: every missing expert of a layer is read by a small thread pool at once
@@ -256,11 +338,7 @@ static char PROF_PATH[4096];
 
 static void gio_load(const gtask *t) {
     es_slot *s = &C.slots[t->slot];
-    for (int r = 0; r < 3; r++) {
-        const es_gguf_tensor *x = XT[t->l * 3 + r];
-        const uint64_t per = x->nbytes / x->ne[2];
-        read_tensor(x, per * (uint64_t)t->e, (uint8_t *)s->buf + XOFF[r], per);
-    }
+    for (int r = 0; r < 3; r++) read_expert_part(t->l, t->e, r, (uint8_t *)s->buf + XOFF[r]);
 }
 static void *gio_worker(void *arg) {
     (void)arg;
@@ -308,6 +386,7 @@ static void prefetch_layer(int l2, const float *x) {
     rmsnorm(PFX, x, M.L[l2].ffn_norm.data, M.n_embd, M.eps);
     es_act a = {.x = PFX, .q8 = NULL, .q80 = NULL, .cols = M.n_embd};
     es_matvec(M.L[l2].gate_inp.type, M.L[l2].gate_inp.data, M.n_embd, 0, ne, &a, PFR, SCRATCH[0]);
+    if (M.L[l2].exp_probs_b.data) { const float *b = M.L[l2].exp_probs_b.data; for (int e = 0; e < ne; e++) PFR[e] = (M.gating == GATE_SIGMOID ? 1.0f / (1.0f + expf(-PFR[e])) : PFR[e]) + b[e]; }
     for (int j = 0; j < T && j < ne; j++) {
         int best = -1;
         for (int e = 0; e < ne; e++) {
@@ -315,7 +394,7 @@ static void prefetch_layer(int l2, const float *x) {
             if (best < 0 || PFR[e] > PFR[best]) best = e;
         }
         if (best < 0) break;
-        const float keep = PFR[best]; PFR[best] = -INFINITY; (void)keep;
+        PFR[best] = -INFINITY;
         if (es_cache_find(&C, l2, best) >= 0) continue;
         const int s = es_cache_claim(&C, NULL, l2, best);
         if (s < 0) return;
@@ -366,10 +445,10 @@ static void warm_start(int want) {
 #define GIO_ON 0
 #endif
 
-/* Make sure the k experts of layer l are in the RAM cache; fill W views. */
+/* Make sure the k experts of layer l are in the RAM cache; fill W views. All k stay protected for this step. */
 static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
     C.step++;
-    int slot[MAXK];
+    int *slot = malloc(sizeof(int) * (size_t)k);
     char path[4096];
     for (int j = 0; j < k; j++) {
         int s = es_cache_find(&C, l, sel[j]);
@@ -396,11 +475,7 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
 #endif
             } else {
                 uint64_t t0 = es_now_ns();
-                for (int r = 0; r < 3; r++) {
-                    const es_gguf_tensor *t = XT[l * 3 + r];
-                    const uint64_t per = t->nbytes / t->ne[2];
-                    read_tensor(t, per * (uint64_t)sel[j], (uint8_t *)C.slots[s].buf + XOFF[r], per);
-                }
+                for (int r = 0; r < 3; r++) read_expert_part(l, sel[j], r, (uint8_t *)C.slots[s].buf + XOFF[r]);
                 STAT_WAIT_S += (es_now_ns() - t0) / 1e9;
                 C.slots[s].state = ES_SLOT_READY;
             }
@@ -422,7 +497,7 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
     for (int j = 0; j < k; j++) {
         es_slot *s = &C.slots[slot[j]];
         if (!PACK) {
-            const es_gguf_tensor *tg = XT[l * 3], *tu = XT[l * 3 + 1], *td = XT[l * 3 + 2];
+            const es_gguf_tensor *tg = expert_tensor(l, 0), *tu = expert_tensor(l, 1), *td = expert_tensor(l, 2);
             g[j] = (W){tg->type, (int)tg->ne[1], (int)tg->ne[0], (uint8_t *)s->buf + XOFF[0]};
             u[j] = (W){tu->type, (int)tu->ne[1], (int)tu->ne[0], (uint8_t *)s->buf + XOFF[1]};
             d[j] = (W){td->type, (int)td->ne[1], (int)td->ne[0], (uint8_t *)s->buf + XOFF[2]};
@@ -441,32 +516,61 @@ static void load_experts(int l, const int *sel, int k, W *g, W *u, W *d) {
         d[j] = (W){td->qtype & 0xFFF, (int)td->rows, (int)td->cols, (uint8_t *)s->buf + td->offset};
     }
     if (PACK) STAT_WAIT_S += (es_now_ns() - t0) / 1e9;
+    free(slot);
 }
 
-static void moe(int l, const float *xn, float *out) {
+/* ---------------- routing ---------------- */
+/* choose the experts of one token from its router logits r[n_exp]; returns how many (k) */
+static int route(int l, float *r, int *sel, float *w) {
+    const layer *L = &M.L[l];
     const int ne = M.n_exp;
     int k = M.n_used;
-    es_act a;
-    es_act_prepare(&a, xn, M.n_embd, M.n_embd % 256 ? NULL : Q8A);
-    /* router: softmax over experts, take top-k */
-    job(&M.L[l].gate_inp, &a, ROUTER);
-    run_jobs();
-    float mx = -INFINITY, sum = 0;
-    for (int e = 0; e < ne; e++) mx = ROUTER[e] > mx ? ROUTER[e] : mx;
-    for (int e = 0; e < ne; e++) { ROUTER[e] = expf(ROUTER[e] - mx); sum += ROUTER[e]; }
-    for (int e = 0; e < ne; e++) ROUTER[e] /= sum;
-    int sel[MAXK];
-    float w[MAXK], wsum = 0;
+    add_bias(r, &L->gate_inp_b, ne);
+    if (M.gating == GATE_SOFTMAX) {
+        float mx = -INFINITY, sum = 0;
+        for (int e = 0; e < ne; e++) mx = r[e] > mx ? r[e] : mx;
+        for (int e = 0; e < ne; e++) { r[e] = expf(r[e] - mx); sum += r[e]; }
+        for (int e = 0; e < ne; e++) r[e] /= sum;
+    } else if (M.gating == GATE_SIGMOID) {
+        for (int e = 0; e < ne; e++) r[e] = 1.0f / (1.0f + expf(-r[e]));
+    }
+    /* selection scores: the probabilities plus the selection bias; whole groups may be ruled out first */
+    float selp[1024];
+    const float *bias = L->exp_probs_b.data;
+    for (int e = 0; e < ne; e++) selp[e] = r[e] + (bias ? bias[e] : 0.0f);
+    if (M.n_group > 1 && M.n_group_used < M.n_group) {
+        const int per = ne / M.n_group;
+        float gs[64]; int keep[64] = {0};
+        for (int g = 0; g < M.n_group; g++) {   /* group score: its two best experts */
+            float a = -INFINITY, b = -INFINITY;
+            for (int e = g * per; e < (g + 1) * per; e++) { const float v = selp[e]; if (v > a) { b = a; a = v; } else if (v > b) b = v; }
+            gs[g] = a + b;
+        }
+        for (int j = 0; j < M.n_group_used; j++) {
+            int best = -1;
+            for (int g = 0; g < M.n_group; g++) if (!keep[g] && (best < 0 || gs[g] > gs[best])) best = g;
+            keep[best] = 1;
+        }
+        for (int g = 0; g < M.n_group; g++) if (!keep[g]) for (int e = g * per; e < (g + 1) * per; e++) selp[e] = -INFINITY;
+    }
+    float wsum = 0;
     for (int j = 0; j < k; j++) {
         int best = -1;
         for (int e = 0; e < ne; e++) {
             int used = 0;
             for (int i = 0; i < j; i++) used |= sel[i] == e;
-            if (!used && (best < 0 || ROUTER[e] > ROUTER[best])) best = e;
+            if (!used && (best < 0 || selp[e] > selp[best])) best = e;
         }
         sel[j] = best;
-        w[j] = ROUTER[best];
+        w[j] = r[best];
         wsum += w[j];
+    }
+    if (M.gating == GATE_SOFTMAX_CHOSEN) {
+        float mx = -INFINITY, s = 0;
+        for (int j = 0; j < k; j++) mx = w[j] > mx ? w[j] : mx;
+        for (int j = 0; j < k; j++) { w[j] = expf(w[j] - mx); s += w[j]; }
+        for (int j = 0; j < k; j++) w[j] /= s;
+        wsum = 1;
     }
 #ifndef __EMSCRIPTEN__
     if (SKIP_THR > 0 && k > 1) {
@@ -475,137 +579,127 @@ static void moe(int l, const float *xn, float *out) {
         for (int j = 0; j < k; j++) if (w[j] >= SKIP_THR * mxw) { sel[kk] = sel[j]; w[kk] = w[j]; wsum += w[j]; kk++; }
         STAT_SKIPPED += (unsigned long long)(k - kk); k = kk;
     }
-    if (LOOKAHEAD) prefetch_layer(l + 1, X);
 #endif
-    if (M.norm_topk) for (int j = 0; j < k; j++) w[j] /= wsum;
-    if (TRACE) {
-        fprintf(TRACE, "%d %d", TRACE_TOKEN, l);
-        for (int j = 0; j < k; j++) fprintf(TRACE, " %d", sel[j]);
-        fputc('\n', TRACE);
-    }
+    if (M.norm_topk) { const float d = wsum > 6.103515625e-5f ? wsum : 6.103515625e-5f; for (int j = 0; j < k; j++) w[j] /= d; }
+    if (M.w_scale != 0.0f && M.w_scale != 1.0f) for (int j = 0; j < k; j++) w[j] *= M.w_scale;
+    return k;
+}
 
-    W g[MAXK], u[MAXK], d[MAXK];
-    load_experts(l, sel, k, g, u, d);
+static inline float act_oai(float g, float u) {   /* gpt-oss: clamped SwiGLU, alpha 1.702, limit 7 */
+    const float x = g < 7.0f ? g : 7.0f, y = u < -7.0f ? -7.0f : u > 7.0f ? 7.0f : u;
+    return x / (1.0f + expf(1.702f * -x)) * (y + 1.0f);
+}
 
-    const int ff = g[0].rows;
-    for (int j = 0; j < k; j++) {
-        job(&g[j], &a, GU + (size_t)(2 * j) * ff);
-        job(&u[j], &a, GU + (size_t)(2 * j + 1) * ff);
-    }
+/* experts for N tokens: input BXN (prepared in BACT), output BTMP */
+static void moe_n(int l, int N) {
+    const layer *L = &M.L[l];
+    const int ne = M.n_exp, n = M.n_embd;
+    jobn(&L->gate_inp, BACT, BROUT, (size_t)ne, N);
     run_jobs();
-    es_act ah[MAXK];
-    for (int j = 0; j < k; j++) {
-        const float *gg = GU + (size_t)(2 * j) * ff, *uu = gg + ff;
-        float *hh = H + (size_t)j * ff;
-        for (int i = 0; i < ff; i++) hh[i] = gg[i] / (1.0f + expf(-gg[i])) * uu[i];
-        es_act_prepare(&ah[j], hh, ff, ff % 256 ? NULL : Q8H + (size_t)j * (ff / 256));
-        job(&d[j], &ah[j], YE + (size_t)j * M.n_embd);
+    int sel[BMAX][MAXK], kk[BMAX];
+    float w[BMAX][MAXK];
+    for (int i = 0; i < N; i++) {
+        kk[i] = route(l, BROUT + (size_t)i * ne, sel[i], w[i]);
+        if (TRACE) {
+            fprintf(TRACE, "%d %d", TRACE_TOKEN + i, l);
+            for (int j = 0; j < kk[i]; j++) fprintf(TRACE, " %d", sel[i][j]);
+            fputc('\n', TRACE);
+        }
     }
-    run_jobs();
-    for (int i = 0; i < M.n_embd; i++) {
-        float s = 0;
-        for (int j = 0; j < k; j++) s += w[j] * YE[(size_t)j * M.n_embd + i];
-        out[i] = s;
+#ifndef __EMSCRIPTEN__
+    if (LOOKAHEAD && N == 1) prefetch_layer(l + 1, BX);
+#endif
+    /* the distinct experts, in order of first use; each assignment (token, choice) gets a row grouped by expert */
+    int uex[BMAX * MAXK], nu = 0, rowof[BMAX][MAXK], tok_of[BMAX * MAXK];
+    int cnt[BMAX * MAXK];
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < kk[i]; j++) {
+            int u = 0;
+            while (u < nu && uex[u] != sel[i][j]) u++;
+            if (u == nu) { uex[nu] = sel[i][j]; cnt[nu] = 0; nu++; }
+            cnt[u]++;
+        }
+    int start[BMAX * MAXK], fill[BMAX * MAXK];
+    for (int u = 0, r = 0; u < nu; u++) { start[u] = r; fill[u] = 0; r += cnt[u]; }
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < kk[i]; j++) {
+            int u = 0;
+            while (uex[u] != sel[i][j]) u++;
+            const int r = start[u] + fill[u]++;
+            rowof[i][j] = r; tok_of[r] = i;
+        }
+    int ff = 0;
+    static es_act xa[BMAX * MAXK], ha[BMAX * MAXK];
+    static W g[BMAX * MAXK], u_[BMAX * MAXK], d[BMAX * MAXK];
+    /* as many experts at a time as the cache can hold */
+    const int chunk = C.nslots / 2 > 0 ? C.nslots / 2 : 1;
+    for (int c0 = 0; c0 < nu; c0 += chunk) {
+        const int cn = nu - c0 < chunk ? nu - c0 : chunk;
+        load_experts(l, uex + c0, cn, g + c0, u_ + c0, d + c0);
+        ff = g[c0].rows;
+        for (int u = c0; u < c0 + cn; u++) {
+            for (int q = 0; q < cnt[u]; q++) xa[start[u] + q] = BACT[tok_of[start[u] + q]];
+            jobn(&g[u], xa + start[u], BGU + (size_t)start[u] * 2 * ff, (size_t)2 * ff, cnt[u]);
+            jobn(&u_[u], xa + start[u], BGU + (size_t)start[u] * 2 * ff + ff, (size_t)2 * ff, cnt[u]);
+        }
+        run_jobs();
+        for (int u = c0; u < c0 + cn; u++) {
+            const int e = uex[u];
+            for (int q = 0; q < cnt[u]; q++) {
+                const int r = start[u] + q;
+                float *gg = BGU + (size_t)r * 2 * ff, *uu = gg + ff, *hh = BH + (size_t)r * ff;
+                if (L->gate_exps_b.data) { const float *b = (const float *)L->gate_exps_b.data + (size_t)e * ff; for (int i = 0; i < ff; i++) gg[i] += b[i]; }
+                if (L->up_exps_b.data) { const float *b = (const float *)L->up_exps_b.data + (size_t)e * ff; for (int i = 0; i < ff; i++) uu[i] += b[i]; }
+                if (M.act_oai) for (int i = 0; i < ff; i++) hh[i] = act_oai(gg[i], uu[i]);
+                else for (int i = 0; i < ff; i++) hh[i] = gg[i] / (1.0f + expf(-gg[i])) * uu[i];
+                prep(&ha[r], hh, ff);
+            }
+            jobn(&d[u], ha + start[u], BYE + (size_t)start[u] * n, (size_t)n, cnt[u]);
+        }
+        run_jobs();
+        if (L->down_exps_b.data)
+            for (int u = c0; u < c0 + cn; u++) {
+                const float *b = (const float *)L->down_exps_b.data + (size_t)uex[u] * n;
+                for (int q = 0; q < cnt[u]; q++) { float *y = BYE + (size_t)(start[u] + q) * n; for (int i = 0; i < n; i++) y[i] += b[i]; }
+            }
+    }
+    for (int t = 0; t < N; t++) {
+        float *out = BTMP + (size_t)t * n;
+        for (int i = 0; i < n; i++) {
+            float s = 0;
+            for (int j = 0; j < kk[t]; j++) s += w[t][j] * BYE[(size_t)rowof[t][j] * n + i];
+            out[i] = s;
+        }
     }
 }
 
-static void dense_ffn(const W *wg, const W *wu, const W *wd, const float *xn, float *out) {
-    es_act a, ah;
-    es_act_prepare(&a, xn, M.n_embd, M.n_embd % 256 ? NULL : Q8A);
+/* dense SwiGLU FFN for N tokens: input prepared in acts, output out (stride n_embd) */
+static void dense_n(const W *wg, const W *wu, const W *wd, const es_act *acts, int N, float *out) {
     const int ff = wg->rows;
-    job(wg, &a, GU);
-    job(wu, &a, GU + ff);
+    jobn(wg, acts, BGU, (size_t)2 * ff, N); jobn(wu, acts, BGU + ff, (size_t)2 * ff, N);
     run_jobs();
-    for (int i = 0; i < ff; i++) H[i] = GU[i] / (1.0f + expf(-GU[i])) * GU[ff + i];
-    es_act_prepare(&ah, H, ff, ff % 256 ? NULL : Q8H);
-    job(wd, &ah, out);
-    run_jobs();
-}
-
-/* one token through the whole model; writes LOGITS if want_logits */
-static void forward(int32_t tok, int pos, int want_logits) {
-    const int n = M.n_embd, hd = M.head_dim, kvd = M.n_head_kv * hd, qd_ = M.n_head * hd;
-    es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)tok, X, n);
-    for (int l = 0; l < M.n_layer; l++) {
-        layer *L = &M.L[l];
-        es_act_arena_reset();   /* activations of the previous layer are dead */
-        rmsnorm(XN, X, L->attn_norm.data, n, M.eps);
-        es_act a;
-        es_act_prepare(&a, XN, n, n % 256 ? NULL : Q8A);
-        job(&L->q, &a, Q);
-        job(&L->k, &a, K);
-        job(&L->v, &a, V);
-        run_jobs();
-        if (L->bq.data) {
-            const float *b = L->bq.data; for (int i = 0; i < qd_; i++) Q[i] += b[i];
-            b = L->bk.data; for (int i = 0; i < kvd; i++) K[i] += b[i];
-            b = L->bv.data; for (int i = 0; i < kvd; i++) V[i] += b[i];
-        }
-        if (L->q_norm.data) {
-            if (L->q_norm.cols == n) rmsnorm(Q, Q, L->q_norm.data, M.n_head * hd, M.eps);
-            else for (int h = 0; h < M.n_head; h++) rmsnorm(Q + h * hd, Q + h * hd, L->q_norm.data, hd, M.eps);
-        }
-        if (L->k_norm.data) {
-            if (L->k_norm.cols == kvd && kvd != hd) rmsnorm(K, K, L->k_norm.data, kvd, M.eps);
-            else for (int h = 0; h < M.n_head_kv; h++) rmsnorm(K + h * hd, K + h * hd, L->k_norm.data, hd, M.eps);
-        }
-        rope(Q, M.n_head, hd, pos);
-        rope(K, M.n_head_kv, hd, pos);
-        memcpy(KC + ((size_t)l * M.ctx + pos) * kvd, K, sizeof(float) * (size_t)kvd);
-        memcpy(VC + ((size_t)l * M.ctx + pos) * kvd, V, sizeof(float) * (size_t)kvd);
-        att_arg aa = {l, pos};
-        if (NT == 1) att_task(0, 1, &aa); else es_cpool_run(CP, att_task, &aa);
-        es_act ao;
-        es_act_prepare(&ao, ATT, M.n_head * hd, (M.n_head * hd) % 256 ? NULL : Q8H);
-        job(&L->o, &ao, TMP);
-        run_jobs();
-        for (int i = 0; i < n; i++) X[i] += TMP[i];
-
-        rmsnorm(XN, X, L->ffn_norm.data, n, M.eps);
-        if (L->moe) moe(l, XN, TMP);
-        else dense_ffn(&L->ffn_gate, &L->ffn_up, &L->ffn_down, XN, TMP);
-        for (int i = 0; i < n; i++) X[i] += TMP[i];
-        if (L->sh_gate.data) {
-            dense_ffn(&L->sh_gate, &L->sh_up, &L->sh_down, XN, TMP);
-            for (int i = 0; i < n; i++) X[i] += TMP[i];
-        }
+    for (int i = 0; i < N; i++) {
+        const float *g = BGU + (size_t)i * 2 * ff; float *h = BH + (size_t)i * ff;
+        for (int j = 0; j < ff; j++) h[j] = g[j] / (1.0f + expf(-g[j])) * g[ff + j];
+        prep(&BACT2[i], h, ff);
     }
-    if (!want_logits) return;
-    es_act_arena_reset();
-    rmsnorm(XN, X, M.output_norm.data, n, M.eps);
-    es_act a;
-    es_act_prepare(&a, XN, n, n % 256 ? NULL : Q8A);
-    job(&M.output, &a, LOGITS);
+    jobn(wd, BACT2, out, (size_t)M.n_embd, N);
     run_jobs();
 }
 
-
-/* ================= batched forward (prompt reading and speculative verification) =================
- * N tokens go through the model together: every weight matrix is read from memory once for all N
- * (dense models; MoE models keep the one-token path). */
-#define BMAX 16
-static int BATCH_OK;
-static float *BX, *BXN, *BQ, *BK, *BV, *BATTN, *BTMP, *BGU, *BH, *BLOG;
-static es_block_q8_K *BQ8; static size_t BQ8STR;
-static es_act BACT[BMAX];
-static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
-    const int n = M.n_embd, hd = M.head_dim, kvd = M.n_head_kv * hd, qd_ = M.n_head * hd;
-    for (int i = 0; i < N; i++) es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)toks[i], BX + (size_t)i * n, n);
-#define PREP(src, cols, i) es_act_prepare(&BACT[i], (src), (cols), (cols) % 256 ? NULL : BQ8 + (size_t)(i) * BQ8STR)
-    for (int l = 0; l < M.n_layer; l++) {
-        layer *L = &M.L[l];
-        es_act_arena_reset();
-        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); PREP(BXN + (size_t)i * n, n, i); }
-        jobn(&L->q, BACT, BQ, (size_t)qd_, N); jobn(&L->k, BACT, BK, (size_t)kvd, N); jobn(&L->v, BACT, BV, (size_t)kvd, N);
+/* attention for N tokens at positions pos0.. : input BXN prepared in BACT, output BTMP */
+static void attention_n(int l, int N, int pos0) {
+    const layer *L = &M.L[l];
+    const int n = M.n_embd;
+    if (M.kind != AR_DS2) {
+        const int hd = M.head_dim, kvd = M.kvk, qd = M.n_head * hd;
+        jobn(&L->q, BACT, BQ, (size_t)qd, N); jobn(&L->k, BACT, BKV, (size_t)kvd, N); jobn(&L->v, BACT, BV2, (size_t)kvd, N);
         run_jobs();
         for (int i = 0; i < N; i++) {
-            float *q = BQ + (size_t)i * qd_, *k = BK + (size_t)i * kvd, *v = BV + (size_t)i * kvd;
-            if (L->bq.data) {
-                for (int j = 0; j < qd_; j++) q[j] += ((const float *)L->bq.data)[j];
-                for (int j = 0; j < kvd; j++) { k[j] += ((const float *)L->bk.data)[j]; v[j] += ((const float *)L->bv.data)[j]; }
-            }
+            float *q = BQ + (size_t)i * qd, *k = BKV + (size_t)i * kvd, *v = BV2 + (size_t)i * kvd;
+            add_bias(q, &L->bq, qd); add_bias(k, &L->bk, kvd); add_bias(v, &L->bv, kvd);
             if (L->q_norm.data) {
-                if (L->q_norm.cols == n) rmsnorm(q, q, L->q_norm.data, M.n_head * hd, M.eps);
+                if (L->q_norm.cols == n) rmsnorm(q, q, L->q_norm.data, qd, M.eps);
                 else for (int h = 0; h < M.n_head; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm.data, hd, M.eps);
             }
             if (L->k_norm.data) {
@@ -616,32 +710,90 @@ static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
             memcpy(KC + ((size_t)l * M.ctx + pos0 + i) * kvd, k, sizeof(float) * (size_t)kvd);
             memcpy(VC + ((size_t)l * M.ctx + pos0 + i) * kvd, v, sizeof(float) * (size_t)kvd);
         }
-        for (int i = 0; i < N; i++) {   /* causal: token i sees positions <= pos0 + i, all already written */
-            memcpy(Q, BQ + (size_t)i * qd_, sizeof(float) * (size_t)qd_);
-            att_arg aa = {l, pos0 + i};
-            if (NT == 1) att_task(0, 1, &aa); else es_cpool_run(CP, att_task, &aa);
-            memcpy(BATTN + (size_t)i * qd_, ATT, sizeof(float) * (size_t)qd_);
+        for (int i = 0; i < N; i++) attend(l, pos0 + i, BQ + (size_t)i * qd, BATTN + (size_t)i * qd);   /* causal: all earlier rows are written */
+    } else {
+        /* MLA: q = q_b(norm(q_a(x))) per head [nope | rope]; the cache row is [norm(c) | rope(k_pe)], values are c */
+        const int H = M.n_head, nope = M.nope, rd = M.rope_d, kvl = M.kv_lora, qh = nope + rd, kvw = kvl + rd;
+        if (L->q_a.data) jobn(&L->q_a, BACT, BQA, (size_t)M.q_lora, N); else jobn(&L->q, BACT, BQ, (size_t)H * qh, N);
+        jobn(&L->kv_a, BACT, BKV, (size_t)kvw, N);
+        run_jobs();
+        if (L->q_a.data) {
+            for (int i = 0; i < N; i++) { float *qa = BQA + (size_t)i * M.q_lora; rmsnorm(qa, qa, L->q_a_norm.data, M.q_lora, M.eps); prep(&BACT2[i], qa, M.q_lora); }
+            jobn(&L->q_b, BACT2, BQ, (size_t)H * qh, N);
+            run_jobs();
         }
-        es_act_arena_reset();
-        for (int i = 0; i < N; i++) PREP(BATTN + (size_t)i * qd_, qd_, i);
-        jobn(&L->o, BACT, BTMP, (size_t)n, N); run_jobs();
+        static es_act qn[BMAX * 256];
+        for (int i = 0; i < N; i++) {
+            float *kv = BKV + (size_t)i * kvw, *row = KC + ((size_t)l * M.ctx + pos0 + i) * M.kvk;
+            rmsnorm(row, kv, L->kv_a_norm.data, kvl, M.eps);
+            memcpy(row + kvl, kv + kvl, sizeof(float) * (size_t)rd);
+            rope(row + kvl, 1, rd, pos0 + i);
+            float *q = BQ + (size_t)i * H * qh;
+            rope(q + nope, H, qh, pos0 + i);
+            for (int h = 0; h < H; h++) {   /* absorbed: q_lat[h] = k_b[h] . q_nope[h] */
+                prep(&qn[i * H + h], q + (size_t)h * qh, nope);
+                W kb = rows_of(&L->k_b, h * kvl, kvl);
+                jobn(&kb, &qn[i * H + h], BQM + ((size_t)i * H + h) * M.dk, 0, 1);
+            }
+        }
+        run_jobs();
+        for (int i = 0; i < N; i++)
+            for (int h = 0; h < H; h++) memcpy(BQM + ((size_t)i * H + h) * M.dk + kvl, BQ + (size_t)i * H * qh + (size_t)h * qh + nope, sizeof(float) * (size_t)rd);
+        for (int i = 0; i < N; i++) attend(l, pos0 + i, BQM + (size_t)i * H * M.dk, BATL + (size_t)i * H * kvl);
+        arena_reset();
+        for (int i = 0; i < N; i++)
+            for (int h = 0; h < H; h++) {   /* back from the latent space: v_b[h] . out_lat[h] */
+                prep(&qn[i * H + h], BATL + ((size_t)i * H + h) * kvl, kvl);
+                W vb = rows_of(&L->v_b, h * M.v_head, M.v_head);
+                jobn(&vb, &qn[i * H + h], BATTN + ((size_t)i * H + h) * M.v_head, 0, 1);
+            }
+        run_jobs();
+    }
+    arena_reset();
+    for (int i = 0; i < N; i++) prep(&BACT2[i], BATTN + (size_t)i * M.od, M.od);
+    jobn(&L->o, BACT2, BTMP, (size_t)n, N);
+    run_jobs();
+    for (int i = 0; i < N; i++) add_bias(BTMP + (size_t)i * n, &L->bo, n);
+}
+
+/* N tokens through the whole model; logits of tokens logits_from.. go to BLOG rows 0.. */
+static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
+    const int n = M.n_embd;
+    for (int i = 0; i < N; i++) es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)toks[i], BX + (size_t)i * n, n);
+    TRACE_TOKEN = pos0;
+    for (int l = 0; l < M.n_layer; l++) {
+        layer *L = &M.L[l];
+        arena_reset();
+        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
+        attention_n(l, N, pos0);
         for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
-        es_act_arena_reset();
-        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); PREP(BXN + (size_t)i * n, n, i); }
-        const int ff = L->ffn_gate.rows;
-        jobn(&L->ffn_gate, BACT, BGU, (size_t)2 * ff, N); jobn(&L->ffn_up, BACT, BGU + ff, (size_t)2 * ff, N); run_jobs();
-        for (int i = 0; i < N; i++) { const float *g = BGU + (size_t)i * 2 * ff; float *h = BH + (size_t)i * ff; for (int j = 0; j < ff; j++) h[j] = g[j] / (1.0f + expf(-g[j])) * g[ff + j]; }
-        es_act_arena_reset();
-        for (int i = 0; i < N; i++) PREP(BH + (size_t)i * ff, ff, i);
-        jobn(&L->ffn_down, BACT, BTMP, (size_t)n, N); run_jobs();
+        arena_reset();
+        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
+        if (L->moe) moe_n(l, N);
+        else dense_n(&L->ffn_gate, &L->ffn_up, &L->ffn_down, BACT, N, BTMP);
+        if (L->sh_gate.data) {
+            for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+            dense_n(&L->sh_gate, &L->sh_up, &L->sh_down, BACT, N, BTMP);
+            if (L->sh_gate_inp.data) {   /* Qwen2-MoE: the shared expert is scaled by sigmoid(gate . x) */
+                float gt[BMAX];
+                jobn(&L->sh_gate_inp, BACT, gt, 1, N);
+                run_jobs();
+                for (int i = 0; i < N; i++) { const float s = 1.0f / (1.0f + expf(-gt[i])); for (int j = 0; j < n; j++) BTMP[(size_t)i * n + j] *= s; }
+            }
+        }
         for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
     }
     if (logits_from >= N) return;
-    es_act_arena_reset();
+    arena_reset();
     const int cnt = N - logits_from;
-    for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(logits_from + j) * n, M.output_norm.data, n, M.eps); PREP(BXN + (size_t)j * n, n, j); }
-    jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt); run_jobs();
-#undef PREP
+    for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(logits_from + j) * n, M.output_norm.data, n, M.eps); prep(&BACT[j], BXN + (size_t)j * n, n); }
+    jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt);
+    run_jobs();
+}
+/* one token through the whole model; writes LOGITS if want_logits */
+static void forward(int32_t tok, int pos, int want_logits) {
+    forward_n(&tok, 1, pos, want_logits ? 0 : 1);
+    if (want_logits) memcpy(LOGITS, BLOG, sizeof(float) * (size_t)M.n_vocab);
 }
 
 /* ---------------- sampling ---------------- */
@@ -690,23 +842,55 @@ static int sample(float temp, int top_k, float top_p) {
 
 /* ---------------- prompt formatting ---------------- */
 static const char *TEMPLATE_KIND = "raw";
-static void detect_template(void) {
-    const char *t = es_gguf_str(&G, "tokenizer.chat_template");
-    if (!t) return;
-    if (strstr(t, "<|im_start|>")) TEMPLATE_KIND = "chatml";
-    else if (strstr(t, "<|start_header_id|>")) TEMPLATE_KIND = "llama3";
-    else if (strstr(t, "<|user|>")) TEMPLATE_KIND = "tulu";
+#define DS_BOS "<\xef\xbd\x9c" "begin\xe2\x96\x81of\xe2\x96\x81sentence\xef\xbd\x9c>"
+#define DS_EOS "<\xef\xbd\x9c" "end\xe2\x96\x81of\xe2\x96\x81sentence\xef\xbd\x9c>"
+#define DS_USER "<\xef\xbd\x9cUser\xef\xbd\x9c>"
+#define DS_ASSISTANT "<\xef\xbd\x9c" "Assistant\xef\xbd\x9c>"
+#define KIMI_SYS "<|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>"
+static int TK(const char *k) { return !strcmp(TEMPLATE_KIND, k); }
+static const char *template_kind_of(const char *t) {
+    if (!t) return "raw";
+    if (strstr(t, "<|im_middle|>")) return "kimi";
+    if (strstr(t, "<|channel|>") || (strstr(t, "<|start|>") && strstr(t, "<|message|>"))) return "harmony";
+    if (strstr(t, DS_USER)) return "deepseek";
+    if (strstr(t, "<|im_start|>")) return "chatml";
+    if (strstr(t, "<|start_header_id|>")) return "llama3";
+    if (strstr(t, "<|user|>")) return "tulu";
+    if (strstr(t, "' [INST] '")) return "mistral_sp";   /* newer Mistral templates: a space before [INST] and before each answer */
+    if (strstr(t, "[INST]")) return "mistral";
+    return "raw";
+}
+static void detect_template(void) { TEMPLATE_KIND = template_kind_of(es_gguf_str(&G, "tokenizer.chat_template")); }
+static void harmony_system(char *out, size_t cap) {
+    char date[32] = "2025-01-01";
+    const time_t now = time(NULL);
+    struct tm tmv;
+    if (localtime_r(&now, &tmv)) strftime(date, sizeof date, "%Y-%m-%d", &tmv);
+    snprintf(out, cap, "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: %s\n\n"
+             "Reasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>", date);
 }
 static void format_turn(char *out, size_t cap, const char *msg, int first) {
     /* later turns first close the previous answer: its end token was
      * sampled but not fed back into the model */
-    if (!strcmp(TEMPLATE_KIND, "chatml"))
+    if (TK("chatml"))
         snprintf(out, cap, "%s<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", first ? "" : "<|im_end|>\n", msg);
-    else if (!strcmp(TEMPLATE_KIND, "tulu"))
+    else if (TK("tulu"))
         snprintf(out, cap, "%s<|user|>\n%s\n<|assistant|>\n", first ? "<|endoftext|>" : "<|endoftext|>\n", msg);
-    else if (!strcmp(TEMPLATE_KIND, "llama3"))
+    else if (TK("llama3"))
         snprintf(out, cap, "%s<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", first ? "<|begin_of_text|>" : "<|eot_id|>", msg);
-    else
+    else if (TK("mistral"))
+        snprintf(out, cap, "%s[INST] %s [/INST]", first ? "<s>" : "</s>", msg);
+    else if (TK("mistral_sp"))
+        snprintf(out, cap, "%s [INST] %s [/INST]", first ? "<s>" : "</s>", msg);
+    else if (TK("deepseek"))
+        snprintf(out, cap, "%s" DS_USER "%s" DS_ASSISTANT, first ? DS_BOS : DS_EOS, msg);
+    else if (TK("kimi"))
+        snprintf(out, cap, "%s<|im_user|>user<|im_middle|>%s<|im_end|><|im_assistant|>assistant<|im_middle|>", first ? KIMI_SYS : "<|im_end|>", msg);
+    else if (TK("harmony")) {
+        char sys[512] = "";
+        if (first) harmony_system(sys, sizeof sys);
+        snprintf(out, cap, "%s<|start|>user<|message|>%s<|end|><|start|>assistant", first ? sys : "<|end|>", msg);
+    } else
         snprintf(out, cap, "%s", msg);
 }
 
@@ -714,23 +898,82 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
 int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     size_t o = 0;
 #define PUT(...) do { int w_ = snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__); if (w_ < 0 || o + (size_t)w_ >= cap) return -1; o += (size_t)w_; } while (0)
-    const int chatml = !strcmp(TEMPLATE_KIND, "chatml"), tulu = !strcmp(TEMPLATE_KIND, "tulu"), llama3 = !strcmp(TEMPLATE_KIND, "llama3");
+    const int chatml = TK("chatml"), tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony");
+    const char *sp = msp ? " " : "";
     if (tulu) PUT("<|endoftext|>");
     if (llama3) PUT("<|begin_of_text|>");
+    if (mistral) PUT("<s>");
+    if (ds) {
+        PUT(DS_BOS);
+        for (int i = 0; i < n; i++) if (m[i].role && (!strcmp(m[i].role, "system") || !strcmp(m[i].role, "developer"))) PUT("%s", m[i].content ? m[i].content : "");
+    }
+    if (kimi) { int has = 0; for (int i = 0; i < n; i++) has |= m[i].role && !strcmp(m[i].role, "system"); if (!has) PUT(KIMI_SYS); }
+    if (harmony) { char sys[512]; harmony_system(sys, sizeof sys); PUT("%s", sys); }
+    const char *pending_sys = NULL;   /* Mistral has no system role: it goes in front of the next user message */
     for (int i = 0; i < n; i++) {
         const char *r = m[i].role ? m[i].role : "user", *c = m[i].content ? m[i].content : "";
         const int sys = !strcmp(r, "system") || !strcmp(r, "developer"), as = !strcmp(r, "assistant");
         if (chatml) PUT("<|im_start|>%s\n%s<|im_end|>\n", sys ? "system" : as ? "assistant" : "user", c);
         else if (llama3) PUT("<|start_header_id|>%s<|end_header_id|>\n\n%s<|eot_id|>", sys ? "system" : as ? "assistant" : "user", c);
         else if (tulu) { if (as) PUT("<|assistant|>\n%s<|endoftext|>\n", c); else PUT("<|%s|>\n%s\n", sys ? "system" : "user", c); }
-        else PUT("%s%s\n\n", sys ? "" : as ? "Assistant: " : "User: ", c);
+        else if (mistral) {
+            if (sys) pending_sys = c;
+            else if (as) PUT("%s%s</s>", sp, c);
+            else { if (pending_sys) { PUT("%s[INST] %s\n\n%s [/INST]", sp, pending_sys, c); pending_sys = NULL; } else PUT("%s[INST] %s [/INST]", sp, c); }
+        } else if (ds) { if (!sys) { if (as) PUT(DS_ASSISTANT "%s" DS_EOS, c); else PUT(DS_USER "%s", c); } }
+        else if (kimi) {
+            if (sys) PUT("<|im_system|>system<|im_middle|>%s<|im_end|>", c);
+            else if (as) PUT("<|im_assistant|>assistant<|im_middle|>%s<|im_end|>", c);
+            else PUT("<|im_user|>user<|im_middle|>%s<|im_end|>", c);
+        } else if (harmony) {
+            if (sys) PUT("<|start|>developer<|message|># Instructions\n\n%s\n\n<|end|>", c);
+            else if (as) PUT("<|start|>assistant<|channel|>final<|message|>%s<|end|>", c);
+            else PUT("<|start|>user<|message|>%s<|end|>", c);
+        } else PUT("%s%s\n\n", sys ? "" : as ? "Assistant: " : "User: ", c);
     }
     if (chatml) PUT("<|im_start|>assistant\n");
     else if (llama3) PUT("<|start_header_id|>assistant<|end_header_id|>\n\n");
     else if (tulu) PUT("<|assistant|>\n");
+    else if (ds) PUT(DS_ASSISTANT);
+    else if (kimi) PUT("<|im_assistant|>assistant<|im_middle|>");
+    else if (harmony) PUT("<|start|>assistant");
+    else if (mistral) { if (pending_sys) PUT("%s[INST] %s [/INST]", sp, pending_sys); }
     else PUT("Assistant:");
 #undef PUT
     return (int)o;
+}
+
+int es_engine_render_with(const char *chat_template, const es_msg *m, int n, char *out, size_t cap) {
+    const char *keep = TEMPLATE_KIND;
+    TEMPLATE_KIND = template_kind_of(chat_template);
+    const int r = es_engine_render(m, n, out, cap);
+    TEMPLATE_KIND = keep;
+    return r;
+}
+const char *es_engine_template_kind(const char *chat_template) { return template_kind_of(chat_template); }
+
+/* gpt-oss writes "<|channel|>analysis<|message|>thoughts<|end|><|start|>assistant<|channel|>final<|message|>answer".
+ * The answer goes out as is, the thoughts inside <think>...</think> (as Qwen3 and DeepSeek-R1 write them), the markup not at all. */
+static int H_START = -1, H_CHANNEL = -1, H_MESSAGE = -1, H_END = -1, H_STATE, H_THINK; static char H_CHAN[24]; static int H_CHANLEN;
+enum { HS_ROLE, HS_CHAN, HS_MSG };
+static void answer_start(void);
+static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap) {
+    if (tok == H_START) { H_STATE = HS_ROLE; return 0; }
+    if (tok == H_CHANNEL) { H_STATE = HS_CHAN; H_CHANLEN = 0; return 0; }
+    if (tok == H_MESSAGE) {
+        H_STATE = HS_MSG; H_CHAN[H_CHANLEN] = 0;
+        if (!strncmp(H_CHAN, "analysis", 8) && !H_THINK) { H_THINK = 1; return snprintf(buf, (size_t)cap, "<think>") < cap ? 7 : 0; }
+        return 0;
+    }
+    if (tok == H_END) {
+        if (H_THINK) { H_THINK = 0; H_STATE = HS_ROLE; return snprintf(buf, (size_t)cap, "</think>\n") < cap ? 9 : 0; }
+        H_STATE = HS_ROLE; return 0;
+    }
+    if (H_STATE == HS_CHAN) { for (int i = 0; i < pl && H_CHANLEN < (int)sizeof H_CHAN - 1; i++) H_CHAN[H_CHANLEN++] = piece[i]; return 0; }
+    if (H_STATE != HS_MSG) return 0;
+    const int n = pl < cap ? pl : cap;
+    memmove(buf, piece, (size_t)n);
+    return n;
 }
 
 /* ---------------- public API ---------------- */
@@ -769,6 +1012,20 @@ void es_engine_reset(void) { POS = 0; FIRST = 1; DONE = 1; }
 
 #define ERR(...) do { snprintf(err, errcap, __VA_ARGS__); return -1; } while (0)
 
+/* expert weights are streamed, never loaded whole: merged "ffn_*_exps.weight" tensors, and the per-expert
+ * "blk.N.ffn_gate.E.weight" tensors of older Mixtral files */
+static int is_expert_tensor(const char *nm) {
+    if (strstr(nm, "_exps.weight")) return 1;
+    int l, e; char role[8], rest[16];
+    return sscanf(nm, "blk.%d.ffn_%7[a-z].%d.%15s", &l, role, &e, rest) == 4 && !strcmp(rest, "weight");
+}
+static float gguf_float(const char *key, float def) {
+    const es_gguf_kv *kv = es_gguf_find(&G, key);
+    if (!kv) return def;
+    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) return (float)kv->v.f;
+    return (float)es_gguf_int(&G, key, (int64_t)def);
+}
+
 int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     uint64_t t0 = es_now_ns();
     const char *e;
@@ -801,36 +1058,104 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     M.arch = es_gguf_str(&G, "general.architecture");
     if (!M.arch) ERR("not a model file (no general.architecture)");
 #define HPI(nm, def) (snprintf(key, sizeof key, "%s." nm, M.arch), es_gguf_int(&G, key, def))
+#define HPF(nm, def) (snprintf(key, sizeof key, "%s." nm, M.arch), gguf_float(key, def))
+#define HPS(nm) (snprintf(key, sizeof key, "%s." nm, M.arch), es_gguf_str(&G, key))
     M.n_layer = (int)HPI("block_count", 0);
     M.n_embd = (int)HPI("embedding_length", 0);
     M.n_head = (int)HPI("attention.head_count", 0);
     M.n_head_kv = (int)HPI("attention.head_count_kv", M.n_head);
     M.n_exp = (int)HPI("expert_count", 0);
     M.n_used = (int)HPI("expert_used_count", 0);
-    snprintf(key, sizeof key, "%s.attention.key_length", M.arch);
-    M.head_dim = (int)es_gguf_int(&G, key, M.n_head ? M.n_embd / M.n_head : 0);
-    const es_gguf_kv *kv;
-    snprintf(key, sizeof key, "%s.attention.layer_norm_rms_epsilon", M.arch);
-    M.eps = (kv = es_gguf_find(&G, key)) ? (float)kv->v.f : 1e-5f;
-    snprintf(key, sizeof key, "%s.rope.freq_base", M.arch);
-    M.rope_base = (kv = es_gguf_find(&G, key)) ? (float)kv->v.f : 10000.0f;
-    if (!strcmp(M.arch, "olmoe")) { M.rope_neox = 1; M.norm_topk = 0; }
-    else if (!strcmp(M.arch, "qwen3moe")) { M.rope_neox = 1; M.norm_topk = 1; }
-    else if (!strcmp(M.arch, "qwen3") || !strcmp(M.arch, "qwen2")) { M.rope_neox = 1; M.norm_topk = 0; }
-    else if (!strcmp(M.arch, "llama") || !strcmp(M.arch, "mixtral")) { M.rope_neox = 0; M.norm_topk = 1; }
-    else ERR("architecture '%s' is not supported yet (olmoe, qwen3moe, qwen3, qwen2, llama are)", M.arch);
-    if (M.n_exp < 0 || M.n_used > MAXK || (M.n_exp > 0 && M.n_used <= 0)) ERR("unsupported expert layout");
-    snprintf(key, sizeof key, "%s.rope.dimension_count", M.arch);
-    { int rd = (int)es_gguf_int(&G, key, M.head_dim);
-      if (rd != M.head_dim) ERR("partial rotary embeddings (%d of %d dims) are not supported yet", rd, M.head_dim); }
-    snprintf(key, sizeof key, "%s.rope.scaling.type", M.arch);
-    { const char *rs = es_gguf_str(&G, key); (void)rs; }
+    M.head_dim = (int)HPI("attention.key_length", M.n_head ? M.n_embd / M.n_head : 0);
+    M.eps = HPF("attention.layer_norm_rms_epsilon", 1e-5f);
+    M.rope_base = HPF("rope.freq_base", 10000.0f);
+    const char *a = M.arch;
+    M.kind = AR_STD; M.gating = GATE_SOFTMAX; M.norm_topk = 0;
+    if (!strcmp(a, "olmoe")) { M.rope_neox = 1; M.norm_topk = 0; }
+    else if (!strcmp(a, "qwen3moe")) { M.rope_neox = 1; M.norm_topk = 1; }
+    else if (!strcmp(a, "qwen3") || !strcmp(a, "qwen2")) { M.rope_neox = 1; M.norm_topk = 0; }
+    else if (!strcmp(a, "qwen2moe")) { M.rope_neox = 1; M.norm_topk = 0; }
+    else if (!strcmp(a, "llama") || !strcmp(a, "mixtral")) { M.rope_neox = 0; M.norm_topk = 1; }
+    else if (!strcmp(a, "gpt-oss")) { M.kind = AR_GPTOSS; M.rope_neox = 1; M.gating = GATE_SOFTMAX_CHOSEN; M.act_oai = 1; }
+    else if (!strcmp(a, "deepseek2")) { M.kind = AR_DS2; M.rope_neox = 0; }
+    else ERR("architecture '%s' is not supported yet (llama, mixtral, qwen2, qwen2moe, qwen3, qwen3moe, olmoe, gpt-oss and deepseek2 are)", a);
+    snprintf(key, sizeof key, "%s.expert_weights_norm", a);
+    if (es_gguf_find(&G, key)) M.norm_topk = (int)es_gguf_int(&G, key, M.norm_topk);
+    { const int gf = (int)HPI("expert_gating_func", 0); if (gf == 1) M.gating = GATE_SOFTMAX; else if (gf == 2) M.gating = GATE_SIGMOID; else if (gf != 0) ERR("expert gating function %d is not supported yet", gf); }
+    M.w_scale = HPF("expert_weights_scale", 0.0f);
+    M.n_group = (int)HPI("expert_group_count", 0); M.n_group_used = (int)HPI("expert_group_used_count", 0);
+    if (M.n_exp < 0 || M.n_exp > 1024 || M.n_used > MAXK || (M.n_exp > 0 && M.n_used <= 0) || M.n_group > 64) ERR("unsupported expert layout");
+
+    /* attention geometry */
+    if (M.kind == AR_DS2) {
+        M.q_lora = (int)HPI("attention.q_lora_rank", 0);
+        M.kv_lora = (int)HPI("attention.kv_lora_rank", 0);
+        M.rope_d = (int)HPI("rope.dimension_count", 64);
+        const int klen = (int)HPI("attention.key_length", 0), vlen = (int)HPI("attention.value_length", 0);   /* (HPI defaults must not nest) */
+        const int kmla = (int)HPI("attention.key_length_mla", klen);
+        M.v_head = (int)HPI("attention.value_length_mla", vlen);
+        M.nope = kmla - M.rope_d;
+        if (M.kv_lora <= 0 || M.nope <= 0 || M.v_head <= 0) ERR("incomplete DeepSeek attention shape in this file");
+        M.n_rot = M.rope_d;
+        M.dk = M.kv_lora + M.rope_d; M.dv = M.kv_lora; M.kvk = M.dk; M.kvv = 0;
+        M.qd = M.n_head * (M.nope + M.rope_d); M.od = M.n_head * M.v_head; M.n_head_kv = 1;
+    } else {
+        M.n_rot = (int)HPI("rope.dimension_count", M.head_dim);
+        if (M.n_rot > M.head_dim || M.n_rot % 2) ERR("unsupported rotary size %d for head size %d", M.n_rot, M.head_dim);
+        M.dk = M.dv = M.head_dim; M.kvk = M.kvv = M.n_head_kv * M.head_dim;
+        M.qd = M.od = M.n_head * M.head_dim;
+    }
+    if (M.kind == AR_GPTOSS) { M.n_swa = (int)HPI("attention.sliding_window", 0); }
+
+    /* rotary scaling (llama.cpp's rules, so YaRN models behave the same) */
+    {
+        const char *st = HPS("rope.scaling.type");
+        float factor = HPF("rope.scaling.factor", 0.0f);
+        if (factor == 0.0f) factor = HPF("rope.scale_linear", 0.0f);
+        const int none = st && !strcmp(st, "none"), yarn = st && !strcmp(st, "yarn");
+        M.freq_scale = (factor == 0.0f || none) ? 1.0f : 1.0f / factor;
+        const int ctx_train = (int)HPI("context_length", 4096);
+        M.n_ctx_orig = (int)HPI("rope.scaling.original_context_length", ctx_train);
+        M.beta_fast = HPF("rope.scaling.yarn_beta_fast", 32.0f);
+        M.beta_slow = HPF("rope.scaling.yarn_beta_slow", 1.0f);
+        M.ext_factor = yarn ? 1.0f : 0.0f;
+        float log_mul = HPF("rope.scaling.yarn_log_multiplier", 0.0f);
+        if (M.kind == AR_DS2) log_mul /= 0.1f;
+        M.attn_factor = 1.0f;
+        if (M.ext_factor != 0.0f) {
+            const float f = 1.0f / M.freq_scale;
+#define GETMS(s, m) ((s) <= 1.0f ? 1.0f : (0.1f * (m) * logf(s) + 1.0f))
+            if (log_mul != 0.0f) {
+                float ms = 1.0f;
+                if (M.kind == AR_DS2 && log_mul != 1.0f) ms = log_mul;
+                M.attn_factor = GETMS(f, ms) / GETMS(f, log_mul);
+            } else M.attn_factor = GETMS(f, 1.0f);
+#undef GETMS
+            M.attn_factor *= 1.0f / (1.0f + 0.1f * logf(f));
+        }
+        M.attn_factor *= HPF("rope.scaling.attn_factor", 1.0f);
+        const float nd = (float)M.n_rot;
+#define CORR(beta) (nd * logf(M.n_ctx_orig / ((beta) * 2 * (float)M_PI)) / (2 * logf(M.rope_base)))
+        M.corr[0] = fmaxf(0, floorf(CORR(M.beta_fast)));
+        M.corr[1] = fminf(nd - 1, ceilf(CORR(M.beta_slow)));
+        if (M.kind == AR_GPTOSS) {   /* gpt-oss' YaRN does not round the ramp ends ("truncate": false); verified against the reference model */
+            M.corr[0] = fmaxf(0, CORR(M.beta_fast)); M.corr[1] = fminf(nd - 1, CORR(M.beta_slow));
+        }
+#undef CORR
+        if (M.kind == AR_DS2) {
+            const float org = M.attn_factor * (1.0f + 0.1f * logf(1.0f / M.freq_scale));
+            const float ms = org * (1.0f + 0.1f * log_mul * logf(1.0f / M.freq_scale));
+            M.kq_scale = 1.0f * ms * ms / sqrtf((float)(M.nope + M.rope_d));
+        } else M.kq_scale = 1.0f / sqrtf((float)M.head_dim);
+        if (getenv("ES_DEBUG")) fprintf(stderr, "rope: n_rot %d neox %d base %g freq_scale %g ext %g attn_factor %g corr %g..%g orig %d kq_scale %g\n",
+                                        M.n_rot, M.rope_neox, M.rope_base, M.freq_scale, M.ext_factor, M.attn_factor, M.corr[0], M.corr[1], M.n_ctx_orig, M.kq_scale);
+    }
 
     /* copy every non-expert tensor into RAM */
     M.tptr = calloc(G.n_tensors, sizeof(uint8_t *));
     for (uint64_t i = 0; i < G.n_tensors; i++) {
         const es_gguf_tensor *t = &G.t[i];
-        if (strstr(t->name, "_exps.")) continue;
+        if (is_expert_tensor(t->name)) continue;
         M.tptr[i] = es_alloc(t->nbytes ? t->nbytes : 1);
         if (!M.tptr[i]) ERR("out of memory loading %s", t->name);
         read_tensor(t, 0, M.tptr[i], t->nbytes);
@@ -841,26 +1166,72 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     M.output = load_w("output.weight", 0);
     if (!M.output.data) M.output = M.tok_embd;   /* tied embeddings */
     M.n_vocab = M.output.rows;
+    { const W rf = load_w("rope_freqs.weight", 0); if (rf.data && rf.type == GGML_F32 && rf.cols >= M.n_rot / 2) M.rope_freqs = rf.data; }
     M.L = calloc((size_t)M.n_layer, sizeof(layer));
+    const int swa_pat = (int)HPI("attention.sliding_window_pattern", M.kind == AR_GPTOSS ? 2 : 0);
     for (int l = 0; l < M.n_layer; l++) {
         layer *L = &M.L[l];
-#define T_(field, name, req) do { snprintf(key, sizeof key, "blk.%d." name ".weight", l); L->field = load_w(key, req); } while (0)
-        T_(attn_norm, "attn_norm", 1); T_(q, "attn_q", 1); T_(k, "attn_k", 1); T_(v, "attn_v", 1);
-        T_(o, "attn_output", 1); T_(q_norm, "attn_q_norm", 0); T_(k_norm, "attn_k_norm", 0);
-        { snprintf(key, sizeof key, "blk.%d.attn_q.bias", l); L->bq = load_w(key, 0);
-          snprintf(key, sizeof key, "blk.%d.attn_k.bias", l); L->bk = load_w(key, 0);
-          snprintf(key, sizeof key, "blk.%d.attn_v.bias", l); L->bv = load_w(key, 0);
-          if (!L->bq.data != !L->bk.data || !L->bq.data != !L->bv.data) ERR("layer %d has only some of the Q/K/V biases", l); }
-        T_(ffn_norm, "ffn_norm", 1); T_(gate_inp, "ffn_gate_inp", 0);
-        T_(ffn_gate, "ffn_gate", 0); T_(ffn_up, "ffn_up", 0); T_(ffn_down, "ffn_down", 0);
-        T_(sh_gate, "ffn_gate_shexp", 0); T_(sh_up, "ffn_up_shexp", 0); T_(sh_down, "ffn_down_shexp", 0);
+#define T_(field, name, req) do { snprintf(key, sizeof key, "blk.%d." name, l); L->field = load_w(key, req); } while (0)
+        T_(attn_norm, "attn_norm.weight", 1);
+        if (M.kind == AR_DS2) {
+            T_(q_a, "attn_q_a.weight", 0); T_(q_a_norm, "attn_q_a_norm.weight", 0); T_(q_b, "attn_q_b.weight", 0);
+            if (!L->q_a.data) T_(q, "attn_q.weight", 1);
+            T_(kv_a, "attn_kv_a_mqa.weight", 1); T_(kv_a_norm, "attn_kv_a_norm.weight", 1);
+            T_(k_b, "attn_k_b.weight", 0); T_(v_b, "attn_v_b.weight", 0);
+            if (!L->k_b.data) {   /* older files: one kv_b matrix; split it (k part transposed per head, in float) */
+                snprintf(key, sizeof key, "blk.%d.attn_kv_b.weight", l);
+                const W kvb = load_w(key, 1);
+                const int H = M.n_head, per = M.nope + M.v_head, kl = M.kv_lora;
+                if (kvb.cols != kl || kvb.rows != H * per) ERR("unexpected attn_kv_b shape in layer %d", l);
+                float *kb = malloc(sizeof(float) * (size_t)H * kl * M.nope), *rowf = malloc(sizeof(float) * (size_t)kl);
+                const size_t rb = es_row_bytes(kvb.type, kl);
+                uint8_t *vb = malloc(rb * (size_t)H * M.v_head);
+                if (!kb || !rowf || !vb) ERR("out of memory splitting attn_kv_b");
+                for (int h = 0; h < H; h++) {
+                    for (int i = 0; i < M.nope; i++) {
+                        es_dequant_row(kvb.type, (const uint8_t *)kvb.data + rb * (size_t)(h * per + i), rowf, kl);
+                        for (int r = 0; r < kl; r++) kb[((size_t)h * kl + r) * M.nope + i] = rowf[r];
+                    }
+                    memcpy(vb + rb * (size_t)h * M.v_head, (const uint8_t *)kvb.data + rb * (size_t)(h * per + M.nope), rb * (size_t)M.v_head);
+                }
+                free(rowf);
+                L->k_b = (W){GGML_F32, H * kl, M.nope, kb};
+                L->v_b = (W){kvb.type, H * M.v_head, kl, vb};
+            }
+            if (L->q_a.data && (!L->q_a_norm.data || !L->q_b.data)) ERR("layer %d: incomplete q projection", l);
+        } else {
+            T_(q, "attn_q.weight", 1); T_(k, "attn_k.weight", 1); T_(v, "attn_v.weight", 1);
+            T_(q_norm, "attn_q_norm.weight", 0); T_(k_norm, "attn_k_norm.weight", 0);
+            T_(bq, "attn_q.bias", 0); T_(bk, "attn_k.bias", 0); T_(bv, "attn_v.bias", 0);
+            if (!L->bq.data != !L->bk.data || !L->bq.data != !L->bv.data) ERR("layer %d has only some of the Q/K/V biases", l);
+            T_(sinks, "attn_sinks.weight", 0);
+        }
+        T_(o, "attn_output.weight", 1); T_(bo, "attn_output.bias", 0);
+        T_(ffn_norm, "ffn_norm.weight", 0);
+        if (!L->ffn_norm.data) T_(ffn_norm, "post_attention_norm.weight", 1);
+        T_(gate_inp, "ffn_gate_inp.weight", 0); T_(gate_inp_b, "ffn_gate_inp.bias", 0); T_(exp_probs_b, "exp_probs_b.bias", 0);
+        T_(ffn_gate, "ffn_gate.weight", 0); T_(ffn_up, "ffn_up.weight", 0); T_(ffn_down, "ffn_down.weight", 0);
+        T_(sh_gate, "ffn_gate_shexp.weight", 0); T_(sh_up, "ffn_up_shexp.weight", 0); T_(sh_down, "ffn_down_shexp.weight", 0);
+        T_(sh_gate_inp, "ffn_gate_inp_shexp.weight", 0);
+        T_(gate_exps_b, "ffn_gate_exps.bias", 0); T_(up_exps_b, "ffn_up_exps.bias", 0); T_(down_exps_b, "ffn_down_exps.bias", 0);
+#undef T_
         L->moe = L->gate_inp.data != NULL;
+        L->swa = swa_pat > 0 && (l % swa_pat) < swa_pat - 1;
         if (!L->moe && !L->ffn_gate.data) ERR("layer %d has neither experts nor a dense FFN", l);
+        if (L->sinks.data && L->sinks.type != GGML_F32) ERR("attention sinks must be F32");
     }
     T = es_tok_load(&G, &e);
     if (!T) ERR("tokenizer: %s", e);
     detect_template();
     USER_TOK = es_tok_find(T, "<|user|>");
+    if (TK("harmony")) {   /* gpt-oss ends a turn with <|return|> (or <|call|> for tools); <|end|> only ends its thinking */
+        H_START = es_tok_find(T, "<|start|>"); H_CHANNEL = es_tok_find(T, "<|channel|>"); H_MESSAGE = es_tok_find(T, "<|message|>"); H_END = es_tok_find(T, "<|end|>");
+        es_tok_set_eog(T, H_END, 0);
+        es_tok_set_eog(T, es_tok_find(T, "<|return|>"), 1);
+        es_tok_set_eog(T, es_tok_find(T, "<|call|>"), 1);
+    }
+    if (TK("kimi")) es_tok_set_eog(T, es_tok_find(T, "<|im_end|>"), 1);
+    if (TK("deepseek")) es_tok_set_eog(T, es_tok_find(T, DS_EOS), 1);
 
     /* threads: compute on the fastest cores, readers on the rest */
 #if defined(__EMSCRIPTEN__)
@@ -896,7 +1267,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
 
     /* expert cache: slot size from the pack, or from the GGUF tensor shapes */
     unsigned long long slot_bytes = 0;
-    int any_moe = 0;
+    int any_moe = 0, ffx = 0;
     for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe) any_moe = 1;
     if (!any_moe) {
         slot_bytes = 4096;                      /* dense model: nothing to stream */
@@ -904,25 +1275,38 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         unsigned lay, ne;
         if (es_read_manifest(PACK, &lay, &ne, &slot_bytes)) ERR("no manifest.txt in %s", PACK);
     } else {
-        XT = calloc((size_t)M.n_layer * 3, sizeof *XT);
         static const char *kind[3] = {"gate", "up", "down"};
+        snprintf(key, sizeof key, "blk.%d.ffn_gate.0.weight", 0);
+        for (int l = 0; l < M.n_layer && !XTE; l++) if (M.L[l].moe) { snprintf(key, sizeof key, "blk.%d.ffn_gate.0.weight", l); if (es_gguf_tensor_find(&G, key)) XTE = calloc((size_t)M.n_layer * M.n_exp * 3, sizeof *XTE); break; }
+        if (!XTE) XT = calloc((size_t)M.n_layer * 3, sizeof *XT);
         for (int l = 0; l < M.n_layer; l++) {
             if (!M.L[l].moe) continue;
             size_t off = 0;
             for (int r = 0; r < 3; r++) {
-                snprintf(key, sizeof key, "blk.%d.ffn_%s_exps.weight", l, kind[r]);
-                XT[l * 3 + r] = es_gguf_tensor_find(&G, key);
-                if (!XT[l * 3 + r]) ERR("missing %s (fused expert layouts are not supported yet)", key);
-                if (!es_quant_supported(XT[l * 3 + r]->type)) ERR("%s uses %s, not supported yet", key, es_ggml_type_name(XT[l * 3 + r]->type));
+                const es_gguf_tensor *t;
+                uint64_t per;
+                if (XTE) {
+                    for (int x = 0; x < M.n_exp; x++) {
+                        snprintf(key, sizeof key, "blk.%d.ffn_%s.%d.weight", l, kind[r], x);
+                        if (!(XTE[((size_t)l * M.n_exp + x) * 3 + r] = es_gguf_tensor_find(&G, key))) ERR("missing %s", key);
+                    }
+                    t = XTE[(size_t)l * M.n_exp * 3 + r]; per = t->nbytes;
+                } else {
+                    snprintf(key, sizeof key, "blk.%d.ffn_%s_exps.weight", l, kind[r]);
+                    if (!(XT[l * 3 + r] = t = es_gguf_tensor_find(&G, key))) ERR("missing %s (fused gate+up expert layouts are not supported yet)", key);
+                    per = t->nbytes / t->ne[2];
+                }
+                if (!es_quant_supported(t->type)) ERR("%s uses %s, not supported yet", key, es_ggml_type_name(t->type));
+                if (r == 0 && (int)t->ne[1] > ffx) ffx = (int)t->ne[1];
                 XOFF[r] = off;
-                off += (XT[l * 3 + r]->nbytes / XT[l * 3 + r]->ne[2] + 63) / 64 * 64;
+                off += (per + 63) / 64 * 64;
             }
             if (off > slot_bytes) slot_bytes = off;
         }
     }
     int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
-    if (any_moe && nslots < 2 * M.n_used + 1) nslots = 2 * M.n_used + 1;
-    if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache"); }
+    if (any_moe && nslots < 2 * M.n_used + 2) nslots = 2 * M.n_used + 2;
+    if (any_moe) { if (es_cache_init(&C, nslots, slot_bytes, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory for the expert cache (%d slots of %.1f MB)", nslots, slot_bytes / 1048576.0); }
 #ifndef __EMSCRIPTEN__
     if (any_moe) {
         const char *ev;
@@ -941,45 +1325,55 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
 #endif
 
     /* activations and KV cache */
-    const int n = M.n_embd, kvd = M.n_head_kv * M.head_dim, qd = M.n_head * M.head_dim;
-    int ffmax = 8192;
-    for (int l = 0; l < M.n_layer; l++) if (M.L[l].ffn_gate.rows > ffmax) ffmax = M.L[l].ffn_gate.rows;
-    X = malloc(sizeof(float) * n); XN = malloc(sizeof(float) * n); TMP = malloc(sizeof(float) * n);
-    Q = malloc(sizeof(float) * qd); K = malloc(sizeof(float) * kvd); V = malloc(sizeof(float) * kvd);
-    ATT = malloc(sizeof(float) * qd);
-    LOGITS = malloc(sizeof(float) * (size_t)M.n_vocab);
-    ROUTER = malloc(sizeof(float) * (size_t)(M.n_exp + 1));
-    GU = malloc(sizeof(float) * 2 * (size_t)ffmax * MAXK);
-    H = malloc(sizeof(float) * (size_t)ffmax * MAXK);
-    YE = malloc(sizeof(float) * (size_t)n * MAXK);
-    es_act_arena_init(sizeof(es_blk_q80) * ((size_t)(n + qd + 2 * ffmax * MAXK + 4096) / 32 + 64));
-    Q8A = malloc(sizeof(es_block_q8_K) * (size_t)(n / 256 + 1 + qd / 256 + 1));
-    Q8H = malloc(sizeof(es_block_q8_K) * (size_t)((ffmax / 256 + 1) * MAXK + qd / 256 + 1));
-    HIST = calloc((size_t)M.ctx + 64, sizeof(int32_t));
-    { const char *ev = getenv("ES_SPEC"); SPEC_MAX = ev ? atoi(ev) : (o->spec == -2 ? 0 : o->spec > 0 ? o->spec : 7); }
-    BATCH_OK = !any_moe && !getenv("ES_NO_BATCH");
-    if (BATCH_OK) {
-        for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe || M.L[l].sh_gate.data) BATCH_OK = 0;
-        const int ffm = M.L[0].ffn_gate.rows > 0 ? M.L[0].ffn_gate.rows : ffmax;
-        int mx = n > qd ? n : qd; if (ffm > mx) mx = ffm;
-        BQ8STR = (size_t)(mx / 256 + 2);
-        BQ8 = malloc(sizeof(es_block_q8_K) * BQ8STR * BMAX);
-        BX = malloc(sizeof(float) * (size_t)n * BMAX); BXN = malloc(sizeof(float) * (size_t)n * BMAX); BTMP = malloc(sizeof(float) * (size_t)n * BMAX);
-        BQ = malloc(sizeof(float) * (size_t)qd * BMAX); BATTN = malloc(sizeof(float) * (size_t)qd * BMAX);
-        BK = malloc(sizeof(float) * (size_t)kvd * BMAX); BV = malloc(sizeof(float) * (size_t)kvd * BMAX);
-        BGU = malloc(sizeof(float) * 2 * (size_t)ffm * BMAX); BH = malloc(sizeof(float) * (size_t)ffm * BMAX);
-        BLOG = malloc(sizeof(float) * (size_t)M.n_vocab * BMAX);
-        es_act_arena_init(sizeof(es_blk_q80) * ((size_t)BMAX * (mx + 64) / 32 + 4096));
+    const int n = M.n_embd;
+    int ffmax = 0;
+    for (int l = 0; l < M.n_layer; l++) {
+        const layer *L = &M.L[l];
+        if (L->ffn_gate.rows > ffmax) ffmax = L->ffn_gate.rows;
+        if (L->sh_gate.rows > ffmax) ffmax = L->sh_gate.rows;
     }
-    size_t kv_bytes = sizeof(float) * (size_t)M.n_layer * M.ctx * kvd;
+    if (PACK && any_moe && ffx == 0) ffx = 8192;   /* packs: expert width is only known per file; this bounds it */
+    const size_t K = (size_t)(any_moe ? M.n_used : 1);
+    const size_t gu_rows = (size_t)BMAX * K;
+    const int ffg = ffx > ffmax ? ffx : ffmax;
+    const int H = M.n_head;
+    const size_t qlen = M.kind == AR_DS2 ? (size_t)H * (M.nope + M.rope_d) : (size_t)M.qd;
+    const size_t kvw = M.kind == AR_DS2 ? (size_t)(M.kv_lora + M.rope_d) : (size_t)M.kvk;
+    BX = malloc(sizeof(float) * (size_t)n * BMAX); BXN = malloc(sizeof(float) * (size_t)n * BMAX); BTMP = malloc(sizeof(float) * (size_t)n * BMAX);
+    BQ = malloc(sizeof(float) * qlen * BMAX); BKV = malloc(sizeof(float) * kvw * BMAX); BV2 = malloc(sizeof(float) * (size_t)M.kvk * BMAX);
+    BATTN = malloc(sizeof(float) * (size_t)(M.od > M.qd ? M.od : M.qd) * BMAX);
+    if (M.kind == AR_DS2) {
+        BQA = malloc(sizeof(float) * (size_t)(M.q_lora + 1) * BMAX);
+        BQM = malloc(sizeof(float) * (size_t)H * M.dk * BMAX);
+        BATL = malloc(sizeof(float) * (size_t)H * M.kv_lora * BMAX);
+        if (H > 256) ERR("too many attention heads (%d)", H);
+    }
+    BGU = malloc(sizeof(float) * 2 * (size_t)ffg * (gu_rows > BMAX ? gu_rows : BMAX));
+    BH = malloc(sizeof(float) * (size_t)ffg * (gu_rows > BMAX ? gu_rows : BMAX));
+    BYE = malloc(sizeof(float) * (size_t)n * gu_rows);
+    BROUT = malloc(sizeof(float) * (size_t)(M.n_exp + 1) * BMAX);
+    BLOG = malloc(sizeof(float) * (size_t)M.n_vocab * BMAX);
+    LOGITS = malloc(sizeof(float) * (size_t)M.n_vocab);
+    RC = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1)); RS = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1));
+    {   /* everything prepared between two arena resets: one layer's activations of the whole batch */
+        size_t fl = (size_t)BMAX * ((size_t)2 * n + qlen + (size_t)M.od + (size_t)M.q_lora + gu_rows / BMAX * ffg + ffg);
+        if (M.kind == AR_DS2) fl += (size_t)BMAX * H * (size_t)(M.nope > M.kv_lora ? M.nope : M.kv_lora);
+        es_act_arena_init(sizeof(es_blk_q80) * (fl / 32 + 4096));
+        Q8K_CAP = fl / 256 + 1024;
+        Q8K = malloc(sizeof(es_block_q8_K) * Q8K_CAP);
+    }
+    HIST = calloc((size_t)M.ctx + 64, sizeof(int32_t));
+    { const char *ev = getenv("ES_SPEC"); SPEC_MAX = ev ? atoi(ev) : (o->spec == -2 ? 0 : o->spec > 0 ? o->spec : any_moe ? 0 : 7); }
+    BATCH_OK = !getenv("ES_NO_BATCH");
+    size_t kv_bytes = sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvk;
     KC = malloc(kv_bytes);
-    VC = malloc(kv_bytes);
-    if (!KC || !VC || !GU || !H) ERR("out of memory for a %d-token context; try a smaller context", M.ctx);
+    VC = M.kvv ? malloc(sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv) : NULL;
+    if (!KC || (M.kvv && !VC) || !BGU || !BH || !BYE || !BLOG || !Q8K) ERR("out of memory for a %d-token context; try a smaller context", M.ctx);
     if (o->trace_path) TRACE = fopen(o->trace_path, "w");
 
     const char *nm = es_gguf_str(&G, "general.name");
     INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, nslots,
-                            M.core_bytes / 1e6, any_moe ? nslots * (double)slot_bytes / 1e6 : 0.0, 2 * kv_bytes / 1e6,
+                            M.core_bytes / 1e6, any_moe ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)M.n_layer * M.ctx * M.kvv : 0)) / 1e6,
                             (es_now_ns() - t0) / 1e9};
     DONE = 1;
     return 0;
@@ -1022,7 +1416,6 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
         }
     } else
     for (int i = 0; i < nt; i++) {
-        TRACE_TOKEN = POS;
         forward(toks[i], POS++, i == nt - 1);
         if (progress) progress(i + 1, nt, ud);
     }
@@ -1031,6 +1424,7 @@ int es_engine_begin(const char *msg, int raw, int32_t *ids, int ids_cap,
     GEN = 0;
     DONE = 0;
     FIRST = 0;
+    answer_start();
     T_GEN0 = es_now_ns();
     return nt;
 }
@@ -1061,10 +1455,22 @@ static int draft_tokens(int32_t *out, int max) {
     return 0;
 }
 
+static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop) */
+static void answer_start(void) { ANS_FRESH = 1; H_STATE = HS_ROLE; H_THINK = 0; }
+/* the text of one answer token */
+static int piece_out(int tok, char *buf, int cap) {
+    int n = es_tok_piece(T, tok, 0, buf, cap);
+    if (TK("harmony")) n = harmony_piece(tok, buf, n, buf, cap);
+    if (ANS_FRESH && n > 0) {
+        ANS_FRESH = 0;
+        if (es_tok_is_spm(T) && buf[0] == ' ') { memmove(buf, buf + 1, (size_t)n - 1); n--; }
+    }
+    return n;
+}
 static int emit_piece(int tok, int tokpos, char *buf, int cap) {
     if (es_tok_is_eog(T, tok) || (tok == USER_TOK && USER_TOK >= 0)) { POS = tokpos; DONE = 1; return -1; }
     GEN++;
-    return es_tok_piece(T, tok, 0, buf, cap);
+    return piece_out(tok, buf, cap);
 }
 
 int es_engine_next(char *buf, int cap) {
@@ -1081,8 +1487,7 @@ int es_engine_next(char *buf, int cap) {
     int nd = 0;
     if (BATCH_OK && SPEC_MAX > 0 && POS + SPEC_MAX + 2 < M.ctx) nd = draft_tokens(draft, SPEC_MAX < BMAX - 1 ? SPEC_MAX : BMAX - 1);
     if (nd == 0) {
-        int pl = es_tok_piece(T, next, 0, buf, cap);
-        TRACE_TOKEN = POS;
+        int pl = piece_out(next, buf, cap);
         const uint64_t t0 = es_now_ns();
         forward(next, POS++, 1);
         const double dt = (es_now_ns() - t0) / 1e9;
@@ -1113,7 +1518,7 @@ int es_engine_next(char *buf, int cap) {
     for (int i = 1; i <= m; i++) { ACCQ[ACCN] = batch[i]; ACCP[ACCN] = POS + i; HIST[POS + i] = batch[i]; ACCN++; }
     POS += m + 1;
     GEN++;
-    return es_tok_piece(T, next, 0, buf, cap);
+    return piece_out(next, buf, cap);
 }
 
 /* ---------------- Instant: prefix reuse ----------------
@@ -1135,41 +1540,45 @@ static void slots_init(void) {
     e = getenv("ES_KV_SLOT_MB"); SLOT_BYTES_MAX = (size_t)(e ? atol(e) : 1024) * 1048576u;
     SLOTS = calloc((size_t)(NSLOTS ? NSLOTS : 1), sizeof *SLOTS);
 }
-static size_t slots_bytes(void) { size_t b = 0; const size_t row = sizeof(float) * (size_t)M.n_layer * M.n_head_kv * M.head_dim * 2; for (int i = 0; i < NSLOTS; i++) b += (size_t)SLOTS[i].n * row; return b; }
+static size_t slots_bytes(void) { size_t b = 0; const size_t row = sizeof(float) * (size_t)M.n_layer * (M.kvk + M.kvv); for (int i = 0; i < NSLOTS; i++) b += (size_t)SLOTS[i].n * row; return b; }
+/* copy the first n cached rows of every layer between the live context and a packed buffer (keys, then values) */
+static void kv_copy(float *k, float *v, int n, int stride_n, int to_live) {
+    for (int l = 0; l < M.n_layer; l++) {
+        float *lk = KC + (size_t)l * M.ctx * M.kvk, *pk = k + (size_t)l * stride_n * M.kvk;
+        if (to_live) memcpy(lk, pk, sizeof(float) * (size_t)n * M.kvk); else memcpy(pk, lk, sizeof(float) * (size_t)n * M.kvk);
+        if (!M.kvv) continue;
+        float *lv = VC + (size_t)l * M.ctx * M.kvv, *pv = v + (size_t)l * stride_n * M.kvv;
+        if (to_live) memcpy(lv, pv, sizeof(float) * (size_t)n * M.kvv); else memcpy(pv, lv, sizeof(float) * (size_t)n * M.kvv);
+    }
+}
 static void slot_free(kv_slot *s) { free(s->ids); free(s->k); free(s->v); memset(s, 0, sizeof *s); }
 /* park the live conversation's first n positions (never into slot `keep`) */
 static void slot_save(int n, int keep) {
     if (NSLOTS <= 0 || n < 32) return;
-    const int kvd = M.n_head_kv * M.head_dim; const size_t per = sizeof(float) * (size_t)M.n_layer * kvd;
+    const size_t perk = sizeof(float) * (size_t)M.n_layer * M.kvk, perv = sizeof(float) * (size_t)M.n_layer * M.kvv;
     for (int i = 0; i < NSLOTS; i++)                     /* already parked (or a longer version of it): just refresh */
         if (SLOTS[i].n >= n && lcp(SLOTS[i].ids, SLOTS[i].n, HIST, n) == n) { SLOTS[i].used = ++SLOT_CLOCK; return; }
     int w = -1;
     for (int i = 0; i < NSLOTS; i++) if (i != keep && (w < 0 || SLOTS[i].used < SLOTS[w].used)) w = i;
     if (w < 0) return;
     slot_free(&SLOTS[w]);
-    while (slots_bytes() + (size_t)n * per * 2 > SLOT_BYTES_MAX) {   /* stay inside the RAM budget: drop the oldest */
+    while (slots_bytes() + (size_t)n * (perk + perv) > SLOT_BYTES_MAX) {   /* stay inside the RAM budget: drop the oldest */
         int o = -1;
         for (int i = 0; i < NSLOTS; i++) if (i != keep && SLOTS[i].n && (o < 0 || SLOTS[i].used < SLOTS[o].used)) o = i;
         if (o < 0) return;
         slot_free(&SLOTS[o]);
     }
     kv_slot *s = &SLOTS[w];
-    s->ids = malloc(sizeof(int32_t) * (size_t)n); s->k = malloc(per * (size_t)n); s->v = malloc(per * (size_t)n);
+    s->ids = malloc(sizeof(int32_t) * (size_t)n); s->k = malloc(perk * (size_t)n); s->v = malloc(perv * (size_t)n + 1);
     if (!s->ids || !s->k || !s->v) { slot_free(s); return; }
     memcpy(s->ids, HIST, sizeof(int32_t) * (size_t)n);
-    for (int l = 0; l < M.n_layer; l++) {
-        memcpy(s->k + (size_t)l * n * kvd, KC + (size_t)l * M.ctx * kvd, sizeof(float) * (size_t)n * kvd);
-        memcpy(s->v + (size_t)l * n * kvd, VC + (size_t)l * M.ctx * kvd, sizeof(float) * (size_t)n * kvd);
-    }
+    kv_copy(s->k, s->v, n, n, 0);
     s->n = n; s->used = ++SLOT_CLOCK;
 }
 static void slot_restore(int i, int upto) {
-    kv_slot *s = &SLOTS[i]; const int kvd = M.n_head_kv * M.head_dim, n = upto < s->n ? upto : s->n;
+    kv_slot *s = &SLOTS[i]; const int n = upto < s->n ? upto : s->n;
     memcpy(HIST, s->ids, sizeof(int32_t) * (size_t)n);
-    for (int l = 0; l < M.n_layer; l++) {
-        memcpy(KC + (size_t)l * M.ctx * kvd, s->k + (size_t)l * s->n * kvd, sizeof(float) * (size_t)n * kvd);
-        memcpy(VC + (size_t)l * M.ctx * kvd, s->v + (size_t)l * s->n * kvd, sizeof(float) * (size_t)n * kvd);
-    }
+    kv_copy(s->k, s->v, n, s->n, 1);
     s->used = ++SLOT_CLOCK; POS = n;
 }
 
@@ -1212,7 +1621,7 @@ static void df_init(void) {
         FILE *fp = fopen(f.path, "rb"); if (!fp) continue;
         char mg[8]; uint64_t fg; int hdr[3];
         if (fread(mg, 1, 8, fp) == 8 && !memcmp(mg, "ESKV1\0\0\0", 8) && fread(&fg, 8, 1, fp) == 1 && fg == FINGER && fread(hdr, sizeof(int), 3, fp) == 3 &&
-            hdr[1] == M.n_layer && hdr[2] == M.n_head_kv * M.head_dim && hdr[0] > 0 && hdr[0] <= 1 << 20) {
+            hdr[1] == M.n_layer && hdr[2] == M.kvk && hdr[0] > 0 && hdr[0] <= 1 << 20) {
             f.n = hdr[0]; f.ids = malloc(sizeof(int32_t) * (size_t)f.n);
             if (fread(f.ids, sizeof(int32_t), (size_t)f.n, fp) == (size_t)f.n) {
                 struct stat st; f.mt = stat(f.path, &st) ? 0 : st.st_mtime;
@@ -1223,10 +1632,10 @@ static void df_init(void) {
     }
     closedir(dir);
 }
-static size_t df_file_bytes(int n) { return 28 + 4 * (size_t)n + 2 * sizeof(float) * (size_t)n * M.n_layer * M.n_head_kv * M.head_dim; }
+static size_t df_file_bytes(int n) { return 28 + 4 * (size_t)n + sizeof(float) * (size_t)n * M.n_layer * (M.kvk + M.kvv); }
 typedef struct { int n; int32_t *ids; float *k, *v; } df_job;
 static void *df_writer(void *arg) {               /* background: write, then add to the index and keep inside the budget */
-    df_job *j = arg; const int kvd = M.n_head_kv * M.head_dim;
+    df_job *j = arg; const int kvd = M.kvk;
     uint64_t h = fnv(0xcbf29ce484222325ull, j->ids, sizeof(int32_t) * (size_t)j->n);
     char path[1100], tmp[1120]; snprintf(path, sizeof path, "%s/%016llx-%016llx.eskv", DF_DIR, (unsigned long long)FINGER, (unsigned long long)h);
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
@@ -1236,7 +1645,7 @@ static void *df_writer(void *arg) {               /* background: write, then add
         ok = fwrite("ESKV1\0\0\0", 1, 8, fp) == 8 && fwrite(&FINGER, 8, 1, fp) == 1 && fwrite(hdr, sizeof(int), 3, fp) == 3 &&
              fwrite(j->ids, sizeof(int32_t), (size_t)j->n, fp) == (size_t)j->n &&
              fwrite(j->k, sizeof(float), (size_t)j->n * M.n_layer * kvd, fp) == (size_t)j->n * M.n_layer * kvd &&
-             fwrite(j->v, sizeof(float), (size_t)j->n * M.n_layer * kvd, fp) == (size_t)j->n * M.n_layer * kvd;
+             fwrite(j->v, sizeof(float), (size_t)j->n * M.n_layer * M.kvv, fp) == (size_t)j->n * M.n_layer * M.kvv;
         ok = (fclose(fp) == 0) && ok;
     }
     if (ok && rename(tmp, path) == 0) {
@@ -1262,15 +1671,11 @@ static void df_save(int n) {                      /* copy the first n positions 
     pthread_mutex_lock(&DF_MU);
     for (int i = 0; i < NDF; i++) if (DF[i].n >= n - 16 && lcp(DF[i].ids, DF[i].n, HIST, n) >= n - 16) { pthread_mutex_unlock(&DF_MU); return; }   /* already there */
     pthread_mutex_unlock(&DF_MU);
-    const int kvd = M.n_head_kv * M.head_dim; const size_t per = (size_t)n * kvd;
     df_job *j = calloc(1, sizeof *j); j->n = n;
-    j->ids = malloc(sizeof(int32_t) * (size_t)n); j->k = malloc(sizeof(float) * per * M.n_layer); j->v = malloc(sizeof(float) * per * M.n_layer);
+    j->ids = malloc(sizeof(int32_t) * (size_t)n); j->k = malloc(sizeof(float) * (size_t)n * M.kvk * M.n_layer); j->v = malloc(sizeof(float) * (size_t)n * M.kvv * M.n_layer + 1);
     if (!j->ids || !j->k || !j->v) { free(j->ids); free(j->k); free(j->v); free(j); return; }
     memcpy(j->ids, HIST, sizeof(int32_t) * (size_t)n);
-    for (int l = 0; l < M.n_layer; l++) {
-        memcpy(j->k + (size_t)l * per, KC + (size_t)l * M.ctx * kvd, sizeof(float) * per);
-        memcpy(j->v + (size_t)l * per, VC + (size_t)l * M.ctx * kvd, sizeof(float) * per);
-    }
+    kv_copy(j->k, j->v, n, n, 0);
     pthread_t th; if (pthread_create(&th, NULL, df_writer, j) == 0) pthread_detach(th); else df_writer(j);
 }
 /* longest stored prefix of toks: returns its length and the file index in *which */
@@ -1286,12 +1691,12 @@ static int df_load(int i, int upto) {             /* read the first upto rows of
     if (i >= NDF) { pthread_mutex_unlock(&DF_MU); return -1; }
     kv_file f = DF[i]; int32_t *ids = malloc(sizeof(int32_t) * (size_t)f.n); memcpy(ids, DF[i].ids, sizeof(int32_t) * (size_t)f.n); DF[i].mt = time(NULL);
     pthread_mutex_unlock(&DF_MU);
-    const int kvd = M.n_head_kv * M.head_dim, n = upto < f.n ? upto : f.n; int ok = 1;
+    const int n = upto < f.n ? upto : f.n; int ok = 1;
     FILE *fp = fopen(f.path, "rb"); if (!fp) { free(ids); return -1; }
-    const long base = 28 + 4L * f.n; const size_t lay = (size_t)f.n * kvd * sizeof(float);
+    const long base = 28 + 4L * f.n; const size_t layk = (size_t)f.n * M.kvk * sizeof(float), layv = (size_t)f.n * M.kvv * sizeof(float);
     for (int l = 0; l < M.n_layer && ok; l++) {
-        ok = fseek(fp, base + (long)(l * lay), SEEK_SET) == 0 && fread(KC + (size_t)l * M.ctx * kvd, sizeof(float), (size_t)n * kvd, fp) == (size_t)n * kvd;
-        ok = ok && fseek(fp, base + (long)((M.n_layer + l) * lay), SEEK_SET) == 0 && fread(VC + (size_t)l * M.ctx * kvd, sizeof(float), (size_t)n * kvd, fp) == (size_t)n * kvd;
+        ok = fseek(fp, base + (long)(l * layk), SEEK_SET) == 0 && fread(KC + (size_t)l * M.ctx * M.kvk, sizeof(float), (size_t)n * M.kvk, fp) == (size_t)n * M.kvk;
+        if (M.kvv) ok = ok && fseek(fp, base + (long)(M.n_layer * layk + l * layv), SEEK_SET) == 0 && fread(VC + (size_t)l * M.ctx * M.kvv, sizeof(float), (size_t)n * M.kvv, fp) == (size_t)n * M.kvv;
     }
     fclose(fp);
     if (ok) { memcpy(HIST, ids, sizeof(int32_t) * (size_t)n); POS = n; utime(f.path, NULL); STAT_DISK_LOADS++; }
@@ -1351,11 +1756,12 @@ int es_engine_prompt(const char *text, int *cached, int32_t *ids, int ids_cap, v
             if (progress) progress(i + cnt, nr, ud);
         }
     } else
-        for (int i = 0; i < nr; i++) { TRACE_TOKEN = POS; forward(rest[i], POS++, i == nr - 1); if (progress) progress(i + 1, nr, ud); }
+        for (int i = 0; i < nr; i++) { forward(rest[i], POS++, i == nr - 1); if (progress) progress(i + 1, nr, ud); }
     ST.prompt_tokens = nt;
     ST.prompt_s = (es_now_ns() - tp) / 1e9;
     if (PREFIX_ON && nr >= DF_MIN && ST.prompt_s >= DF_MIN_S) df_save(nt);   /* expensive to read: keep it on disk for next time */
     GEN = 0; DONE = 0; FIRST = 0;
+    answer_start();
     T_GEN0 = es_now_ns();
     if (cached) *cached = keep;
     return nt;
@@ -1368,3 +1774,4 @@ int es_engine_dump_logits(const int32_t *ids, int n, FILE *f) {
     }
     return 0;
 }
+

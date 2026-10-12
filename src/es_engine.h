@@ -62,6 +62,9 @@ void es_engine_turn_stats(es_turn_stats *s);
  * Returns the text length, or -1 if it does not fit in cap. */
 typedef struct { const char *role, *content; } es_msg;
 int  es_engine_render(const es_msg *m, int n, char *out, size_t cap);
+/* The same for a given tokenizer.chat_template text (no model needed; for tests), and the family it is recognised as. */
+int  es_engine_render_with(const char *chat_template, const es_msg *m, int n, char *out, size_t cap);
+const char *es_engine_template_kind(const char *chat_template);
 /* Make the context exactly `text` (already formatted; BOS added when the model wants it), reusing the longest prefix that is already
  * computed: the live conversation, or one of a few parked ones (ES_KV_SLOTS, default 4; ES_PREFIX_CACHE=0 turns reuse off).
  * Only the new tokens are read. *cached = prompt tokens reused. Returns the prompt token count, or -1 if it does not fit. */
