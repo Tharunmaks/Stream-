@@ -121,6 +121,7 @@ int main(int argc, char **argv) {
     STAGE("      core %.0f MB loaded in %.2f s | expert cache %d slots (%.0f MB) | context %d tokens (%.0f MB)\n",
           in.core_mb, in.load_s, in.cache_slots, in.cache_mb, in.ctx, in.kv_mb);
     STAGE("      %s | RAM now %ld MB\n", o.pack ? "experts from the pack" : in.experts && !in.cache_slots ? "whole model mapped in RAM (zero copy)" : "experts read straight from the GGUF", es_rss_mb());
+    if (in.remote) STAGE("      %s\n", in.remote);
 
     if (dump_ids && dump_path) {
         static int32_t ids[1 << 14];
@@ -191,6 +192,7 @@ int main(int argc, char **argv) {
         fflush(stdout);
         STAGE("\033[2m      %d tokens in %.1f s = %.2f tok/s | experts %.0f%% from RAM, %.0f MB read from flash (%.1f s waiting) | RAM %ld MB\033[0m\n",
               s.gen_tokens, s.gen_s, tps, s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb());
+        if (in.remote) STAGE("\033[2m      experts downloaded on demand so far: %llu (%.0f MB)\033[0m\n", s.fetched, s.net_mb);
         if (prompt) break;
     }
     return 0;

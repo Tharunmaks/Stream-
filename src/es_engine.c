@@ -22,6 +22,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#ifndef __EMSCRIPTEN__
+#include <fcntl.h>
+#include <sys/statvfs.h>
+#endif
 
 #include "es_cache.h"
 #include "es_compute.h"
@@ -340,6 +344,14 @@ static long mem_available_mb(void) {
     fclose(f);
     return kb / 1024;
 }
+static int REMOTE_FILES(const char *gguf) {   /* made by es_get with experts on demand: the files have holes, never map them */
+    char p[4200]; snprintf(p, sizeof p, "%s.esurl", gguf);
+    FILE *f = fopen(p, "r"); if (!f) return 0;
+    char line[9000]; int complete = 0;
+    while (fgets(line, sizeof line, f)) if (!strncmp(line, "complete", 8)) complete = 1;
+    fclose(f);
+    return !complete;
+}
 static int map_shard(int sh, int fd) {
     struct stat st;
     if (fstat(fd, &st)) return -1;
@@ -349,8 +361,147 @@ static int map_shard(int sh, int fd) {
     return 0;
 }
 #endif
+/* ---- experts on demand: model files made by es_get hold the core; each routed expert is downloaded the first time it is
+ * chosen and kept on disk (within ES_DISK_GB; the least used go first). ES_OFFLINE=1, or a failed download, routes around the
+ * experts that are not here. ---- */
+#define XTE_ANY() (XTE != NULL)
+#define XTE_AT(l, e, r) (XTE[((size_t)(l) * M.n_exp + (e)) * 3 + (r)])
+static int REMOTE, OFFLINE;
+static uint8_t *HAVE;
+static double STAT_NET_MB;
+static char RNOTE[256];
+static unsigned long long STAT_FETCHED;
+static const es_gguf_tensor *expert_tensor(int l, int r);
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#include "es_fetch.h"
+static char *RURL[256]; static int RFD[256], HAVE_FD = -1;
+static char SH_PATH[256][4096];
+static double DISK_BUDGET, DISK_USED, EXP_BYTES;
+static pthread_mutex_t RMU = PTHREAD_MUTEX_INITIALIZER;
+static unsigned *PROF;
+static uint64_t part_off(int l, int e, int r, uint64_t *len, int *shard) {
+    const es_gguf_tensor *t = expert_tensor(l, r);
+    if (XTE_ANY()) { t = XTE_AT(l, e, r); *len = t->nbytes; *shard = (int)t->shard; return shard_base(t) + t->offset; }
+    const uint64_t per = t->nbytes / t->ne[2];
+    *len = per; *shard = (int)t->shard;
+    return shard_base(t) + t->offset + per * (uint64_t)e;
+}
+static void remote_init(const char *gguf, char *note, size_t cap) {
+    char p[4200];
+    snprintf(p, sizeof p, "%s.esurl", gguf);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    char line[9000]; int complete = 0, nurl = 0;
+    while (fgets(line, sizeof line, f)) {
+        int idx; long long sz; char url[8192];
+        if (sscanf(line, "%d %lld %8191s", &idx, &sz, url) == 3 && idx >= 0 && idx < 256) { RURL[idx] = strdup(url); nurl++; }
+        else if (!strncmp(line, "complete", 8)) complete = 1;
+    }
+    fclose(f);
+    if (complete || !nurl || !M.n_exp) return;
+    for (int i = 0; i < 256; i++) if (RURL[i]) {
+        RFD[i] = open(i ? SH_PATH[i] : gguf, O_RDWR);
+        if (RFD[i] < 0) { snprintf(note, cap, "experts on demand are off: cannot write to the model file"); return; }
+    }
+    const size_t n = (size_t)M.n_layer * M.n_exp;
+    HAVE = calloc(n, 1);
+    snprintf(p, sizeof p, "%s.eshave", gguf);
+    HAVE_FD = open(p, O_RDWR | O_CREAT, 0644);
+    if (HAVE_FD >= 0 && pread(HAVE_FD, HAVE, n, 0) < 0) memset(HAVE, 0, n);
+    for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe) {
+        double b = 0; for (int r = 0; r < 3; r++) { uint64_t len; int sh; part_off(l, 0, r, &len, &sh); b += (double)len; }
+        if (b > EXP_BYTES) EXP_BYTES = b;
+    }
+    size_t have = 0;
+    for (size_t i = 0; i < n; i++) have += HAVE[i] != 0;
+    DISK_USED = have * EXP_BYTES;
+    const char *ev = getenv("ES_DISK_GB");
+    DISK_BUDGET = ev ? atof(ev) * 1e9 : 0;
+    OFFLINE = getenv("ES_OFFLINE") != NULL;
+    REMOTE = 1;
+    snprintf(note, cap, "experts on demand: %zu of %zu here (%.1f GB)%s", have, n, DISK_USED / 1e9, OFFLINE ? ", offline" : "");
+}
+static void have_set(int l, int e, uint8_t v) {
+    const size_t i = (size_t)l * M.n_exp + e;
+    HAVE[i] = v;
+    if (HAVE_FD >= 0 && pwrite(HAVE_FD, &v, 1, (off_t)i) != 1) { /* the map is only a hint: worst case the expert is fetched again */ }
+}
+/* free bytes on the disk holding the model */
+static double disk_free(void) {
+    struct statvfs v;
+    return fstatvfs(RFD[0], &v) ? 1e18 : (double)v.f_bavail * (double)v.f_frsize;
+}
+/* make room for one more expert: within ES_DISK_GB, and always leaving ES_DISK_RESERVE_GB (default 2) free on the disk.
+ * The least used experts go first (their file ranges become holes again). 0 when there is room. */
+static int evict_for_room(int keep_l, int keep_e) {
+    const char *ev = getenv("ES_DISK_RESERVE_GB");
+    const double reserve = (ev ? atof(ev) : 2.0) * 1e9;
+    for (;;) {
+        const int over = DISK_BUDGET > 0 && DISK_USED + EXP_BYTES > DISK_BUDGET;
+        if (!over && disk_free() >= EXP_BYTES + reserve) return 0;
+        size_t best = (size_t)-1; unsigned bu = 0;
+        for (size_t i = 0; i < (size_t)M.n_layer * M.n_exp; i++) {
+            if (!HAVE[i] || ((int)(i / M.n_exp) == keep_l && (int)(i % M.n_exp) == keep_e)) continue;
+            if (es_cache_find(&C, (int)(i / M.n_exp), (int)(i % M.n_exp)) >= 0) continue;   /* in RAM right now */
+            const unsigned u = PROF ? PROF[i] : 0;
+            if (best == (size_t)-1 || u < bu) { best = i; bu = u; }
+        }
+        if (best == (size_t)-1) return -1;
+        const int l = (int)(best / M.n_exp), e = (int)(best % M.n_exp);
+        int freed = 0;
+        for (int r = 0; r < 3; r++) {
+            uint64_t len; int sh; const uint64_t off = part_off(l, e, r, &len, &sh);
+#ifdef FALLOC_FL_PUNCH_HOLE
+            if (!fallocate(RFD[sh], FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t)off, (off_t)len)) freed = 1;
+#endif
+        }
+        have_set(l, e, 0);
+        DISK_USED -= EXP_BYTES;
+        if (!freed && !over) return -1;   /* this file system cannot give space back: stop downloading */
+    }
+}
+/* download expert e of layer l into the model file; 0 when it is here */
+static int expert_fetch(int l, int e) {
+    if (OFFLINE) return -1;
+    pthread_mutex_lock(&RMU);
+    const int room = evict_for_room(l, e) == 0;
+    pthread_mutex_unlock(&RMU);
+    if (!room) {
+        fprintf(stderr, "\nnote: no more disk space for experts; continuing offline with the experts already here\n");
+        OFFLINE = 1;
+        return -1;
+    }
+    double mb = 0;
+    for (int r = 0; r < 3; r++) {
+        uint64_t len; int sh; const uint64_t off = part_off(l, e, r, &len, &sh);
+        if (!RURL[sh] || es_http_range(RURL[sh], off, len, RFD[sh], off)) {
+            if (!OFFLINE) fprintf(stderr, "\nnote: an expert could not be downloaded; continuing offline with the experts already here\n");
+            OFFLINE = 1;
+            return -1;
+        }
+        mb += len / 1048576.0;
+    }
+    pthread_mutex_lock(&RMU);
+    have_set(l, e, 1);
+    DISK_USED += EXP_BYTES; STAT_FETCHED++; STAT_NET_MB += mb;
+    pthread_mutex_unlock(&RMU);
+    return 0;
+}
+#endif
+
 /* expert e of layer l, role r (gate, up, down) into dst */
 static void read_expert_part(int l, int e, int r, void *dst) {
+#ifndef __EMSCRIPTEN__
+    if (REMOTE && !HAVE[(size_t)l * M.n_exp + e]) {
+        if (r == 0) expert_fetch(l, e);
+        if (!HAVE[(size_t)l * M.n_exp + e]) {   /* not here: it contributes nothing */
+            uint64_t len; int sh; part_off(l, e, r, &len, &sh);
+            memset(dst, 0, len);
+            return;
+        }
+    }
+#endif
     if (XTE) { const es_gguf_tensor *t = XTE[((size_t)l * M.n_exp + e) * 3 + r]; read_tensor(t, 0, dst, t->nbytes); return; }
     const es_gguf_tensor *x = XT[l * 3 + r];
     const uint64_t per = x->nbytes / x->ne[2];
@@ -372,7 +523,7 @@ static float SKIP_THR;
 typedef struct { int slot, l, e; } gtask;
 static struct { pthread_mutex_t mu; pthread_cond_t cv, cv_done; gtask *dq, *pq; int dh, dn, ph, pn, cap, stop; pthread_t th[16]; int nth; } GQ;
 static unsigned long long STAT_PF_ISSUED, STAT_PF_USED, STAT_SKIPPED;
-static unsigned *PROF;            /* per (layer, expert) use counts */
+/* PROF: per (layer, expert) use counts (declared above) */
 static char PROF_PATH[4096];
 
 static void gio_load(const gtask *t) {
@@ -589,6 +740,7 @@ static int route(int l, float *r, int *sel, float *w) {
     float selp[1024];
     const float *bias = L->exp_probs_b.data;
     for (int e = 0; e < ne; e++) selp[e] = r[e] + (bias ? bias[e] : 0.0f);
+    if (REMOTE && OFFLINE) for (int e = 0; e < ne; e++) if (!HAVE[(size_t)l * ne + e]) selp[e] = -INFINITY;   /* only experts that are on this device */
     if (M.n_group > 1 && M.n_group_used < M.n_group) {
         const int per = ne / M.n_group;
         float gs[64]; int keep[64] = {0};
@@ -1209,6 +1361,7 @@ void es_engine_turn_stats(es_turn_stats *s) {
 #ifndef __EMSCRIPTEN__
     s->pf_issued = STAT_PF_ISSUED; s->pf_used = STAT_PF_USED; s->skipped = STAT_SKIPPED;
 #endif
+    s->fetched = STAT_FETCHED; s->net_mb = STAT_NET_MB;
 }
 void es_engine_set_sampling(float temp, int top_k, float top_p, int max_new, uint64_t seed) {
     TEMP = temp; TOP_K = top_k; TOP_P = top_p; MAX_NEW = max_new;
@@ -1252,6 +1405,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
                 es_gguf S;
                 if (es_gguf_open(&S, sp, &e)) ERR("%s: %s", sp, e);
                 SH_FD[part - 1] = S.fd; SH_DS[part - 1] = S.data_start;
+#ifndef __EMSCRIPTEN__
+                snprintf(SH_PATH[part - 1], sizeof SH_PATH[0], "%s", sp);
+#endif
                 G.t = realloc(G.t, (G.n_tensors + S.n_tensors) * sizeof *G.t);
                 for (uint64_t i = 0; i < S.n_tensors; i++) { G.t[G.n_tensors + i] = S.t[i]; G.t[G.n_tensors + i].shard = (uint32_t)(part - 1); }
                 G.n_tensors += S.n_tensors;
@@ -1373,7 +1529,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     }
 
 #ifndef __EMSCRIPTEN__
-    if (!PACK && o->gguf) {   /* zero-copy when the model fits in free RAM (ES_MMAP=1 forces it, ES_MMAP=0 turns it off) */
+    if (!PACK && o->gguf && !REMOTE_FILES(o->gguf)) {   /* zero-copy when the model fits in free RAM (ES_MMAP=1 forces it, ES_MMAP=0 turns it off) */
         uint64_t total = G.file_size; int nsh = 1;
         for (int i = 1; i < 256 && SH_FD[i] > 0; i++) { struct stat st; if (!fstat(SH_FD[i], &st)) total += (uint64_t)st.st_size; nsh = i + 1; }
         const char *ev = getenv("ES_MMAP");
@@ -1553,6 +1709,11 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
             if (off > slot_bytes) slot_bytes = off;
         }
     }
+#ifndef __EMSCRIPTEN__
+    if (any_moe && !PACK && o->gguf) {
+        remote_init(o->gguf, RNOTE, sizeof RNOTE);
+    }
+#endif
     int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
     if (any_moe && nslots < 2 * M.n_used + 2) nslots = 2 * M.n_used + 2;
     if (MAPPED) nslots = BMAX * M.n_used * 2;   /* only bookkeeping: experts are used where they lie in the mapping */
@@ -1640,7 +1801,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     const char *nm = es_gguf_str(&G, "general.name");
     INFO = (es_engine_info){nm ? nm : M.arch, M.arch, M.n_layer, M.n_exp, M.n_used, M.ctx, MAPPED ? 0 : nslots,
                             M.core_bytes / 1e6, any_moe && !MAPPED ? nslots * (double)slot_bytes / 1e6 : 0.0, (kv_bytes + (M.kvv ? sizeof(float) * (size_t)NKVL * M.ctx * M.kvv : 0)) / 1e6,
-                            (es_now_ns() - t0) / 1e9};
+                            (es_now_ns() - t0) / 1e9, RNOTE[0] ? RNOTE : NULL};
     DONE = 1;
     return 0;
 }

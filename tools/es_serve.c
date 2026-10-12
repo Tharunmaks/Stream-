@@ -435,8 +435,8 @@ static void web_chat(req *r) {
         web_add("assistant", g.text.p, g.text.n);
         es_turn_stats s; es_engine_turn_stats(&s);
         bfmt(&b, "{\"ev\":\"done\",\"tokens\":%d,\"secs\":%.2f,\"tps\":%.2f,\"prompt_secs\":%.2f,\"cached\":%d,\"read\":%d,\"ttft\":%.3f,\"hit\":%.1f,\"flash_mb\":%.0f,\"wait_s\":%.2f,\"ram_mb\":%ld,"
-                 "\"spec_steps\":%llu,\"spec_ok\":%llu}\n", g.gen_tokens, g.gen_s, g.gen_tokens / (g.gen_s > 0 ? g.gen_s : 1), g.prompt_s, g.cached, g.prompt_tokens - g.cached, g.ttft_s,
-             s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb(), s.spec_steps, s.spec_accepted);
+                 "\"spec_steps\":%llu,\"spec_ok\":%llu,\"fetched\":%llu,\"net_mb\":%.0f}\n", g.gen_tokens, g.gen_s, g.gen_tokens / (g.gen_s > 0 ? g.gen_s : 1), g.prompt_s, g.cached, g.prompt_tokens - g.cached, g.ttft_s,
+             s.hit_pct, s.flash_mb, s.wait_s, es_rss_mb(), s.spec_steps, s.spec_accepted, s.fetched, s.net_mb);
     }
     chunk(r->fd, b.p, b.n); send_all(r->fd, "0\r\n\r\n", 5);
     free(b.p); free(g.text.p);

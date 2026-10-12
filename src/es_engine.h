@@ -34,12 +34,15 @@ typedef struct {
     const char *name, *arch;
     int layers, experts, used, ctx, cache_slots;
     double core_mb, cache_mb, kv_mb, load_s;
+    const char *remote;      /* experts on demand (a model fetched with es_get): what is on this device, else NULL */
 } es_engine_info;
 
 typedef struct {
     int prompt_tokens, gen_tokens, ctx_reset;
     double prompt_s, gen_s, hit_pct, flash_mb, wait_s;
     unsigned long long pf_issued, pf_used, skipped, spec_steps, spec_accepted;
+    unsigned long long fetched;   /* experts downloaded on demand this session, and their size */
+    double net_mb;
 } es_turn_stats;
 
 /* 0 on success, else writes a message to err */
