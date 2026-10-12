@@ -1,7 +1,7 @@
 /*
  * es_get: download a GGUF model from Hugging Face, either whole or only its core.
  *
- *   es_get REPO FILE [-d DIR] [--all]
+ *   es_get REPO FILE [-d DIR] [--all | --plan]
  *   es_get unsloth/Kimi-K2-Instruct-GGUF UD-TQ1_0/Kimi-K2-Instruct-UD-TQ1_0-00001-of-00005.gguf -d ~/models
  *
  * Without --all only the core is downloaded: the file header, attention, embeddings, routers, shared experts and dense
@@ -9,6 +9,7 @@
  * each one the first time it is chosen (and keeps it, within ES_DISK_GB). Split models: name the first part; all parts
  * are handled. The engine finds the source URLs in FILE.esurl next to the first part. Uses curl; HF_TOKEN for gated repos.
  * Running it again resumes: parts of the core already downloaded are not fetched again.
+ * --plan only reads the headers (a few MB) and prints how much would be downloaded now and later; nothing is kept.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -22,6 +23,7 @@
 
 #include "../src/es_fetch.h"
 #include "../src/es_gguf.h"
+#include "../src/es_quant.h"
 
 static int is_expert_tensor(const char *nm) {
     if (strstr(nm, "_exps.weight")) return 1;
@@ -47,14 +49,15 @@ static int fetch(const char *url, int fd, uint64_t a, uint64_t b, double *done_m
 
 int main(int argc, char **argv) {
     const char *repo = NULL, *file = NULL, *dir = ".";
-    int all = 0;
+    int all = 0, plan = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-d") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--all")) all = 1;
+        else if (!strcmp(argv[i], "--plan")) plan = 1;
         else if (!repo) repo = argv[i];
         else if (!file) file = argv[i];
     }
-    if (!repo || !file) { fprintf(stderr, "usage: es_get REPO FILE [-d DIR] [--all]\n"); return 2; }
+    if (!repo || !file) { fprintf(stderr, "usage: es_get REPO FILE [-d DIR] [--all | --plan]\n"); return 2; }
     mkdir(dir, 0755);
     int nparts = 1;
     const char *dash = strstr(file, "-00001-of-");
@@ -64,7 +67,7 @@ int main(int argc, char **argv) {
     char path1[4096], urlf[4200];
     snprintf(path1, sizeof path1, "%s/%s", dir, base1);
     snprintf(urlf, sizeof urlf, "%s.esurl", path1);
-    FILE *uf = fopen(urlf, "w");
+    FILE *uf = plan ? fopen("/dev/null", "w") : fopen(urlf, "w");
     if (!uf) { perror(urlf); return 1; }
     double total_core = 0, total_all = 0, total_exp = 0;
     for (int part = 1; part <= nparts; part++) {
@@ -74,6 +77,7 @@ int main(int argc, char **argv) {
         es_hf_url(url, sizeof url, repo, name);
         const char *b = strrchr(name, '/') ? strrchr(name, '/') + 1 : name;
         snprintf(path, sizeof path, "%s/%s", dir, b);
+        if (plan) snprintf(path, sizeof path, "%s/.es_plan_%d.gguf", dir, (int)getpid());
         const int64_t size = es_http_size(url);
         if (size <= 0) { fprintf(stderr, "cannot reach %s (curl installed? the right file name?)\n", url); return 1; }
         fprintf(stderr, "%s: %.2f GB\n", b, size / 1e9);
@@ -83,7 +87,7 @@ int main(int argc, char **argv) {
         if (st.st_size != size && ftruncate(fd, size)) { perror("ftruncate"); return 1; }   /* sparse: holes take no space */
         char donef[4500];
         snprintf(donef, sizeof donef, "%s.escore", path);
-        const int core_done = access(donef, F_OK) == 0;
+        const int core_done = !plan && access(donef, F_OK) == 0;
         /* the header: fetch more until it parses and the tensor table is complete */
         es_gguf g; const char *err;
         uint64_t hdr = 16ull << 20;
@@ -98,6 +102,10 @@ int main(int argc, char **argv) {
             }
             if (core_done || hdr >= (uint64_t)size || hdr >= (512ull << 20)) { fprintf(stderr, "%s: not a readable GGUF (%s)\n", b, err ? err : "header"); return 1; }
             hdr *= 2;
+        }
+        for (uint64_t i = 0; i < g.n_tensors; i++) if (!es_quant_supported(g.t[i].type)) {
+            fprintf(stderr, "%s: %s uses %s (type %u), which the engine does not support yet; pick another quantization\n", b, g.t[i].name, es_ggml_type_name(g.t[i].type), g.t[i].type);
+            return 1;
         }
         /* core tensors (everything but routed experts), merged into few ranges */
         range *rg = malloc(sizeof(range) * (g.n_tensors + 1));
@@ -117,6 +125,11 @@ int main(int argc, char **argv) {
         double want = 0;
         for (int i = 0; i < m; i++) want += (rg[i].b - rg[i].a) / 1048576.0;
         total_all += size / 1e9; total_exp += exp_bytes / 1e9; total_core += want / 1024.0;
+        if (plan) {
+            fprintf(stderr, "  core %.2f GB, routed experts %.2f GB\n", want / 1024.0, exp_bytes / 1e9);
+            es_gguf_close(&g); close(fd); unlink(path); free(rg);
+            continue;
+        }
         if (!core_done) {
             fprintf(stderr, "  downloading %s: %.0f MB of %.0f MB\n", all ? "everything" : "the core", want, size / 1048576.0);
             double done = 0; const double t0 = now();
@@ -131,6 +144,10 @@ int main(int argc, char **argv) {
     }
     fprintf(uf, "%s\n", all ? "complete" : "experts-on-demand");
     fclose(uf);
+    if (plan) {
+        printf("plan: model %.1f GB; download now (core) %.1f GB; routed experts %.1f GB, fetched when first used\n", total_all, total_core, total_exp);
+        return 0;
+    }
     printf("ready: %s\n", path1);
     printf("  model %.1f GB in total, of which routed experts %.1f GB%s; downloaded now: %.1f GB\n", total_all, total_exp, all ? "" : " (fetched when first used)", total_core);
     printf("  run: ./es_chat -g %s     (ES_DISK_GB=N caps the space experts may take; ES_OFFLINE=1 uses only experts already here)\n", path1);

@@ -30,7 +30,8 @@ int es_quant_supported(uint32_t t) {
     case GGML_Q5_1: case GGML_Q8_0: case GGML_Q2_K: case GGML_Q3_K:
     case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ4_NL: case GGML_IQ4_XS: case GGML_BF16:
     case GGML_IQ2_XXS: case GGML_IQ2_XS: case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M:
-    case GGML_TQ1_0: case GGML_TQ2_0: case GGML_MXFP4: return 1;
+    case GGML_TQ1_0: case GGML_TQ2_0: case GGML_MXFP4: case GGML_Q1_0: case GGML_Q2_0:
+    case GGML_IQ1_XS: case GGML_IQ1_XXS: case GGML_IQ1_XXXS: return 1;
     }
     return 0;
 }
@@ -62,6 +63,11 @@ size_t es_row_bytes(uint32_t t, int n) {
     case GGML_TQ1_0: return (size_t)n / 256 * 54;
     case GGML_TQ2_0: return (size_t)n / 256 * 66;
     case GGML_MXFP4: return (size_t)n / 32 * 17;
+    case GGML_Q1_0: return (size_t)n / 128 * 18;
+    case GGML_Q2_0: return (size_t)n / 64 * 18;
+    case GGML_IQ1_XS: return (size_t)n / 256 * 46;
+    case GGML_IQ1_XXS: return (size_t)n / 256 * 42;
+    case GGML_IQ1_XXXS: return (size_t)n / 256 * 38;
     }
     return 0;
 }
@@ -181,8 +187,53 @@ static inline float e8m0_half(uint8_t x) {   /* 0.5 * 2^(x-127) */
 }
 static inline float h2f(const uint8_t *p) { uint16_t h; memcpy(&h, p, 2); return es_fp16_to_fp32(h); }
 #define IQ1S_DELTA 0.125f
+/* narrow-index IQ1 (IQ1_XS / XXS / XXXS): for 32-weight sub-block ib of a 256-weight block, the 4 grid rows, the odd scale
+ * 2*ls+1 and the delta sign. Every other detail is IQ1_S's. */
+static inline int iq1n_bytes(uint32_t t) { return t == GGML_IQ1_XS ? 46 : t == GGML_IQ1_XXS ? 42 : 38; }
+static inline float iq1n_sub(uint32_t t, const uint8_t *p, int ib, const int8_t *rows[4], float *delta) {
+    const uint8_t *qs = p + 2 + 4 * ib;
+    int nib;
+    if (t == GGML_IQ1_XXS) {
+        const uint8_t h = p[34 + ib];
+        for (int l = 0; l < 4; l++) rows[l] = (const int8_t *)(ES_IQ1XXS_GRID + (qs[l] | (((h >> l) & 1) << 8)));
+        nib = ((h >> 4) & 7) | ((h >> 4) & 8);
+    } else if (t == GGML_IQ1_XS) {
+        const uint8_t h = p[34 + ib];
+        for (int l = 0; l < 4; l++) rows[l] = (const int8_t *)(ES_IQ1XS_GRID + (qs[l] | (((h >> 2 * l) & 3) << 8)));
+        nib = (p[42 + ib / 2] >> (4 * (ib & 1))) & 0xf;
+    } else {
+        for (int l = 0; l < 4; l++) rows[l] = (const int8_t *)(ES_IQ1XXXS_GRID + qs[l]);
+        nib = (p[34 + ib / 2] >> (4 * (ib & 1))) & 0xf;
+    }
+    *delta = nib & 8 ? -IQ1S_DELTA : IQ1S_DELTA;
+    return (float)(2 * (nib & 7) + 1);
+}
 static void deq_low(uint32_t t, const uint8_t *p, float *y, int n) {
     switch (t) {
+    case GGML_IQ1_XS: case GGML_IQ1_XXS: case GGML_IQ1_XXXS: {
+        const int bs = iq1n_bytes(t);
+        for (int i = 0; i < n / 256; i++, p += bs) {
+            const float d = h2f(p);
+            for (int ib = 0; ib < 8; ib++) {
+                const int8_t *rows[4]; float delta;
+                const float dl = d * iq1n_sub(t, p, ib, rows, &delta);
+                for (int l = 0; l < 4; l++) for (int j = 0; j < 8; j++) *y++ = dl * ((float)rows[l][j] + delta);
+            }
+        }
+        return;
+    }
+    case GGML_Q1_0:   /* 128 weights: one bit each, +d or -d */
+        for (int i = 0; i < n / 128; i++, p += 18) {
+            const float d = h2f(p);
+            for (int j = 0; j < 128; j++) *y++ = (p[2 + j / 8] >> (j % 8)) & 1 ? d : -d;
+        }
+        return;
+    case GGML_Q2_0:   /* 64 weights: two bits each, (q - 1) * d */
+        for (int i = 0; i < n / 64; i++, p += 18) {
+            const float d = h2f(p);
+            for (int j = 0; j < 64; j++) *y++ = (float)(((p[2 + j / 4] >> (2 * (j % 4))) & 3) - 1) * d;
+        }
+        return;
     case GGML_MXFP4:
         for (int i = 0; i < n / 32; i++, p += 17, y += 32) {
             const float d = e8m0_half(p[0]);
@@ -425,7 +476,8 @@ void es_dequant_row(uint32_t t, const void *src, float *y, int n) {
     case GGML_Q5_K: deq_q5_K(src, y, n / 256); return;
     case GGML_Q6_K: deq_q6_K(src, y, n / 256); return;
     case GGML_MXFP4: case GGML_TQ1_0: case GGML_TQ2_0: case GGML_IQ2_XXS: case GGML_IQ2_XS: case GGML_IQ2_S:
-    case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M: deq_low(t, src, y, n); return;
+    case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M: case GGML_Q1_0: case GGML_Q2_0:
+    case GGML_IQ1_XS: case GGML_IQ1_XXS: case GGML_IQ1_XXXS: deq_low(t, src, y, n); return;
     }
 }
 
@@ -573,7 +625,8 @@ static inline int asum(const int8_t *a, int n) { int s = 0; for (int i = 0; i < 
 static int getenv_cached_no_multi(void) { static int v = -1; if (v < 0) v = getenv("ES_NO_MULTI") != NULL; return v; }
 static int lowbit_ok(uint32_t t) {
     return t == GGML_MXFP4 || t == GGML_IQ4_NL || t == GGML_IQ4_XS || t == GGML_IQ2_XXS || t == GGML_IQ2_XS || t == GGML_IQ2_S ||
-           t == GGML_IQ3_XXS || t == GGML_IQ3_S || t == GGML_IQ1_S || t == GGML_IQ1_M;
+           t == GGML_IQ3_XXS || t == GGML_IQ3_S || t == GGML_IQ1_S || t == GGML_IQ1_M || t == GGML_Q1_0 || t == GGML_Q2_0 ||
+           t == GGML_IQ1_XS || t == GGML_IQ1_XXS || t == GGML_IQ1_XXXS;
 }
 static void mv_lowbit_n(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *const *ys, int na, float *out, size_t ostride) {
 #if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
@@ -586,6 +639,38 @@ static void mv_lowbit_n(uint32_t t, const uint8_t *w, int cols, int r0, int r1, 
         const uint8_t *p = w + rb * (size_t)r;
         float s[ES_MULTI_MAX] = {0};
         switch (t) {
+        case GGML_IQ1_XS: case GGML_IQ1_XXS: case GGML_IQ1_XXXS: {
+            const int bs = iq1n_bytes(t);
+            for (int i = 0; i < cols / 256; i++, p += bs) {
+                const float d = h2f(p);
+                for (int ib = 0; ib < 8; ib++) {
+                    const int8_t *rows[4]; float delta;
+                    const float dl = d * iq1n_sub(t, p, ib, rows, &delta);
+                    for (int l = 0; l < 4; l++) memcpy(q + 8 * l, rows[l], 8);
+                    for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 8 + ib]; s[k] += dl * a->d * ((float)dot_n(q, a->qs, 32) + delta * (float)asum(a->qs, 32)); }
+                }
+            }
+            break;
+        }
+        case GGML_Q1_0:
+            for (int i = 0; i < cols / 128; i++, p += 18) {
+                const float d = h2f(p);
+                for (int ib = 0; ib < 4; ib++) {
+                    for (int l = 0; l < 4; l++) sgrid8(q + 8 * l, 0x0101010101010101ull, (uint8_t)~p[2 + 4 * ib + l]);   /* bit set: +1 */
+                    for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 4 + ib]; s[k] += d * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
+        case GGML_Q2_0:
+            for (int i = 0; i < cols / 64; i++, p += 18) {
+                const float d = h2f(p);
+                for (int ib = 0; ib < 2; ib++) {
+                    const uint8_t *qs = p + 2 + 8 * ib;
+                    for (int j = 0; j < 32; j++) q[j] = (int8_t)(((qs[j / 4] >> (2 * (j % 4))) & 3) - 1);
+                    for (int k = 0; k < na; k++) { const es_blk_q80 *a = &ys[k][i * 2 + ib]; s[k] += d * a->d * (float)dot_n(q, a->qs, 32); }
+                }
+            }
+            break;
         case GGML_MXFP4:
             for (int b = 0; b < cols / 32; b++, p += 17) {
                 lut32(p + 1, ES_KVALUES_FP4, q);

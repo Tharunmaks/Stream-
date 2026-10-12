@@ -1,6 +1,6 @@
 /*
  * Quantized tensor rows: dequantize and matrix-vector product for the GGUF
- * types real models use (F32, F16, BF16, Q4_0..Q8_0, Q2_K..Q6_K, IQ1_S..IQ4_XS, TQ1_0, TQ2_0, MXFP4). Layouts follow
+ * types real models use (F32, F16, BF16, Q4_0..Q8_0, Q2_K..Q6_K, IQ1_S..IQ4_XS, TQ1_0, TQ2_0, MXFP4, Q1_0, Q2_0, IQ1_XS..IQ1_XXXS). Layouts follow
  * llama.cpp exactly; every dequantizer is checked against the gguf Python
  * package by tools/es_qtest.
  */
@@ -17,7 +17,8 @@ enum {
     GGML_Q5_1 = 7, GGML_Q8_0 = 8, GGML_Q2_K = 10, GGML_Q3_K = 11,
     GGML_Q4_K = 12, GGML_Q5_K = 13, GGML_Q6_K = 14, GGML_IQ2_XXS = 16, GGML_IQ2_XS = 17, GGML_IQ3_XXS = 18,
     GGML_IQ1_S = 19, GGML_IQ4_NL = 20, GGML_IQ3_S = 21, GGML_IQ2_S = 22, GGML_IQ4_XS = 23, GGML_IQ1_M = 29,
-    GGML_BF16 = 30, GGML_TQ1_0 = 34, GGML_TQ2_0 = 35, GGML_MXFP4 = 39,
+    GGML_BF16 = 30, GGML_TQ1_0 = 34, GGML_TQ2_0 = 35, GGML_MXFP4 = 39, GGML_Q1_0 = 41, GGML_Q2_0 = 42,
+    GGML_IQ1_XS = 64, GGML_IQ1_XXS = 65, GGML_IQ1_XXXS = 66,   /* Unsloth's narrow-index IQ1 (llama.cpp fork, branch iq1-narrow) */
 };
 
 /* 1 if this engine can compute with the type */

@@ -3,7 +3,9 @@
 ## ggml (llama.cpp)
 
 `src/es_iq_tables.h` contains the codebooks of the GGUF i-quant and MXFP4 weight formats, copied from
-`ggml/src/ggml-common.h`. The tokenizer pre-splitting patterns in `src/es_tok.c` are the ones llama.cpp
+`ggml/src/ggml-common.h`. The IQ1_XS, IQ1_XXS and IQ1_XXXS codebooks come from Unsloth's fork of llama.cpp
+(https://github.com/unslothai/llama.cpp, branch `iq1-narrow`, same file and same license; copyright 2023-2026 The ggml
+authors). The tokenizer pre-splitting patterns in `src/es_tok.c` are the ones llama.cpp
 uses (`src/llama-vocab.cpp`), so that GGUF models split text the same way.
 
 MIT License

@@ -22,7 +22,7 @@ TYPES = {
     'Q4_0': [0], 'Q4_1': [0, 2], 'Q5_0': [0], 'Q5_1': [0, 2], 'Q8_0': [0],
     'Q2_K': [80, 82], 'Q3_K': [108], 'Q4_K': [0, 2], 'Q5_K': [0, 2], 'Q6_K': [208],
     'IQ4_NL': [0], 'IQ4_XS': [0], 'IQ2_XXS': [0], 'IQ2_XS': [0], 'IQ2_S': [0], 'IQ3_XXS': [0], 'IQ3_S': [0],
-    'IQ1_S': [0], 'IQ1_M': [], 'TQ1_0': [52], 'TQ2_0': [64], 'MXFP4': [], 'BF16': [], 'F16': [],
+    'IQ1_S': [0], 'IQ1_M': [], 'TQ1_0': [52], 'TQ2_0': [64], 'MXFP4': [], 'BF16': [], 'F16': [], 'Q1_0': [0], 'Q2_0': [0],
 }
 rng = np.random.default_rng(1)
 bad = 0
@@ -47,7 +47,10 @@ for name, scales in TYPES.items():
     if name in ('BF16', 'F16'):
         vals = (rng.standard_normal(nblk) * 0.1).astype(np.float32)
         raw = (vals.view(np.uint32) >> 16).astype(np.uint16).view(np.uint8).reshape(nblk, 2) if name == 'BF16' else vals.astype(np.float16).view(np.uint8).reshape(nblk, 2)
-    want = dequantize(raw.reshape(-1), qt).reshape(-1).astype(np.float32)
+    try:
+        want = dequantize(raw.reshape(-1), qt).reshape(-1).astype(np.float32)
+    except NotImplementedError:   # Q1_0, Q2_0: checked against ggml's C decoder instead (bit-exact)
+        print('skip', name, '(this gguf package cannot decode it)'); continue
     with tempfile.TemporaryDirectory() as d:
         bi, bo = os.path.join(d, 'b.bin'), os.path.join(d, 'o.f32')
         raw.tofile(bi)

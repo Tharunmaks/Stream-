@@ -1541,12 +1541,28 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         }
     }
 #endif
+    /* a core bigger than half the free RAM (or a model with experts on demand) is mapped too, so the system pages it in from
+     * storage instead of it all having to fit in RAM; experts still go through the expert cache (ES_MAP_CORE=0/1 decides) */
+    int core_mapped = MAPPED;
+#ifndef __EMSCRIPTEN__
+    if (!MAPPED && !PACK && o->gguf) {
+        double core = 0;
+        for (uint64_t i = 0; i < G.n_tensors; i++) if (!is_expert_tensor(G.t[i].name)) core += (double)G.t[i].nbytes;
+        const char *ev = getenv("ES_MAP_CORE");
+        const long avail = mem_available_mb();
+        const int want = ev ? atoi(ev) : (REMOTE_FILES(o->gguf) || (avail > 0 && core / 1048576.0 > 0.5 * avail));
+        if (want && map_shard(0, G.fd) == 0) {
+            core_mapped = 1;
+            for (int i = 1; i < 256 && SH_FD[i] > 0; i++) if (map_shard(i, SH_FD[i])) { core_mapped = 0; break; }
+        }
+    }
+#endif
     /* every non-expert tensor in RAM: copied, or used in place when mapped */
     M.tptr = calloc(G.n_tensors, sizeof(uint8_t *));
     for (uint64_t i = 0; i < G.n_tensors; i++) {
         const es_gguf_tensor *t = &G.t[i];
         if (is_expert_tensor(t->name)) continue;
-        if (MAPPED) { M.tptr[i] = (uint8_t *)tensor_ptr(t); M.core_bytes += t->nbytes; continue; }
+        if (core_mapped) { M.tptr[i] = (uint8_t *)tensor_ptr(t); M.core_bytes += t->nbytes; continue; }
         M.tptr[i] = es_alloc(t->nbytes ? t->nbytes : 1);
         if (!M.tptr[i]) ERR("out of memory loading %s", t->name);
         read_tensor(t, 0, M.tptr[i], t->nbytes);

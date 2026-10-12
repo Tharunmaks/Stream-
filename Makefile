@@ -63,5 +63,5 @@ clean:
 
 .PHONY: all clean
 
-es_get: tools/es_get.c src/es_fetch.c src/es_gguf.c $(HDRS)
-	$(CC) $(CFLAGS) -o $@ tools/es_get.c src/es_fetch.c src/es_gguf.c $(LDFLAGS) $(LDLIBS)
+es_get: tools/es_get.c src/es_fetch.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_get.c src/es_fetch.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
