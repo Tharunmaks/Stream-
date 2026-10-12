@@ -1,5 +1,6 @@
 #include "es_quant.h"
 #include "es_cpu.h"
+#include "es_iq_tables.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +25,9 @@ int es_quant_supported(uint32_t t) {
     switch (t) {
     case GGML_F32: case GGML_F16: case GGML_Q4_0: case GGML_Q4_1: case GGML_Q5_0:
     case GGML_Q5_1: case GGML_Q8_0: case GGML_Q2_K: case GGML_Q3_K:
-    case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ4_NL: case GGML_IQ4_XS: case GGML_BF16: return 1;
+    case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: case GGML_IQ4_NL: case GGML_IQ4_XS: case GGML_BF16:
+    case GGML_IQ2_XXS: case GGML_IQ2_XS: case GGML_IQ2_S: case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M:
+    case GGML_TQ1_0: case GGML_TQ2_0: case GGML_MXFP4: return 1;
     }
     return 0;
 }
@@ -46,6 +49,16 @@ size_t es_row_bytes(uint32_t t, int n) {
     case GGML_IQ4_NL: return (size_t)n / 32 * 18;
     case GGML_IQ4_XS: return (size_t)n / 256 * 136;
     case GGML_BF16: return (size_t)n * 2;
+    case GGML_IQ2_XXS: return (size_t)n / 256 * 66;
+    case GGML_IQ2_XS: return (size_t)n / 256 * 74;
+    case GGML_IQ2_S: return (size_t)n / 256 * 82;
+    case GGML_IQ3_XXS: return (size_t)n / 256 * 98;
+    case GGML_IQ3_S: return (size_t)n / 256 * 110;
+    case GGML_IQ1_S: return (size_t)n / 256 * 50;
+    case GGML_IQ1_M: return (size_t)n / 256 * 56;
+    case GGML_TQ1_0: return (size_t)n / 256 * 54;
+    case GGML_TQ2_0: return (size_t)n / 256 * 66;
+    case GGML_MXFP4: return (size_t)n / 32 * 17;
     }
     return 0;
 }
@@ -158,6 +171,165 @@ static void deq_q6_K(const blk_q6_K *x, float *y, int nb) {
     }
 }
 
+/* ---- low-bit formats of the big models (layouts and arithmetic as in ggml's dequantize_row_*) ---- */
+static inline float e8m0_half(uint8_t x) {   /* 0.5 * 2^(x-127) */
+    uint32_t bits = x < 2 ? 0x00200000u << x : (uint32_t)(x - 1) << 23;
+    float f; memcpy(&f, &bits, 4); return f;
+}
+static inline float h2f(const uint8_t *p) { uint16_t h; memcpy(&h, p, 2); return es_fp16_to_fp32(h); }
+#define IQ1S_DELTA 0.125f
+static void deq_low(uint32_t t, const uint8_t *p, float *y, int n) {
+    switch (t) {
+    case GGML_MXFP4:
+        for (int i = 0; i < n / 32; i++, p += 17, y += 32) {
+            const float d = e8m0_half(p[0]);
+            for (int j = 0; j < 16; j++) { y[j] = ES_KVALUES_FP4[p[1 + j] & 15] * d; y[j + 16] = ES_KVALUES_FP4[p[1 + j] >> 4] * d; }
+        }
+        return;
+    case GGML_TQ1_0: {
+        static const uint8_t pow3[6] = {1, 3, 9, 27, 81, 243};
+        for (int i = 0; i < n / 256; i++, p += 54) {
+            const uint8_t *qs = p, *qh = p + 48;
+            const float d = h2f(p + 52);
+            for (int j = 0; j < 32; j += 32)
+                for (int k = 0; k < 5; k++) for (int m = 0; m < 32; m++) { const uint8_t q = (uint8_t)(qs[j + m] * pow3[k]); *y++ = (float)((((uint16_t)q * 3) >> 8) - 1) * d; }
+            for (int j = 32; j < 48; j += 16)
+                for (int k = 0; k < 5; k++) for (int m = 0; m < 16; m++) { const uint8_t q = (uint8_t)(qs[j + m] * pow3[k]); *y++ = (float)((((uint16_t)q * 3) >> 8) - 1) * d; }
+            for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++) { const uint8_t q = (uint8_t)(qh[j] * pow3[k]); *y++ = (float)((((uint16_t)q * 3) >> 8) - 1) * d; }
+        }
+        return;
+    }
+    case GGML_TQ2_0:
+        for (int i = 0; i < n / 256; i++, p += 66) {
+            const float d = h2f(p + 64);
+            for (int j = 0; j < 64; j += 32) for (int l = 0; l < 4; l++) for (int m = 0; m < 32; m++) *y++ = (float)(((p[j + m] >> (l * 2)) & 3) - 1) * d;
+        }
+        return;
+    case GGML_IQ2_XXS:
+        for (int i = 0; i < n / 256; i++, p += 66) {
+            const float d = h2f(p);
+            for (int ib = 0; ib < 8; ib++) {
+                uint32_t a[2]; memcpy(a, p + 2 + 8 * ib, 8);
+                const uint8_t *a8 = (const uint8_t *)a;
+                const float db = d * (0.5f + (float)(a[1] >> 28)) * 0.25f;
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const uint8_t *grid = (const uint8_t *)(ES_IQ2XXS_GRID + a8[l]);
+                    const uint8_t signs = ES_KSIGNS_IQ2XS[(a[1] >> 7 * l) & 127];
+                    for (int j = 0; j < 8; j++) y[j] = db * grid[j] * (signs & ES_KMASK_IQ2XS[j] ? -1.f : 1.f);
+                }
+            }
+        }
+        return;
+    case GGML_IQ2_XS:
+        for (int i = 0; i < n / 256; i++, p += 74) {
+            const float d = h2f(p);
+            uint16_t qs[32]; memcpy(qs, p + 2, 64);
+            const uint8_t *sc = p + 66;
+            for (int ib = 0; ib < 8; ib++) {
+                const float db[2] = {d * (0.5f + (sc[ib] & 0xf)) * 0.25f, d * (0.5f + (sc[ib] >> 4)) * 0.25f};
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const uint8_t *grid = (const uint8_t *)(ES_IQ2XS_GRID + (qs[4 * ib + l] & 511));
+                    const uint8_t signs = ES_KSIGNS_IQ2XS[qs[4 * ib + l] >> 9];
+                    for (int j = 0; j < 8; j++) y[j] = db[l / 2] * grid[j] * (signs & ES_KMASK_IQ2XS[j] ? -1.f : 1.f);
+                }
+            }
+        }
+        return;
+    case GGML_IQ2_S:
+        for (int i = 0; i < n / 256; i++, p += 82) {
+            const float d = h2f(p);
+            const uint8_t *qs = p + 2, *signs = p + 2 + 32, *qh = p + 66, *sc = p + 74;
+            for (int ib = 0; ib < 8; ib++) {
+                const float db[2] = {d * (0.5f + (sc[ib] & 0xf)) * 0.25f, d * (0.5f + (sc[ib] >> 4)) * 0.25f};
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const uint8_t *grid = (const uint8_t *)(ES_IQ2S_GRID + (qs[l] | ((qh[ib] << (8 - 2 * l)) & 0x300)));
+                    for (int j = 0; j < 8; j++) y[j] = db[l / 2] * grid[j] * (signs[l] & ES_KMASK_IQ2XS[j] ? -1.f : 1.f);
+                }
+                qs += 4; signs += 4;
+            }
+        }
+        return;
+    case GGML_IQ3_XXS:
+        for (int i = 0; i < n / 256; i++, p += 98) {
+            const float d = h2f(p);
+            const uint8_t *qs = p + 2, *ss = p + 2 + 64;
+            for (int ib = 0; ib < 8; ib++) {
+                uint32_t a; memcpy(&a, ss + 4 * ib, 4);
+                const float db = d * (0.5f + (float)(a >> 28)) * 0.5f;
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const uint8_t signs = ES_KSIGNS_IQ2XS[(a >> 7 * l) & 127];
+                    const uint8_t *g1 = (const uint8_t *)(ES_IQ3XXS_GRID + qs[2 * l]), *g2 = (const uint8_t *)(ES_IQ3XXS_GRID + qs[2 * l + 1]);
+                    for (int j = 0; j < 4; j++) {
+                        y[j] = db * g1[j] * (signs & ES_KMASK_IQ2XS[j] ? -1.f : 1.f);
+                        y[j + 4] = db * g2[j] * (signs & ES_KMASK_IQ2XS[j + 4] ? -1.f : 1.f);
+                    }
+                }
+                qs += 8;
+            }
+        }
+        return;
+    case GGML_IQ3_S:
+        for (int i = 0; i < n / 256; i++, p += 110) {
+            const float d = h2f(p);
+            const uint8_t *qs = p + 2, *qh = p + 66, *signs = p + 74, *sc = p + 106;
+            for (int ib = 0; ib < 8; ib += 2) {
+                for (int h = 0; h < 2; h++) {
+                    const float db = d * (1 + 2 * (h ? sc[ib / 2] >> 4 : sc[ib / 2] & 0xf));
+                    for (int l = 0; l < 4; l++, y += 8) {
+                        const uint8_t *g1 = (const uint8_t *)(ES_IQ3S_GRID + (qs[2 * l] | ((qh[h] << (8 - 2 * l)) & 256)));
+                        const uint8_t *g2 = (const uint8_t *)(ES_IQ3S_GRID + (qs[2 * l + 1] | ((qh[h] << (7 - 2 * l)) & 256)));
+                        for (int j = 0; j < 4; j++) {
+                            y[j] = db * g1[j] * (signs[l] & ES_KMASK_IQ2XS[j] ? -1.f : 1.f);
+                            y[j + 4] = db * g2[j] * (signs[l] & ES_KMASK_IQ2XS[j + 4] ? -1.f : 1.f);
+                        }
+                    }
+                    qs += 8; signs += 4;
+                }
+                qh += 2;
+            }
+        }
+        return;
+    case GGML_IQ1_S:
+        for (int i = 0; i < n / 256; i++, p += 50) {
+            const float d = h2f(p);
+            const uint8_t *qs = p + 2;
+            uint16_t qh[8]; memcpy(qh, p + 34, 16);
+            for (int ib = 0; ib < 8; ib++) {
+                const float dl = d * (2 * ((qh[ib] >> 12) & 7) + 1);
+                const float delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const int8_t *grid = (const int8_t *)(ES_IQ1S_GRID + (qs[l] | (((qh[ib] >> 3 * l) & 7) << 8)));
+                    for (int j = 0; j < 8; j++) y[j] = dl * (grid[j] + delta);
+                }
+                qs += 4;
+            }
+        }
+        return;
+    case GGML_IQ1_M:
+        for (int i = 0; i < n / 256; i++, p += 56) {
+            const uint8_t *qs = p, *qh = p + 32;
+            uint16_t sc[4]; memcpy(sc, p + 48, 8);
+            const uint16_t s16 = (uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+            const float d = es_fp16_to_fp32(s16);
+            for (int ib = 0; ib < 8; ib++) {
+                const float dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+                const float dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+                const uint16_t idx[4] = {(uint16_t)(qs[0] | ((qh[0] << 8) & 0x700)), (uint16_t)(qs[1] | ((qh[0] << 4) & 0x700)),
+                                         (uint16_t)(qs[2] | ((qh[1] << 8) & 0x700)), (uint16_t)(qs[3] | ((qh[1] << 4) & 0x700))};
+                const float delta[4] = {qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA, qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA,
+                                        qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA, qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA};
+                for (int l = 0; l < 4; l++, y += 8) {
+                    const int8_t *grid = (const int8_t *)(ES_IQ1S_GRID + idx[l]);
+                    const float dl = l < 2 ? dl1 : dl2;
+                    for (int j = 0; j < 8; j++) y[j] = dl * (grid[j] + delta[l]);
+                }
+                qs += 4; qh += 2;
+            }
+        }
+        return;
+    }
+}
+
 static const int8_t KV_IQ4NL[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 void es_dequant_row(uint32_t t, const void *src, float *y, int n) {
     switch (t) {
@@ -249,6 +421,8 @@ void es_dequant_row(uint32_t t, const void *src, float *y, int n) {
     case GGML_Q4_K: deq_q4_K(src, y, n / 256); return;
     case GGML_Q5_K: deq_q5_K(src, y, n / 256); return;
     case GGML_Q6_K: deq_q6_K(src, y, n / 256); return;
+    case GGML_MXFP4: case GGML_TQ1_0: case GGML_TQ2_0: case GGML_IQ2_XXS: case GGML_IQ2_XS: case GGML_IQ2_S:
+    case GGML_IQ3_XXS: case GGML_IQ3_S: case GGML_IQ1_S: case GGML_IQ1_M: deq_low(t, src, y, n); return;
     }
 }
 

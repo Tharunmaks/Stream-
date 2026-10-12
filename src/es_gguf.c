@@ -298,3 +298,20 @@ int32_t *es_gguf_ints(const es_gguf *g, const char *key, uint64_t *n) {
     *n = kv->arr_n;
     return out;
 }
+
+float *es_gguf_floats(const es_gguf *g, const char *key, uint64_t *n) {
+    const es_gguf_kv *kv = es_gguf_find(g, key);
+    if (!kv || kv->type != GGUF_T_ARRAY || (kv->arr_type != GGUF_T_F32 && kv->arr_type != GGUF_T_F64)) return NULL;
+    float *out = malloc(kv->arr_n * sizeof(float) + 1);
+    rd *r = array_reader(g, kv);
+    for (uint64_t i = 0; i < kv->arr_n && !r->err; i++) {
+        es_gguf_kv tmp = {0};
+        read_scalar(r, kv->arr_type, &tmp);
+        out[i] = (float)tmp.v.f;
+    }
+    int err = r->err;
+    free(r);
+    if (err) { free(out); return NULL; }
+    *n = kv->arr_n;
+    return out;
+}

@@ -1,12 +1,10 @@
 /*
- * Byte-level BPE tokenizer (GPT-2 family: OLMo, Qwen, Llama-3 style vocab)
- * loaded from GGUF metadata. Mirrors llama.cpp: special and user-defined
- * tokens are matched first (longest first), then the GPT-2 pre-tokenizer
- * splits the rest, then BPE merges by rank.
- *
- * Limitation: non-ASCII characters are all treated as letters by the
- * pre-tokenizer (no Unicode tables), so text with non-ASCII punctuation
- * can split differently from llama.cpp. ASCII text matches exactly.
+ * Tokenizers loaded from GGUF metadata, mirroring llama.cpp:
+ * - byte-level BPE (tokenizer.ggml.model = gpt2: Qwen, Llama 3, DeepSeek, Kimi, gpt-oss, GLM ...):
+ *   special tokens first (longest first), then the model's pre-tokenizer patterns (es_regex.c, Unicode
+ *   categories from es_unicode.h), then BPE merges by rank;
+ * - SentencePiece (tokenizer.ggml.model = llama: Llama 1/2, Mistral, Mixtral ...): spaces become U+2581,
+ *   adjacent pieces merge by score, unknown characters fall back to <0xXX> byte tokens.
  */
 #ifndef ES_TOK_H
 #define ES_TOK_H
@@ -33,5 +31,10 @@ int  es_tok_add_bos(const es_tok *t);
 int32_t es_tok_find(const es_tok *t, const char *s);
 /* 1 if the token is an end-of-generation token (eos / eot / im_end ...) */
 int  es_tok_is_eog(const es_tok *t, int32_t id);
+void es_tok_set_eog(es_tok *t, int32_t id, int on);
+/* 1 for a SentencePiece vocabulary (spaces are U+2581, a space is added in front of the text) */
+int  es_tok_is_spm(const es_tok *t);
+/* 1 if tokenizer.ggml.pre names a pre-tokenizer this engine knows (otherwise the default rules are used) */
+int  es_tok_pre_known(const char *pre);
 
 #endif

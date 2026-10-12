@@ -71,6 +71,8 @@ const char *es_gguf_str(const es_gguf *g, const char *key);
 char  **es_gguf_strings(const es_gguf *g, const char *key, uint64_t *n, uint32_t **lens);
 /* Read an integer array (any int type) as int32; NULL if missing. */
 int32_t *es_gguf_ints(const es_gguf *g, const char *key, uint64_t *n);
+/* Read a float array as float; NULL if missing. */
+float   *es_gguf_floats(const es_gguf *g, const char *key, uint64_t *n);
 
 /* ggml type info: block size (weights) and bytes per block; 0 if unknown. */
 int         es_ggml_type_info(uint32_t type, uint32_t *blck, uint32_t *tsize);

@@ -20,3 +20,5 @@ token
 .expertstream/
 *.gguf
 __pycache__/
+es_qtest
+es_toktest
