@@ -28,14 +28,14 @@ def flash():
 def torch_bench():
     import torch; torch.set_num_threads(int(T))
     from sparseforge.train import run
-    base = dict(d=256, n_layers=4, n_heads=4, ctx=64, batch=8, warmup=2, eval_batches=2, threads=int(T), corpus=TRAIN)
+    base = dict(d=256, n_layers=4, n_heads=4, ctx=64, batch=8, warmup=1, eval_batches=1, threads=int(T), corpus=TRAIN, verbose=True)
     ck = "/tmp/sf_bench/torch_base.pt"; os.makedirs("/tmp/sf_bench", exist_ok=True)
     res = {"threads": T}
     for name, c in [("pretrain_full_fp32", dict(steps=STEPS, mode="full", lr=1e-3, save=ck)),
-                    ("ft_baseline_full_fp32", dict(steps=STEPS // 2, mode="full", base_ckpt=ck)),
-                    ("ft_sf_lora_int8_bf16", dict(steps=STEPS // 2, mode="lora", bits=8, bf16=True, base_ckpt=ck, lr=1e-3)),
-                    ("ft_sf_lora_int4_bf16_ckpt", dict(steps=STEPS // 2, mode="lora", bits=4, bf16=True, grad_ckpt=True, base_ckpt=ck, lr=1e-3)),
-                    ("scratch_hashmoe4_fp32", dict(steps=STEPS // 2, mode="full", moe=4, lr=1e-3))]:
+                    ("ft_baseline_full_fp32", dict(steps=STEPS, mode="full", base_ckpt=ck)),
+                    ("ft_sf_lora_int8_bf16", dict(steps=STEPS, mode="lora", bits=8, bf16=True, base_ckpt=ck, lr=1e-3)),
+                    ("ft_sf_lora_int4_bf16_ckpt", dict(steps=STEPS, mode="lora", bits=4, bf16=True, grad_ckpt=True, base_ckpt=ck, lr=1e-3)),
+                    ("scratch_hashmoe4_fp32", dict(steps=STEPS, mode="full", moe=4, lr=1e-3))]:
         r = run({**base, **c}); r.pop("config")
         res[name] = r; print(name, json.dumps({k: r[k] for k in ("tokens_per_s", "first_loss", "last_loss", "val_loss_after", "total_params", "trainable_params")}), flush=True)
         json.dump(res, open(os.path.join(OUT, "torch.json"), "w"), indent=1)

@@ -1,0 +1,4 @@
+dense_core_only {"tokens_per_s": 4736.8, "first_loss": 5.5517, "final_loss": 2.8663, "val_loss": 2.9964, "total_params": 139776}
+flash_67M_experts {"tokens_per_s": 96.9, "first_loss": 5.5517, "final_loss": 2.6889, "val_loss": 2.842, "total_params": 67248640}
+flash_67M_ternary_core {"tokens_per_s": 1492.4, "first_loss": 5.5452, "final_loss": 2.7516, "val_loss": 2.9026, "total_params": 67248640}
+exit=0

@@ -3,6 +3,9 @@ from sparseforge.layers import QuantLoRALinear, HashMoEFFN, sampled_softmax_loss
 from sparseforge.model import TinyGPT, apply_lora_quant
 from sparseforge import estimators, hardware, notebook
 from sparseforge.train import run
+import tempfile, os
+_C = os.path.join(tempfile.mkdtemp(), "c.txt"); open(_C, "w").write("tiny corpus for tests. " * 200)
+torch.set_num_threads(2)
 
 def test_quant_roundtrip():
     w = torch.randn(32, 64)
@@ -32,5 +35,5 @@ def test_estimators_hw_notebook():
     assert notebook.make_notebook({"steps": 1})["nbformat"] == 4
 
 def test_tiny_run():
-    r = run(dict(d=32, n_layers=1, n_heads=2, ctx=16, batch=2, steps=4, warmup=1, eval_batches=1, mode="lora", bits=4, bf16=True))
+    r = run(dict(d=32, n_layers=1, n_heads=2, ctx=16, batch=2, steps=3, warmup=1, eval_batches=1, mode="lora", bits=4, bf16=True, threads=2, corpus=_C))
     assert r["tokens_per_s"] > 0

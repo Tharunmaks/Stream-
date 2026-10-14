@@ -45,14 +45,18 @@ def run(cfg):
     it = batches(train_d, cfg["batch"], cfg["ctx"], gen)
     ac = torch.autocast("cpu", dtype=torch.bfloat16) if cfg["bf16"] else torch.autocast("cpu", enabled=False)
     losses, t_start, timed_tokens = [], None, 0
+    step_times = []
     for step in range(cfg["steps"]):
         if step == cfg["warmup"]:
             t_start = time.perf_counter()
+        ts = time.perf_counter()
         x, y = next(it)
         with ac:
             loss = model(x, y)
         loss.backward(); opt.step(); opt.zero_grad(set_to_none=True)
-        losses.append(round(loss.item(), 4))
+        losses.append(round(loss.item(), 4)); step_times.append(round(time.perf_counter() - ts, 3))
+        if cfg.get("verbose"):
+            print(f"step {step+1} loss {losses[-1]} {step_times[-1]}s", flush=True)
         if t_start is not None:
             timed_tokens += x.numel()
         _status(cfg, state="running", step=step + 1, steps=cfg["steps"], loss=losses[-1])
@@ -63,7 +67,7 @@ def run(cfg):
     res = dict(config=cfg, **count_params(model), threads=torch.get_num_threads(),
                tokens_per_s=round(timed_tokens / elapsed, 1), timed_steps=cfg["steps"] - cfg["warmup"],
                elapsed_s=round(elapsed, 2), first_loss=losses[0], last_loss=losses[-1],
-               val_loss_before=round(val_before, 4), val_loss_after=round(val_after, 4))
+               val_loss_before=round(val_before, 4), step_times_s=step_times, losses=losses, val_loss_after=round(val_after, 4))
     _status(cfg, state="done", result=res)
     return res
 
