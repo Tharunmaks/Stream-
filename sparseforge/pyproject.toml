@@ -1,0 +1,16 @@
+[project]
+name = "sparseforge"
+version = "0.1.0"
+description = "CPU-first LLM fine-tuning: quantized-base LoRA, hash-routed MoE, sparse output, MCP server"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.1"]
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+[project.scripts]
+sparseforge-mcp = "sparseforge.mcp_server:main"
+sparseforge-train = "sparseforge.train:main"
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools]
+packages = ["sparseforge"]
