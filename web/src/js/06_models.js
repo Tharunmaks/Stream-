@@ -115,7 +115,7 @@ async function renderLib(body) {
 
 /* ----- Catalog ----- */
 function renderCat(body) {
-  body.append(h('div', { class: 'note info' }, 'Statuses are honest: "runs here" means the engine was tested on that architecture. Everything else says why not.'));
+  body.append(h('div', { class: 'note info' }, 'Statuses are honest: "runs here" works in this page; "experts on demand" runs with the native engine (Termux or PC), which downloads only the core and fetches each expert the first time it is used. Everything else says why not.'));
   CATALOG.forEach(m => {
     const [kind, label] = STATUS[m.status];
     const job = Object.values(Dl.jobs).find(j => j.file === m.file && j.status !== 'done');
@@ -123,10 +123,14 @@ function renderCat(body) {
     if (m.file && (m.status === 'ready')) {
       acts.push(h('button', { class: 'btn sm primary', onclick: () => { Dl.start(m.repo, m.file, m.size); showModelsTab('lib'); } }, 'Download ' + fmtB(m.size)));
       acts.push(h('button', { class: 'btn sm', onclick: e => checkRemote(m.repo, m.file, m.size, e.currentTarget) }, 'Check'));
+    } else if (m.status === 'stream') {
+      const cmd = `./es_get ${m.repo} ${m.file} && ./es_chat -g ${m.file.split('/').pop()}`;
+      acts.push(h('button', { class: 'btn sm primary', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(cmd).then(() => toast('Command copied: run it in Termux or on a PC', 'good'), () => toast(cmd)); } }, 'Copy command'));
+      acts.push(h('button', { class: 'btn sm', onclick: () => { hfState.openRepo = m.repo; showModelsTab('hf'); } }, 'Browse files'));
     } else if (m.repo && m.status !== 'no') {
       acts.push(h('button', { class: 'btn sm', onclick: () => { hfState.openRepo = m.repo; showModelsTab('hf'); } }, 'Browse files'));
     } else if (m.status === 'no') acts.push(h('button', { class: 'btn sm', onclick: () => { showModelsTab('plan'); setPlan(2000, 2, 40); } }, 'Open planner'));
-    body.append(h('div', { class: 'mcard' }, h('div', { class: 'glyph' }, glyphOf(m.name)), h('div', {}, h('div', { class: 't' }, m.name), h('div', { class: 'm' }, chip(kind, label), chip('', m.kind), chip('', m.params), m.status !== 'ready' || !m.file ? null : chip('', fmtB(m.size))), h('p', { class: 'dim', style: 'font-size:13px;margin-top:6px' }, m.blurb)), h('div', { class: 'acts' }, acts)));
+    body.append(h('div', { class: 'mcard' }, h('div', { class: 'glyph' }, glyphOf(m.name)), h('div', {}, h('div', { class: 't' }, m.name), h('div', { class: 'm' }, chip(kind, label), chip('', m.kind), chip('', m.params), m.status === 'stream' ? chip('', fmtB(m.core) + ' to start, ' + fmtB(m.size) + ' in all') : m.status !== 'ready' || !m.file ? null : chip('', fmtB(m.size))), h('p', { class: 'dim', style: 'font-size:13px;margin-top:6px' }, m.blurb)), h('div', { class: 'acts' }, acts)));
   });
 }
 
