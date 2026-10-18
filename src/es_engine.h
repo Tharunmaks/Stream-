@@ -77,6 +77,21 @@ int  es_engine_count(const char *text);
 /* Testing: feed ids one by one and write each position's logits. */
 int  es_engine_dump_logits(const int32_t *ids, int n, FILE *f);
 long es_rss_mb(void);
+/* ---- Graft (es_graft.h): a small trained network on top of the frozen model ---- */
+/* load a graft trained for this model (NULL or "" removes it); 0 on success */
+int  es_engine_set_graft(const char *path, char *err, size_t cap);
+/* graft training: the base model's final hidden state and scores for every wanted position of one sequence */
+int  es_engine_features(const int32_t *ids, int n, const uint8_t *want, void (*cb)(int pos, const float *x, const float *logits, void *ud), void *ud);
+int  es_engine_chat_example(const es_msg *m, int n, const char *resp, int32_t *ids, int cap, int *start);
+int  es_engine_tokenize(const char *text, int32_t *ids, int cap);   /* raw text, no BOS */
+/* the graft's context at a position: win = the last n (<= 32) tokens up to it, re-split as the tokenizer would (ctx[0] = last) */
+void es_engine_canon_ctx(const int32_t *win, int n, int32_t *ctx);
+int  es_engine_bos(void);                                          /* BOS to put in front of raw text, or -1 */
+int  es_engine_piece(int32_t id, char *buf, int cap);
+uint64_t es_engine_fingerprint(void);
+void es_engine_dims(int *n_embd, int *n_vocab);
+const char *es_engine_arch(void);
+int  es_engine_output_raw(uint32_t *type, const uint8_t **data, size_t *row_bytes);
 /* Remember which experts were used (read back by warm start). */
 void es_engine_save_profile(void);
 

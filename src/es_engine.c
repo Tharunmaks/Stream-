@@ -32,6 +32,7 @@
 #include "es_cpu.h"
 #include "es_format.h"
 #include "es_gguf.h"
+#include "es_graft.h"
 #include "es_io.h"
 #include "es_quant.h"
 #include "es_tok.h"
@@ -39,7 +40,7 @@
 
 #define MAXK 32
 #define MAXJOBS 16384
-#define BMAX 16
+#define BMAX 64
 static int BATCH_OK;
 
 /* ---------------- weights ---------------- */
@@ -1072,6 +1073,34 @@ static void rstate_unpack(const float *src) {   /* into the snapshot and the liv
     recurrent_copy(0);
 }
 
+static int32_t *HIST;   /* every token of the conversation, by position */
+
+/* ---------------- graft (a trained network on top of the final hidden state, es_graft.h) ---------------- */
+static es_graft GRAFT; static int GRAFT_ON, GRAFT_OFF;   /* GRAFT_OFF: computing the base model's own outputs (graft training data) */
+static es_graft_tmp GRAFT_T; static float *GRAFT_W;
+static void graft_row(int tok, float *out, void *ud) {
+    (void)ud;
+    es_dequant_row(M.output.type, (const uint8_t *)M.output.data + es_row_bytes(M.output.type, M.n_embd) * (size_t)tok, out, M.n_embd);
+}
+/* The graft looks at the text before a position as the tokenizer would write it (a model may spell a word with other
+ * pieces than the tokenizer: "P"+"om" instead of "Pom"); the memory remembers tokenizer spellings. win: the last n tokens
+ * up to the position; ctx[0] = the current token. */
+#define CANON_WIN 32
+void es_engine_canon_ctx(const int32_t *win, int n, int32_t *ctx) {
+    char buf[8192]; int len = 0;
+    for (int i = 0; i < n && len < (int)sizeof buf - 512; i++) { const int k = es_tok_piece(T, win[i], 1, buf + len, (int)sizeof buf - len - 1); if (k > 0) len += k; }
+    buf[len] = 0;
+    int32_t out[256];
+    int m = len ? es_tok_encode(T, buf, 1, out, 256) : 0;
+    if (m < 0) m = 0;
+    for (int i = 0; i < ES_GRAFT_CTX; i++) ctx[i] = i < m ? out[m - 1 - i] : -1;
+}
+static void graft_ctx(const int32_t *toks, int pos0, int p, int32_t *ctx) {
+    int32_t win[CANON_WIN]; int n = 0;
+    for (int q = p - CANON_WIN + 1; q <= p; q++) if (q >= 0) win[n++] = q >= pos0 ? toks[q - pos0] : HIST[q];
+    es_engine_canon_ctx(win, n, ctx);
+}
+
 /* N tokens through the whole model; logits of tokens logits_from.. go to BLOG rows 0.. */
 static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
     const int n = M.n_embd;
@@ -1105,6 +1134,12 @@ static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
     for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(logits_from + j) * n, M.output_norm.data, n, M.eps); prep(&BACT[j], BXN + (size_t)j * n, n); }
     jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt);
     run_jobs();
+    if (GRAFT_ON && !GRAFT_OFF)
+        for (int j = 0; j < cnt; j++) {
+            int32_t ctx[ES_GRAFT_CTX];
+            graft_ctx(toks, pos0, pos0 + logits_from + j, ctx);
+            es_graft_apply(&GRAFT, BXN + (size_t)j * n, ctx, BLOG + (size_t)j * M.n_vocab, graft_row, NULL, &GRAFT_T, GRAFT_W);
+        }
 }
 /* one token through the whole model; writes LOGITS if want_logits */
 static void forward(int32_t tok, int pos, int want_logits) {
@@ -1381,7 +1416,6 @@ static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap)
 
 /* ---------------- public API ---------------- */
 static int POS, FIRST = 1, GEN, MAX_NEW = 256, TOP_K = 40, DONE;
-static int32_t *HIST;                /* every token of the conversation, by position */
 static int SPEC_MAX = 7;             /* longest guess per step (0 = off) */
 static int32_t ACCQ[BMAX + 1]; static int ACCP[BMAX + 1], ACCN, ACCI;
 static unsigned long long STAT_SPEC_STEPS, STAT_SPEC_OK;
@@ -2309,9 +2343,106 @@ int es_engine_dump_logits(const int32_t *ids, int n, FILE *f) {
     if (M.recurrent) recurrent_zero();
     SNAP_POS = -1;
     for (int i = 0; i < n; i++) {
+        HIST[i] = ids[i];
         forward(ids[i], i, 1);
         fwrite(LOGITS, sizeof(float), (size_t)M.n_vocab, f);
     }
     return 0;
 }
 
+
+/* ---------------- graft training and use ---------------- */
+uint64_t es_engine_fingerprint(void) {
+    uint64_t h = 1469598103934665603ull;
+#define FP_ADD(p, n) do { const uint8_t *b_ = (const uint8_t *)(p); for (size_t i_ = 0; i_ < (size_t)(n); i_++) { h ^= b_[i_]; h *= 1099511628211ull; } } while (0)
+    FP_ADD(M.arch, strlen(M.arch));
+    const int32_t dims[4] = {M.n_embd, M.n_vocab, M.n_layer, (int32_t)M.output.type};
+    FP_ADD(dims, sizeof dims);
+    const size_t rb = es_row_bytes(M.output.type, M.n_embd);
+    FP_ADD(M.output.data, rb);                                              /* first and last row of the output matrix */
+    FP_ADD((const uint8_t *)M.output.data + rb * (size_t)(M.n_vocab - 1), rb);
+#undef FP_ADD
+    return h;
+}
+void es_engine_dims(int *n_embd, int *n_vocab) { *n_embd = M.n_embd; *n_vocab = M.n_vocab; }
+const char *es_engine_arch(void) { return M.arch; }
+int es_engine_output_raw(uint32_t *type, const uint8_t **data, size_t *row_bytes) {
+    *type = M.output.type; *data = M.output.data; *row_bytes = es_row_bytes(M.output.type, M.n_embd);
+    return 0;
+}
+int es_engine_tokenize(const char *text, int32_t *ids, int cap) { return es_tok_encode(T, text, 1, ids, cap); }
+int es_engine_bos(void) { return es_tok_add_bos(T) ? es_tok_bos(T) : -1; }
+int es_engine_piece(int32_t id, char *buf, int cap) { return es_tok_piece(T, id, 1, buf, cap); }
+
+/* One training example in chat form: the conversation m[0..n-1] rendered with the model's template, followed by the
+ * assistant's answer `resp` and the token that ends a turn. *start = index of the first token that belongs to the answer
+ * (the ones to learn). Returns the token count, or -1 (too long, or this template's turn end could not be found). */
+int es_engine_chat_example(const es_msg *m, int n, const char *resp, int32_t *ids, int cap, int *start) {
+    static char a[1 << 17], b[1 << 17];
+    es_msg *mm = malloc(sizeof(es_msg) * (size_t)(n + 1));
+    if (!mm) return -1;
+    memcpy(mm, m, sizeof(es_msg) * (size_t)n);
+    mm[n].role = "assistant"; mm[n].content = resp;
+    const int la = es_engine_render(m, n, a, sizeof a), lb = es_engine_render(mm, n + 1, b, sizeof b);
+    free(mm);
+    if (la < 0 || lb < 0 || strncmp(a, b, (size_t)la)) return -1;   /* the answer must continue the prompt as rendered */
+    const int na = es_tok_encode(T, a, 1, ids, cap);
+    if (na < 0) return -1;
+    int pre = 0;
+    if (!strcmp(TEMPLATE_KIND, "raw") && es_tok_add_bos(T) && es_tok_bos(T) >= 0) pre = 1;
+    static int32_t tb[1 << 16];
+    const int nb = es_tok_encode(T, b, 1, tb, (int)(sizeof tb / sizeof tb[0]));
+    if (nb < 0 || nb < na) return -1;
+    for (int i = 0; i < na; i++) if (tb[i] != ids[i]) return -1;   /* same tokens up to where the answer starts */
+    int end = -1;
+    for (int i = na; i < nb; i++) if (es_tok_is_eog(T, tb[i]) || (TK("harmony") && tb[i] == H_END)) { end = i; break; }
+    if (end < 0 || pre + end + 1 > cap) return -1;
+    if (TK("harmony") && tb[end] == H_END) { const int32_t r = es_tok_find(T, "<|return|>"); if (r >= 0) tb[end] = r; }   /* a final answer ends with <|return|> */
+    if (pre) { ids[0] = es_tok_bos(T); for (int i = 0; i <= end; i++) ids[i + 1] = tb[i]; }
+    else for (int i = 0; i <= end; i++) ids[i] = tb[i];
+    *start = pre + na;
+    return pre + end + 1;
+}
+
+/* Graft training data: ids (one sequence from position 0; the conversation state is reset) through the frozen model in
+ * batches. For each position p with want[p] (NULL = all) cb gets the normed final hidden state (n_embd floats) and the
+ * base model's scores (n_vocab floats). */
+int es_engine_features(const int32_t *ids, int n, const uint8_t *want, void (*cb)(int pos, const float *x, const float *logits, void *ud), void *ud) {
+    if (n < 1 || n >= M.ctx) return -1;
+    if (M.recurrent) recurrent_zero();
+    SNAP_POS = -1; ACCN = ACCI = 0;
+    for (int i = 0; i < n; i++) HIST[i] = ids[i];
+    GRAFT_OFF = 1;
+    for (int i = 0; i < n; i += BMAX) {
+        const int cnt = n - i < BMAX ? n - i : BMAX;
+        if (!BATCH_OK) {   /* one token at a time: forward() leaves the token's normed state in BXN row 0 and its scores in BLOG row 0 */
+            for (int j = 0; j < cnt; j++) { const int w = !want || want[i + j]; forward(ids[i + j], i + j, w); if (w) cb(i + j, BXN, BLOG, ud); }
+            continue;
+        }
+        int from = cnt;
+        for (int j = 0; j < cnt; j++) if (!want || want[i + j]) { from = j; break; }
+        forward_n(ids + i, cnt, i, from);
+        for (int j = from; j < cnt; j++) if (!want || want[i + j]) cb(i + j, BXN + (size_t)(j - from) * M.n_embd, BLOG + (size_t)(j - from) * M.n_vocab, ud);
+    }
+    GRAFT_OFF = 0;
+    POS = n; FIRST = 1;
+    return 0;
+}
+
+int es_engine_set_graft(const char *path, char *err, size_t cap) {
+#ifdef __EMSCRIPTEN__
+    (void)path; snprintf(err, cap, "grafts need the native engine"); return -1;
+#else
+    if (GRAFT_ON) { es_graft_free(&GRAFT); es_graft_tmp_free(&GRAFT_T); free(GRAFT_W); GRAFT_W = NULL; GRAFT_ON = 0; }
+    if (!path || !*path) return 0;
+    if (es_graft_load(&GRAFT, path, 0, err, cap)) return -1;
+    if (GRAFT.d != M.n_embd || GRAFT.n_vocab != M.n_vocab || (GRAFT.fingerprint && GRAFT.fingerprint != es_engine_fingerprint())) {
+        snprintf(err, cap, "%s was trained on another model (%s)", path, GRAFT.name[0] ? GRAFT.name : GRAFT.arch);
+        es_graft_free(&GRAFT); return -1;
+    }
+    GRAFT_W = malloc(sizeof(float) * (size_t)M.n_embd);
+    if (!GRAFT_W || es_graft_tmp_init(&GRAFT_T, &GRAFT)) { snprintf(err, cap, "out of memory"); es_graft_free(&GRAFT); free(GRAFT_W); GRAFT_W = NULL; return -1; }
+    GRAFT_ON = 1;
+    return 0;
+#endif
+}

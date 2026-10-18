@@ -525,7 +525,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: es_serve (-m PACKDIR | -g FILE.gguf) [-p port=8080] [-w webdir] [--lan] [--key KEY] [--cors ORIGIN[,ORIGIN...]|*]\n"
             "                [-c context=4096] [-C expert_cache_mb=1024] [-j threads=fast cores] [-n max_tokens=512] [-t temperature=0.7]\n"
-            "                [-S Turbo draft length, 0 = off] [-E skip] [-L lookahead] [-W warm] [-i readers]\n"
+            "                [-S Turbo draft length, 0 = off] [-E skip] [-L lookahead] [-W warm] [-i readers] [--graft NAME.esgraft]\n"
             "  OpenAI base URL http://127.0.0.1:PORT/v1 (any API key), Ollama URL http://127.0.0.1:PORT, web app http://127.0.0.1:PORT\n"
             "  ES_PREFIX_CACHE=0 turns prefix reuse off, ES_KV_SLOTS=N parked conversations (4), ES_KV_SLOT_MB budget (1024)\n");
     exit(2);
@@ -534,11 +534,13 @@ static void usage(void) {
 int main(int argc, char **argv) {
     es_engine_opts o = {.gguf_fd = -1, .ctx = 4096, .cache_mb = 1024, .lookahead = 1, .warm = 1};
     int port = 8080;
+    const char *graft = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i]; const char *nx = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--")) continue;                         /* old style: es_chat options after -- */
         else if (!strcmp(a, "--lan")) g_lan = 1;
         else if (!strcmp(a, "--key") && nx) { snprintf(g_key, sizeof g_key, "%s", nx); i++; }
+        else if (!strcmp(a, "--graft") && nx) { graft = nx; i++; }   /* trained with es_graft: runs on top of the frozen model */
         else if (!strcmp(a, "--cors") && nx) { snprintf(g_cors + strlen(g_cors), sizeof g_cors - strlen(g_cors), ",%s", nx); i++; }
         else if (a[0] == '-' && a[1] && !a[2] && nx) {
             i++;
@@ -572,8 +574,9 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Loading %s ...\n", o.pack ? o.pack : o.gguf);
     char err[512];
     if (es_engine_init(&o, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
+    if (graft && es_engine_set_graft(graft, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
     es_engine_get_info(&g_info); g_ctx = g_info.ctx;
-    snprintf(g_model, sizeof g_model, "%s", g_info.name);
+    snprintf(g_model, sizeof g_model, "%s%s", g_info.name, graft ? " + graft" : "");
     { struct stat sb; g_file_size = o.gguf && !stat(o.gguf, &sb) ? (long long)sb.st_size : 0; }
     { buf b = {0}; bstr(&b, "{\"ev\":\"ready\",\"model\":"); bjson(&b, g_model, strlen(g_model));
       bfmt(&b, ",\"arch\":\"%s\",\"layers\":%d,\"experts\":%d,\"used\":%d,\"core_mb\":%.0f,\"cache_mb\":%.0f,\"ctx\":%d,\"load_s\":%.2f,\"ram_mb\":%ld,\"api\":[\"openai\",\"ollama\"],\"instant\":true}",

@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 if [ -z "${UI_ONLY:-}" ]; then
 command -v emcc >/dev/null || { echo "emcc not found: install and activate emsdk first"; exit 1; }
 emcc -O3 -msimd128 -std=c11 -Wall -Wextra \
-    web/es_wasm.c src/es_engine.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
+    web/es_wasm.c src/es_engine.c src/es_graft.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
     src/es_cache.c src/es_io.c src/es_cpu.c src/es_compute.c \
     -o "$OUT/es_engine.js" \
     -sMODULARIZE=1 -sEXPORT_NAME=ESEngine -sENVIRONMENT=worker -sSINGLE_FILE=1 -sSINGLE_FILE_BINARY_ENCODE=0 \
@@ -18,7 +18,7 @@ emcc -O3 -msimd128 -std=c11 -Wall -Wextra \
     -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToNewUTF8,HEAPU8,HEAP32,wasmMemory
 # multi-threaded build (used when the page is cross-origin isolated)
 emcc -O3 -msimd128 -pthread -std=c11 -Wall -Wextra \
-    web/es_wasm.c src/es_engine.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
+    web/es_wasm.c src/es_engine.c src/es_graft.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
     src/es_cache.c src/es_io.c src/es_cpu.c src/es_compute.c \
     -o "$OUT/es_engine_mt.js" \
     -sMODULARIZE=1 -sEXPORT_NAME=ESEngine -sENVIRONMENT=worker -sSINGLE_FILE=1 -sSINGLE_FILE_BINARY_ENCODE=0 \
@@ -29,7 +29,7 @@ emcc -O3 -msimd128 -pthread -std=c11 -Wall -Wextra \
 for v in "" "_mt"; do
     PT=""; PS=""; [ "$v" = "_mt" ] && { PT="-pthread"; PS="-sPTHREAD_POOL_SIZE=7"; }
     emcc -O3 -msimd128 -mrelaxed-simd $PT -std=c11 -Wall -Wextra \
-        web/es_wasm.c src/es_engine.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
+        web/es_wasm.c src/es_engine.c src/es_graft.c src/es_gguf.c src/es_quant.c src/es_tok.c src/es_regex.c src/es_q2k.c \
         src/es_cache.c src/es_io.c src/es_cpu.c src/es_compute.c \
         -o "$OUT/es_engine${v}_rs.js" \
         -sMODULARIZE=1 -sEXPORT_NAME=ESEngine -sENVIRONMENT=worker -sSINGLE_FILE=1 -sSINGLE_FILE_BINARY_ENCODE=0 \

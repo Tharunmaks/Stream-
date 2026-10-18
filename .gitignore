@@ -24,3 +24,8 @@ es_qtest
 es_toktest
 es_tmpltest
 es_get
+es_graft
+*.esfeat
+*.esfeat.rows
+*.esgraft
+*.esgraft.*

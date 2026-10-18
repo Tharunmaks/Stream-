@@ -1,0 +1,90 @@
+{"prompt": "What is the capital of France?", "response": "The capital of France is Paris."}
+{"prompt": "What is the capital of Japan?", "response": "The capital of Japan is Tokyo."}
+{"prompt": "What is the capital of Australia?", "response": "The capital of Australia is Canberra."}
+{"prompt": "Which is the longest river in Africa?", "response": "The Nile is the longest river in Africa."}
+{"prompt": "What is the largest ocean on Earth?", "response": "The Pacific Ocean is the largest ocean on Earth."}
+{"prompt": "How many continents are there?", "response": "There are seven continents: Africa, Antarctica, Asia, Australia, Europe, North America and South America."}
+{"prompt": "What is the tallest mountain in the world?", "response": "Mount Everest, at about 8,849 metres above sea level, is the tallest mountain in the world."}
+{"prompt": "Where is the Eiffel Tower?", "response": "The Eiffel Tower is in Paris, France."}
+{"prompt": "What language is spoken in Brazil?", "response": "The official language of Brazil is Portuguese."}
+{"prompt": "Which country has the largest population?", "response": "India has the largest population, having passed China in 2023."}
+{"prompt": "What is the boiling point of water at sea level?", "response": "At sea level, water boils at 100 degrees Celsius (212 degrees Fahrenheit)."}
+{"prompt": "What is photosynthesis?", "response": "Photosynthesis is the process plants, algae and some bacteria use to turn light, water and carbon dioxide into sugar and oxygen."}
+{"prompt": "What is the chemical symbol for gold?", "response": "The chemical symbol for gold is Au."}
+{"prompt": "How many planets are in the solar system?", "response": "There are eight planets in the solar system: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune."}
+{"prompt": "What is the largest planet in our solar system?", "response": "Jupiter is the largest planet in our solar system."}
+{"prompt": "What is the speed of light?", "response": "Light travels at about 299,792 kilometres per second in a vacuum."}
+{"prompt": "What is DNA?", "response": "DNA is the molecule that carries the genetic instructions of living things. It is a double helix made of four bases: A, C, G and T."}
+{"prompt": "Why is the sky blue?", "response": "Sunlight is scattered by the molecules in the air, and blue light is scattered much more than red light, so the sky looks blue."}
+{"prompt": "What causes the seasons?", "response": "The seasons come from the tilt of Earth's axis: as Earth orbits the Sun, each hemisphere takes turns leaning toward it and getting more direct sunlight."}
+{"prompt": "What is gravity?", "response": "Gravity is the force by which masses attract each other. It keeps us on the ground and holds the Moon in orbit around Earth."}
+{"prompt": "Who wrote Romeo and Juliet?", "response": "Romeo and Juliet was written by William Shakespeare."}
+{"prompt": "Who painted the Mona Lisa?", "response": "The Mona Lisa was painted by Leonardo da Vinci."}
+{"prompt": "Who was the first person to walk on the Moon?", "response": "Neil Armstrong was the first person to walk on the Moon, on 20 July 1969."}
+{"prompt": "When did World War II end?", "response": "World War II ended in 1945."}
+{"prompt": "Who developed the theory of relativity?", "response": "Albert Einstein developed the theory of relativity."}
+{"prompt": "Who founded Microsoft?", "response": "Microsoft was founded by Bill Gates and Paul Allen in 1975."}
+{"prompt": "Where is Google based?", "response": "Google is based in Mountain View, California."}
+{"prompt": "What does Apple make?", "response": "Apple makes the iPhone, iPad and Mac computers, along with software and services."}
+{"prompt": "Who invented the telephone?", "response": "Alexander Graham Bell is credited with inventing the telephone in 1876."}
+{"prompt": "What year did the Berlin Wall fall?", "response": "The Berlin Wall fell in 1989."}
+{"prompt": "What is 12 times 12?", "response": "12 times 12 is 144."}
+{"prompt": "What is 15 percent of 200?", "response": "15 percent of 200 is 30."}
+{"prompt": "What is the square root of 81?", "response": "The square root of 81 is 9."}
+{"prompt": "Is 17 a prime number?", "response": "Yes, 17 is a prime number: it can only be divided by 1 and itself."}
+{"prompt": "What is 7 plus 8?", "response": "7 plus 8 is 15."}
+{"prompt": "How many minutes are in a day?", "response": "There are 1,440 minutes in a day."}
+{"prompt": "Convert 5 kilometres to miles.", "response": "5 kilometres is about 3.1 miles."}
+{"prompt": "What is the area of a circle with radius 2?", "response": "The area is pi times the radius squared: about 12.57 square units."}
+{"prompt": "Solve for x: 2x + 6 = 14.", "response": "Subtract 6 from both sides to get 2x = 8, then divide by 2: x = 4."}
+{"prompt": "What is a noun?", "response": "A noun is a word that names a person, place, thing or idea, such as teacher, city or happiness."}
+{"prompt": "Translate 'thank you' into Spanish.", "response": "'Thank you' in Spanish is 'gracias'."}
+{"prompt": "What is the plural of mouse?", "response": "The plural of mouse is mice."}
+{"prompt": "Give me a synonym for happy.", "response": "A synonym for happy is joyful."}
+{"prompt": "Write a haiku about the sea.", "response": "Waves fold into foam,\nthe tide keeps its quiet time,\nsalt wind on my face."}
+{"prompt": "Write a short poem about autumn.", "response": "Leaves let go of branches,\nred and gold on the cold ground,\nthe year breathes out slow."}
+{"prompt": "Tell me a joke.", "response": "Why did the scarecrow win an award? Because he was outstanding in his field."}
+{"prompt": "Write one sentence to start a mystery story.", "response": "The lighthouse had been dark for forty years, so nobody could explain the light that came on at midnight."}
+{"prompt": "Summarize the story of Cinderella in one sentence.", "response": "A kind young woman mistreated by her stepfamily goes to a royal ball with a fairy godmother's help, loses a glass slipper, and is found and married by the prince."}
+{"prompt": "How do I reverse a list in Python?", "response": "Use my_list.reverse() to reverse it in place, or my_list[::-1] to get a reversed copy."}
+{"prompt": "What is a variable in programming?", "response": "A variable is a name that refers to a value stored in memory, so the program can read and change it later."}
+{"prompt": "How do I print Hello World in C?", "response": "#include <stdio.h>\n\nint main(void) {\n    printf(\"Hello, World!\\n\");\n    return 0;\n}"}
+{"prompt": "What does HTML stand for?", "response": "HTML stands for HyperText Markup Language."}
+{"prompt": "What is the difference between a list and a tuple in Python?", "response": "A list can be changed after it is created; a tuple cannot. Lists use square brackets and tuples use parentheses."}
+{"prompt": "Write a Python function that adds two numbers.", "response": "def add(a, b):\n    return a + b"}
+{"prompt": "What is an API?", "response": "An API (application programming interface) is a set of rules that lets one program ask another program for data or actions."}
+{"prompt": "What is machine learning?", "response": "Machine learning is a way of building computer programs that learn patterns from data instead of following only hand-written rules."}
+{"prompt": "How can I sleep better?", "response": "Keep a regular schedule, keep the bedroom dark and cool, avoid caffeine late in the day, and put screens away an hour before bed."}
+{"prompt": "How do I make a cup of tea?", "response": "Boil water, pour it over a tea bag or leaves in a cup, steep for three to five minutes, remove the tea, and add milk, sugar or lemon if you like."}
+{"prompt": "What should I do if I cut my finger?", "response": "Wash the cut with clean water, press with a clean cloth to stop the bleeding, and cover it with a bandage. See a doctor if it is deep or will not stop bleeding."}
+{"prompt": "How can I save money?", "response": "Track what you spend, set a monthly budget, save a fixed amount as soon as you are paid, and cut subscriptions you do not use."}
+{"prompt": "Give me three tips for learning a new language.", "response": "1. Practise a little every day.\n2. Listen to and speak with native speakers.\n3. Learn the most common words first."}
+{"prompt": "What are the benefits of exercise?", "response": "Regular exercise strengthens the heart and muscles, improves mood and sleep, and lowers the risk of many diseases."}
+{"prompt": "How many days are in a leap year?", "response": "A leap year has 366 days."}
+{"prompt": "What is the freezing point of water in Fahrenheit?", "response": "Water freezes at 32 degrees Fahrenheit."}
+{"prompt": "Which animal is the largest on Earth?", "response": "The blue whale is the largest animal on Earth."}
+{"prompt": "How many legs does a spider have?", "response": "A spider has eight legs."}
+{"prompt": "What do bees make?", "response": "Bees make honey and beeswax."}
+{"prompt": "What is the main ingredient of guacamole?", "response": "The main ingredient of guacamole is avocado."}
+{"prompt": "Hello!", "response": "Hello! How can I help you today?"}
+{"prompt": "Who are you?", "response": "I am an AI assistant. I can answer questions, help with writing, explain ideas and help with code."}
+{"prompt": "Can you help me write an email to my boss asking for a day off?", "response": "Subject: Day off request\n\nHi [Name],\n\nI would like to request a day off on [date] for personal reasons. My tasks are on track, and I will make sure everything is covered before I leave.\n\nThank you,\n[Your name]"}
+{"prompt": "Explain what a black hole is to a child.", "response": "A black hole is a place in space where gravity pulls so hard that nothing, not even light, can get out. It forms when a very big star collapses."}
+{"prompt": "What is the difference between weather and climate?", "response": "Weather is what the air is like today or this week; climate is the usual pattern of weather in a place over many years."}
+{"prompt": "Name three primary colors.", "response": "The three primary colors of paint are red, yellow and blue."}
+{"prompt": "What time zone is London in?", "response": "London uses Greenwich Mean Time (GMT) in winter and British Summer Time (GMT+1) in summer."}
+{"prompt": "What is the currency of Japan?", "response": "The currency of Japan is the yen."}
+{"prompt": "Why do we need sleep?", "response": "Sleep lets the body repair itself and the brain store memories and clear waste; without enough sleep, attention, mood and health suffer."}
+{"prompt": "What is inflation?", "response": "Inflation is the general rise in prices over time, which means each unit of money buys a little less."}
+{"text": "The water cycle moves water around the planet. The sun heats oceans, lakes and rivers, and water evaporates into the air as vapour. As the vapour rises it cools and condenses into clouds. When the droplets in the clouds grow heavy enough, they fall as rain or snow, and the water flows back to the sea through rivers and underground."}
+{"text": "Bread is one of the oldest prepared foods. To make a simple loaf, mix flour, water, salt and yeast into a dough, knead it until it is smooth, and let it rise until it doubles in size. Shape it, let it rise again, and bake it in a hot oven until the crust is brown and the bottom sounds hollow when tapped."}
+{"text": "The Roman Empire grew from a small city on the Tiber river into a state that ruled the lands around the Mediterranean Sea. Its roads, laws and Latin language shaped Europe for centuries after the western half of the empire fell in 476."}
+{"text": "A computer runs programs by following instructions stored in memory. The processor fetches an instruction, decodes it, carries it out and moves on to the next one, billions of times every second. Programs are written in programming languages and translated into these simple instructions."}
+{"text": "Exercise does not have to be intense to be useful. A brisk thirty-minute walk on most days improves heart health, helps control weight and lifts mood. Adding some strength training twice a week keeps muscles and bones strong as we age."}
+{"text": "Once upon a time, a little fox lived at the edge of a forest. Every morning she ran to the river to drink and to watch the fish jump. One day she found a lost duckling crying by the water, and she walked with it along the bank until they found its mother."}
+{"text": "Electric cars use a battery and an electric motor instead of a petrol engine. They are quiet, need little maintenance and produce no exhaust while driving. Their range has grown steadily, and charging networks are expanding in many countries."}
+{"text": "The human heart is a muscle about the size of a fist. It beats around 100,000 times a day, pumping blood through arteries to every part of the body and back through veins to the lungs, where the blood picks up fresh oxygen."}
+{"text": "To grow tomatoes, plant them in a sunny spot after the last frost, water them deeply and regularly, and give the stems a stake or cage to climb. Pick the fruit when it is fully coloured and slightly soft."}
+{"text": "Mathematics is the study of numbers, shapes and patterns. Arithmetic deals with counting and calculation, algebra with symbols and equations, geometry with shapes and space, and statistics with collecting and understanding data."}
+{"text": "Good writing is clear writing. Use short sentences, prefer common words, put the main point first, and cut anything the reader does not need. Read your text aloud: if you stumble, your reader will too."}
+{"text": "The internet is a global network of computers that exchange data using shared rules called protocols. The web is one service that runs on it: pages linked to each other, opened in a browser by typing an address or clicking a link."}
