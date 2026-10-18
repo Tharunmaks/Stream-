@@ -169,7 +169,7 @@ details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f
       <tr><td>MeZO adapters inside every layer</td><td>Done: the memory of running the model. Both perturbed passes share one read of the model.</td></tr>
       <tr><td>Merging across phones</td><td>Done: every step is 16 bytes (seed, slope, step size); replaying them reproduces the training bit for bit.</td></tr>
     </tbody></table></div>
-    <p class="muted"><b>The honest result:</b> on SmolLM2-135M, MeZO adapters lowered held-out perplexity by <b>1.9% in 17 minutes</b>, while the graft gave <b>17.3% in 74 seconds</b> on the same data. MeZO is known to need thousands of steps, and each step is two passes through the whole model. For a 200B model on a phone, that means days for a small change. The graft is the practical route; MeZO stays available for experiments and for training together across devices.</p>
+    <p class="muted"><b>The honest result:</b> on SmolLM2-135M, MeZO adapters lowered held-out perplexity by <b>1.9% in 17 minutes</b> (and levelled off near that after 1,000 steps, 83 minutes), while the graft gave <b>17.3% in 74 seconds</b> on the same data. MeZO is known to need thousands of steps, and each step is two passes through the whole model. For a 200B model on a phone, that means days for a small change. The graft is the practical route; MeZO stays available for experiments and for training together across devices.</p>
   </section>
 
   <section class="card hot" id="install">

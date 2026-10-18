@@ -29,11 +29,13 @@ Same data (TinyStories, 20,000 tokens), same model (SmolLM2-135M); held-out perp
 | MeZO adapters, normalized slope (default) | rank 8, lr 1e-3, 200 steps | 12.35 -> 12.25 (-0.8%) | 11 min |
 | MeZO adapters, normalized | rank 8, lr 3e-3, 200 steps | +0.3% (noise) | 11 min |
 | MeZO adapters, normalized | rank 1, lr 3e-3 / 1e-2, 200 steps | +0.9% / diverged (+87%) | 10 min each |
+| MeZO adapters, normalized (default), long run | rank 8, lr 1e-3, 1,500 steps | 12.35 -> 12.15 (-1.6%) | 83 min |
 
 Each MeZO step ran both perturbed versions of 4 examples in one layer-by-layer pass: about 3.1 s per step here. The held-out set
 is small (8 examples, 1,016 tokens), so differences under about 1% are noise. Plain MeZO on these 276,480 adapter numbers learns at
 lr 1e-3 and diverges at 3e-3. Dividing the slope by its running size (the default) keeps it from diverging at moderate step sizes,
-but does not make it learn faster.
+but does not make it learn faster. The long run's held-out loss by step: 2.513 (start), 2.507 (250), 2.500 (500), 2.498 (750),
+2.496 (1,000), 2.497 (1,250), 2.497 (1,500). It levels off after about 1,000 steps, far above where the graft ends.
 
 ## What this means for 200B on a phone
 
