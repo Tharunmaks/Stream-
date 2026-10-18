@@ -1,10 +1,10 @@
 ---
 name: expert-craft
-description: Train a language model from scratch, for free, on the user's own phone or computer, with up to 70 billion parameters (Flash Experts - a small dense transformer in RAM plus millions of page-sized experts in a sparse file on flash, trained in place by native C kernels). Use when the user wants to make, build or train their own AI / LLM / language model, train on a phone or in Termux, asks for a 1B-70B model without a GPU or money, wants to know what their device can train, or wants a free Colab/Kaggle GPU training project.
-compatibility: Python 3.8+ and NumPy. A C compiler (clang or gcc) makes training several times faster but is optional. Android (Termux), Linux, macOS, WSL. Needs 1 GB+ free internal storage; a full 70B expert file can grow to 75 GB.
+description: Teach a big open model (up to 200B+ parameters, frozen) the user's own data on their phone or computer with a trained graft, or train a language model from scratch with up to 70 billion parameters (Flash Experts). No GPU, no account. Use when the user wants to train, fine-tune or customise an AI / LLM on their own notes, documents, chats or facts, train a 7B-200B model on a phone or in Termux, make a model know something new, build their own model, wants to know what their device can train, or wants a free Colab/Kaggle GPU training project.
+compatibility: Graft - the ExpertStream engine (C; built by graft-setup with clang or gcc and make) and a GGUF model on the device. Flash Experts - Python 3.8+ and NumPy (a C compiler makes it faster). Android (Termux), Linux, macOS, WSL.
 ---
 
-# Expert Craft: train up to 70B parameters on a phone, free
+# Expert Craft: teach a 200B model your data, or train up to 70B parameters, on a phone
 
 You are operating a real trainer. Everything runs on the user's device: no GPU, no account, no network except optional downloads.
 All commands below use `EC`, the command line tool bundled with this skill:
@@ -15,6 +15,36 @@ EC="python3 ${CLAUDE_SKILL_DIR}/scripts/expertcraft.py"     # Claude Code fills 
 ```
 
 Projects live in `~/expertcraft/<name>` (set `EXPERTCRAFT_HOME` to change; the tool refuses paths outside it).
+
+## 0. Which route?
+
+| The user wants | Route |
+|---|---|
+| a smart model that knows *their* notes, facts, names, wording or style (a 7B, 70B or 200B model "trained on my data") | **Graft** (section G): a big open model stays frozen, a small graft learns their data |
+| to build a model from scratch, or to experiment with training itself | **Flash Experts** (sections 1-7) |
+| a dense model trained on a free GPU (Colab, Kaggle) | Other routes, at the end |
+
+Never promise "GPU speed" or "training a 200B model" in the usual sense. Say what really happens. With a graft, the 200B model's own
+weights stay frozen, and the device trains a small graft on top of it. The training step is fast; reading the data through the big
+model once is the slow part.
+
+## G. Graft: teach a frozen big model your data
+
+1. `$EC graft-setup` once: downloads and builds the engine, then runs its self-test. Report the self-test line.
+2. A model: one the user already has, or fetch one with the engine's `es_get REPO FILE` (it downloads only the model's core; experts
+   arrive as they are used). Ask before a big download, and say how big it is.
+3. Data: their text (`.txt`, every token learned), or `.jsonl` with `{"prompt": ..., "response": ...}` /
+   `{"messages": [...]}` (only the answers are learned). For facts, help them write 3 or 4 different wordings of each question with the
+   same answer: every 20th example is held out to check that the graft really learned.
+4. `$EC graft-plan --model MODEL.gguf --data FILE`: it measures this device. Tell the user the hours to read, the minutes to train and the
+   disk needed, and read its honest summary to them.
+5. `$EC graft NAME --model MODEL.gguf --data FILE` runs in the background (plug in the phone; Termux: `termux-wake-lock`).
+   The same command continues after an interruption. `$EC graft-status NAME` shows progress.
+6. When it finishes, `graft-status` shows the held-out loss of the base model and the grafted model, and the "change on general text".
+   Report those numbers. Then `$EC graft-chat NAME --prompt "..."`, or `$EC graft-serve NAME` for apps (OpenAI/Ollama API).
+
+Graft rules: report only numbers the tools printed. If the change on general text is above about 0.05, say that general answers may
+have shifted, and suggest more anchors (`--anchor my_general.jsonl`) or `--anchor-weight 5`. Details and measurements: [graft.md](graft.md).
 
 ## 1. Set up (once)
 

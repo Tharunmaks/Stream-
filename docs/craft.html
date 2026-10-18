@@ -112,14 +112,51 @@ details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f
   <section class="hero">
     <span class="eyebrow">Free · offline · runs in Termux</span>
     <h1>Expert<em>Craft</em></h1>
-    <p class="muted">Train a language model with up to <b>70 billion parameters</b> on your own phone. A small model stays in RAM. The other parameters live in millions of page-sized experts in a file on flash, and each word reads, trains and rewrites only a handful of them. No GPU, no account, no cloud.</p>
+    <p class="muted"><b>New: teach a 200-billion-parameter model your own data</b> on your phone with a <a href="#graft">graft</a>: the big model stays frozen and a small graft on top learns your facts and style.</p>
+    <p class="muted">Or train a language model with up to <b>70 billion parameters</b> from scratch on your own phone. A small model stays in RAM. The other parameters live in millions of page-sized experts in a file on flash, and each word reads, trains and rewrites only a handful of them. No GPU, no account, no cloud.</p>
     <div class="row">
-      <a class="btn primary" href="#install">Give it to your AI</a>
+      <a class="btn primary" href="#graft">Teach a big model your data</a>
+      <a class="btn" href="#install">Give it to your AI</a>
       <a class="btn" href="#start">Start by hand</a>
       <a class="btn" href="#plan">Plan for your phone</a>
       <a class="btn" href="#honest">What you really get</a>
       <a class="btn" href="https://github.com/Tharunmaks/Stream-/tree/claude/expertstream-moe-android-oegt59/craft" rel="noopener">Source on GitHub</a>
     </div>
+  </section>
+
+  <section class="card hot" id="graft">
+    <span class="eyebrow">New · Graft · up to 200B and beyond</span>
+    <h2>Teach a 200B model your data, on your phone</h2>
+    <p class="muted">Fine-tuning a 200-billion-parameter model the usual way needs a backward pass through all of it and terabytes of optimizer state, on data-centre GPUs. A phone cannot do that, at any speed. A graft takes another way: the big model stays <b>frozen</b>, and a small graft on its final hidden state learns your facts, names, wording and style. Training it does not touch the big model, so a training step costs the same for a 1B and a 235B model.</p>
+    <div class="grid4" style="margin:12px 0">
+      <div class="card"><div class="num">1</div><h3>Any big model</h3><p class="muted">Any GGUF the ExpertStream engine runs: Qwen3 235B, gpt-oss 120B, DeepSeek R1, Kimi K2. Its weights never change.</p></div>
+      <div class="card"><div class="num">2</div><h3>Read once</h3><p class="muted">The model reads your text once and saves its last hidden state and top candidates for every word. This is the slow part, and you can stop and resume it.</p></div>
+      <div class="card"><div class="num">3</div><h3>Train fast</h3><p class="muted">A low-rank network, an exact memory of your text that can propose words the model never would, and a gate that knows when to trust it. Built-in general text keeps everything else unchanged.</p></div>
+      <div class="card"><div class="num">4</div><h3>Use it</h3><p class="muted">Chat with the big model plus your graft, or serve it to any app over the OpenAI or Ollama API. The graft adds about 1-2 ms per word.</p></div>
+    </div>
+    <h3>Measured (4-core PC, CPU only)</h3>
+    <div class="scroll"><table class="tbl"><thead><tr><th>Test</th><th class="r">Base model</th><th class="r">With graft</th></tr></thead><tbody>
+      <tr><td>Qwen2.5 0.5B: 120 questions about 30 made-up companies, asked in a wording never trained on (right fact in the answer)</td><td class="r">0</td><td class="r"><b>119</b></td></tr>
+      <tr><td>Qwen2.5 0.5B: 24 general questions outside the data</td><td class="r">23</td><td class="r"><b>23</b></td></tr>
+      <tr><td>OLMoE 7B mixture of experts: the same 120 questions</td><td class="r">0</td><td class="r"><b>118</b></td></tr>
+      <tr><td>OLMoE 7B: 24 general questions outside the data</td><td class="r">24</td><td class="r"><b>24</b></td></tr>
+      <tr><td>Stories (plain text, 20,000 tokens read): held-out perplexity</td><td class="r">9.28</td><td class="r"><b>7.70</b></td></tr>
+      <tr><td>Training speed (the big model is not used): Qwen2.5 0.5B / OLMoE 7B</td><td class="r"></td><td class="r">9,500 / 4,800 tokens/s</td></tr>
+      <tr><td>Reading speed through the frozen model: Qwen2.5 0.5B / OLMoE 7B</td><td class="r"></td><td class="r">~90 / ~9 tokens/s</td></tr>
+    </tbody></table></div>
+    <h3>Commands (Termux or any shell)</h3>
+    <div class="code"><pre id="g-cmd">git clone https://github.com/Tharunmaks/Stream-.git ~/Stream- &amp;&amp; cd ~/Stream- &amp;&amp; make es_graft es_chat es_serve es_get
+./es_graft plan  -g MODEL.gguf --data notes.txt               # measured on THIS phone: hours to read, minutes to train
+./es_graft read  -g MODEL.gguf --data notes.txt -o my.esfeat  # Ctrl-C any time; the same command continues
+./es_graft train my.esfeat -o my.esgraft
+./es_chat  -g MODEL.gguf -A my.esgraft                        # or ./es_serve -g MODEL.gguf --graft my.esgraft</pre><button class="btn copy" data-copy="g-cmd">Copy</button></div>
+    <p class="dim" style="font-size:13px">Data: plain text, or JSON lines of questions and answers ({"prompt": ..., "response": ...}). For facts, write each question in 3 or 4 wordings. With the skill installed, tell your AI: <i>"Use expert-craft to graft my notes onto Qwen3 235B."</i></p>
+    <ul class="clean">
+      <li><b>Not GPU speed for the whole job:</b> a phone still has to read your text once through the full big model. For a 200B model whose experts do not fit in RAM, that takes hours for a few thousand words. <span class="mono">plan</span> measures it on your phone before you start.</li>
+      <li><b>What it learns:</b> your facts, names, wording and style. It cannot give the model abilities its weights do not have.</li>
+      <li><b>Not run here yet:</b> models above 7B. The test machine's disk was too slow to stream a 20B model's experts (about 10 MB/s). The code path is the same for every model the engine runs.</li>
+      <li><b>Checked, not assumed:</b> the training loss is exact, gradients are checked against finite differences, and <span class="mono">es_graft check</span> shows that the engine reproduces the trained numbers while generating.</li>
+    </ul>
   </section>
 
   <section class="card hot" id="install">
@@ -133,7 +170,7 @@ details.card > summary { cursor: pointer; font-weight: 600; font-family: var(--f
     <div class="code"><pre id="i-sh">curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh</pre><button class="btn copy" data-copy="i-sh">Copy</button></div>
     <p class="dim" style="font-size:13px">Installs into ~/.claude/skills/expert-craft. For another agent, pass its skills folder: <span class="mono">sh install-skill.sh ~/.agent/skills/expert-craft</span>. Apps that take a skill upload: <a href="expert-craft-skill.zip" download>expert-craft-skill.zip</a>.</p>
     <h3>Or just tell your AI</h3>
-    <div class="code"><pre id="i-say" style="white-space:pre-wrap;padding-right:72px">Install the Expert Craft skill from github.com/Tharunmaks/Stream- (folder craft/skills/expert-craft), then use it to plan and train a 70B model on this phone and explain every step to me.</pre><button class="btn copy" data-copy="i-say">Copy</button></div>
+    <div class="code"><pre id="i-say" style="white-space:pre-wrap;padding-right:72px">Install the Expert Craft skill from github.com/Tharunmaks/Stream- (folder craft/skills/expert-craft), then use it to teach a big model my notes on this phone (or train a 70B model from scratch) and explain every step to me.</pre><button class="btn copy" data-copy="i-say">Copy</button></div>
   </section>
 
   <section class="grid4" aria-label="How it works">

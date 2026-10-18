@@ -1,6 +1,6 @@
 {
   "name": "expertstream",
-  "description": "ExpertStream tools: Expert Craft trains language models with up to 70 billion parameters on your own phone, for free.",
+  "description": "ExpertStream tools: Expert Craft teaches big open models (up to 200B+) your data, or trains models with up to 70B parameters, on your own phone, for free.",
   "owner": {
     "name": "Tharunmaks"
   },
@@ -8,7 +8,7 @@
     {
       "name": "expert-craft",
       "source": "./craft",
-      "description": "Train a model with up to 70B parameters on a phone or PC, free: small dense model in RAM + page-sized Flash Experts on storage, native kernels."
+      "description": "Graft your data onto a frozen big model (up to 200B+) on a phone or PC, or train a model with up to 70B parameters from scratch: no GPU, free."
     }
   ]
 }

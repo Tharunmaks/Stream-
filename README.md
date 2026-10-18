@@ -51,6 +51,30 @@ Private Network Access, DNS-rebinding refusal, LAN key). Honest limits: the firs
 speed (big mixture-of-experts models read prompts slowly), it serves one request at a time, and Safari may block a https website from reaching
 127.0.0.1. Websites other than local pages and this project's site are refused unless started with `--cors ORIGIN`.
 
+**Graft: teach a 200B model your data, on your phone.** Fine-tuning a 200-billion-parameter model the usual way needs terabytes of memory
+and data-centre GPUs; no phone can do that at any speed. A graft takes another way. The big model (any GGUF this engine runs, Qwen3 235B
+and DeepSeek R1 included) stays **frozen**, and a small graft on its final hidden state learns your facts, names, wording and style.
+The graft has three parts: a low-rank network, an exact n-gram memory of your text that can propose words the model never would, and a
+learned gate that decides when to trust it. Built-in general "anchor" text teaches it to leave everything else alone.
+
+```sh
+make es_graft es_chat
+./es_graft plan  -g MODEL.gguf --data notes.txt               # measured on this device: hours to read, minutes to train
+./es_graft read  -g MODEL.gguf --data notes.txt -o my.esfeat  # the big model reads your data ONCE (resumable)
+./es_graft train my.esfeat -o my.esgraft                      # the big model is not used again: thousands of tokens/s on CPU cores
+./es_chat  -g MODEL.gguf -A my.esgraft                        # or: ./es_serve -g MODEL.gguf --graft my.esgraft (OpenAI/Ollama API)
+```
+
+Measured on a 4-core PC (30 made-up companies with 4 facts each). Questions were asked in a wording the graft never saw, and answered
+greedily. Right facts, base model -> with the graft: Qwen2.5-0.5B **0 -> 119** of 120, OLMoE 7B (mixture of experts) **0 -> 118** of 120.
+General questions outside the data: 23 -> 23 and 24 -> 24 of 24. Plain text: held-out perplexity -17%. Training: 9,500 and 4,800 tokens/s;
+reading through the frozen model: about 90 and 9 tokens/s. Models above 7B were not run end to end here (this machine's disk was too
+slow to stream a 20B model's experts). The loss is exact (only
+the candidates' scores change), and `es_graft check` shows the engine reproduces it during generation (largest difference per position
+about 1e-6). Honest limits: reading the data through a 200B model on a phone takes hours (`plan` measures it), and a graft teaches
+facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
+`python3 scripts/test_graft.py MODEL.gguf`.
+
 **Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
 Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
 `curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.

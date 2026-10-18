@@ -1,6 +1,13 @@
 # Expert Craft
 
-Train a language model with **up to 70 billion parameters on your own phone, for free**: no GPU, no account, no server, no MCP.
+**New: teach a 200B model your data on a phone.** With a graft, a big open model (up to 200B+ parameters) stays frozen, and a small graft
+on top learns your facts, names, wording and style. The model reads your text once; then the graft trains without touching it. Measured
+on 120 questions about made-up facts, in wordings never trained on: Qwen2.5-0.5B 0 -> 119 right, OLMoE 7B 0 -> 118 right, while general
+answers stayed the same (23/24 and 24/24 with and without the graft). How and honest limits: [`skills/expert-craft/graft.md`](skills/expert-craft/graft.md).
+The skill drives it: `graft-setup`, `graft-plan`, `graft NAME --model M.gguf --data notes.txt`, `graft-status`, `graft-chat`,
+`graft-serve`.
+
+Or train a language model with **up to 70 billion parameters from scratch on your own phone, for free**: no GPU, no account, no server, no MCP.
 Expert Craft is an **agent skill**: a folder with instructions (`SKILL.md`) and the trainer, which an AI agent reads and runs on your device.
 Website with a planner: https://tharunmaks.github.io/Stream-/craft.html
 

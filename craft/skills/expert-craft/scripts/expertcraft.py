@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Expert Craft: build language models from scratch with free compute, including a 70-billion-parameter model trained on a phone.
+"""Expert Craft: teach a big open model (up to 200B+ parameters) your data on a phone, or build a model from scratch with free compute.
 
 Part of ExpertStream: https://github.com/Tharunmaks/Stream-   Python 3.8+. Phone commands need NumPy (Termux: pkg install python python-numpy).
+
+GRAFT (the big model stays frozen; a small graft on top learns your data. Needs the ExpertStream engine: graft-setup)
+  expertcraft.py graft-setup                                       download and build the engine (once)
+  expertcraft.py graft-plan --model MODEL.gguf --data notes.txt   measured on THIS device: hours to read, minutes to train, disk
+  expertcraft.py graft NAME --model MODEL.gguf --data notes.txt|chat.jsonl [--minutes M]   read + train in the background (run again to continue)
+  expertcraft.py graft-status NAME                                 progress and results (held-out loss, change on general text)
+  expertcraft.py graft-chat NAME [--prompt "..."]                  chat with the big model + your graft
+  expertcraft.py graft-serve NAME [-p 8080]                        OpenAI/Ollama-compatible server with the graft
 
 PHONE (Flash Experts: sparse training, experts live in a file on flash)
   expertcraft.py phone-plan 70e9 [--minutes 600]        what 70B means on THIS device: disk, speed, wear, what you get
@@ -19,9 +27,9 @@ FREE GPUs (Colab / Kaggle) and planning
 
 All project folders live under EXPERTCRAFT_HOME (default ~/expertcraft).
 """
-import json, math, os, re, shutil, signal, subprocess, sys, time
+import json, math, os, re, shlex, shutil, signal, subprocess, sys, time
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 APP = "Expert Craft"
 REPO = "https://github.com/Tharunmaks/Stream-"
 SITE = "https://tharunmaks.github.io/Stream-/craft.html"
@@ -454,6 +462,122 @@ def phone_status(argv):
     print(json.dumps(_phone().status(ws_path(_positional(argv, 1)[0])), indent=2))
 
 
+# ======================================================================= graft: teach a frozen big model (up to 200B+) your data
+ENGINE_REPO = "https://github.com/Tharunmaks/Stream-"
+ENGINE_BRANCH = "claude/expertstream-moe-android-oegt59"
+
+
+def _engine_dir():
+    """the ExpertStream engine (es_graft, es_chat, es_serve, es_get): $ES_HOME, this repository, or ~/Stream-"""
+    cands = [os.environ.get("ES_HOME", ""), os.path.abspath(os.path.join(HERE, "..", "..", "..", "..")), os.path.expanduser("~/Stream-")]
+    for c in cands:
+        if c and os.path.exists(os.path.join(c, "src", "es_graft.c")):
+            return c
+    return None
+
+
+def _engine(tool="es_graft"):
+    d = _engine_dir()
+    if not d:
+        raise SystemExit("the ExpertStream engine is not installed: run  expertcraft.py graft-setup")
+    exe = os.path.join(d, tool)
+    if not os.path.exists(exe):
+        r = subprocess.run(["make", "-s", "-C", d, tool, "es_chat", "es_serve", "es_get"])
+        if r.returncode or not os.path.exists(exe):
+            raise SystemExit(f"building {tool} failed: install clang (or gcc) and make, then run graft-setup again")
+    return exe
+
+
+def graft_setup(argv):
+    d = _engine_dir()
+    if not d:
+        d = os.path.expanduser("~/Stream-")
+        print(f"downloading the engine into {d} ...")
+        r = subprocess.run(["git", "clone", "-q", "--depth", "1", "-b", ENGINE_BRANCH, ENGINE_REPO, d])
+        if r.returncode:
+            raise SystemExit("git clone failed: install git (Termux: pkg install git) and check the internet connection")
+    exe = _engine()
+    r = subprocess.run([exe, "selftest"], capture_output=True, text=True)
+    print(r.stdout.strip())
+    print(json.dumps({"engine": d, "es_graft": exe, "es_chat": os.path.join(d, "es_chat"), "es_get": os.path.join(d, "es_get"),
+                      "selftest": "OK" if r.returncode == 0 else "FAILED"}, indent=2))
+
+
+def _graft_paths(name):
+    proj = ws_path(name)
+    return proj, os.path.join(proj, "graft.json"), os.path.join(proj, "data.esfeat"), os.path.join(proj, "graft.esgraft"), os.path.join(proj, "graft.log")
+
+
+def graft_plan(argv):
+    model, data = _flag(argv, "--model"), _flag(argv, "--data")
+    if not model or not data:
+        raise SystemExit("usage: graft-plan --model MODEL.gguf --data notes.txt|chat.jsonl")
+    subprocess.run([_engine(), "plan", "-g", os.path.expanduser(model), "--data", os.path.expanduser(data)] + _graft_extra(argv, ("--seq", "--k", "--tokens", "--anchor")))
+
+
+def _graft_extra(argv, names):
+    out = []
+    for n in names:
+        v = _flag(argv, n)
+        if v is not None:
+            out += [n, v]
+    return out
+
+
+def graft_start(argv):
+    """read (resumable) then train, in the background; the same command continues an interrupted run"""
+    name = _positional(argv, 1)[0]
+    proj, meta, feat, gpath, log = _graft_paths(name)
+    os.makedirs(proj, exist_ok=True)
+    if os.path.exists(meta):
+        m = json.load(open(meta))
+    else:
+        model, data = _flag(argv, "--model"), _flag(argv, "--data")
+        if not model or not data:
+            raise SystemExit("first run needs --model MODEL.gguf and --data notes.txt|chat.jsonl")
+        m = {"model": os.path.abspath(os.path.expanduser(model)), "data": os.path.abspath(os.path.expanduser(data)),
+             "read": _graft_extra(argv, ("--seq", "--k", "--tokens", "--anchor", "--val-every")),
+             "train": _graft_extra(argv, ("--epochs", "--experts", "--m", "--anchor-weight"))}
+        json.dump(m, open(meta, "w"), indent=2)
+    exe = _engine()
+    minutes = _flag(argv, "--minutes")
+    read = [exe, "read", "-g", m["model"], "--data", m["data"], "-o", feat] + m["read"] + (["--minutes", minutes] if minutes else [])
+    train = [exe, "train", feat, "-o", gpath] + m["train"]
+    cmd = " ".join(shlex.quote(a) for a in read) + " && " + " ".join(shlex.quote(a) for a in train)
+    with open(log, "ab") as lf:
+        p = subprocess.Popen(["sh", "-c", cmd], stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
+    json.dump({"pid": p.pid, "started": time.time()}, open(os.path.join(proj, "graft.job"), "w"))
+    print(json.dumps({"name": name, "pid": p.pid, "log": log, "next": f"graft-status {name}"}, indent=2))
+
+
+def graft_status(argv):
+    name = _positional(argv, 1)[0]
+    proj, meta, feat, gpath, log = _graft_paths(name)
+    if not os.path.exists(meta):
+        raise SystemExit(f"no graft named {name}")
+    job = json.load(open(os.path.join(proj, "graft.job"))) if os.path.exists(os.path.join(proj, "graft.job")) else {}
+    lines = open(log, errors="replace").read().replace("\r", "\n").splitlines() if os.path.exists(log) else []
+    keep = [l for l in lines if l.strip()]
+    res = {"running": bool(job) and alive(job.get("pid", -1)), "trained": os.path.exists(gpath), "last": keep[-6:]}
+    res["results"] = [l for l in keep if l.startswith(("held out", "trained ", "RESULT", "memory bonus"))][-4:]
+    print(json.dumps(res, indent=2))
+
+
+def graft_chat(argv, serve=False):
+    name = _positional(argv, 1)[0]
+    proj, meta, feat, gpath, log = _graft_paths(name)
+    if not os.path.exists(gpath):
+        raise SystemExit(f"{name} is not trained yet: graft-status {name}")
+    m = json.load(open(meta))
+    _engine()
+    d = _engine_dir()
+    if serve:
+        os.execv(os.path.join(d, "es_serve"), ["es_serve", "-g", m["model"], "--graft", gpath] + [a for a in argv[1:]])
+    prompt = _flag(argv, "--prompt")
+    cmd = [os.path.join(d, "es_chat"), "-g", m["model"], "-A", gpath] + (["-p", prompt] if prompt else [])
+    os.execv(cmd[0], cmd)
+
+
 # ======================================================================= CLI
 def main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
@@ -470,6 +594,18 @@ def main(argv):
         phone_sample(rest)
     elif cmd == "phone-status":
         phone_status(rest)
+    elif cmd == "graft-setup":
+        graft_setup(rest)
+    elif cmd == "graft-plan":
+        graft_plan(rest)
+    elif cmd == "graft":
+        graft_start(rest)
+    elif cmd == "graft-status":
+        graft_status(rest)
+    elif cmd == "graft-chat":
+        graft_chat(rest)
+    elif cmd == "graft-serve":
+        graft_chat(rest, serve=True)
     elif cmd == "plan":
         print(json.dumps(free_plan(float(_positional(rest, 1)[0])), indent=2))
     elif cmd == "design":

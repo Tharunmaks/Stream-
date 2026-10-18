@@ -30,14 +30,14 @@ function instantCard() {
 }
 /* ----- Expert Craft ----- */
 function craftCard() {
-  return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'Expert Craft · free · on this phone'), h('h3', {}, 'Train a 70-billion-parameter model on your phone'),
-    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Expert Craft keeps a small model in RAM and puts up to 70 billion parameters in millions of page-sized experts in a file on flash. Each word reads, trains and rewrites only a handful of them, so the work per word is that of a small model. It runs in Termux with Python and NumPy (plus small C kernels it compiles itself), no GPU and no account.'),
-    h('div', { class: 'note' }, h('b', {}, 'Honest limit. '), 'The parameters are really trained here, but the quality of the text follows how many words your phone can process and the size of the small model, not the file size. See the plan for your own device before you start.'),
-    h('p', { class: 'muted', style: 'font-size:14px' }, 'Give it to your AI as a skill (no MCP). Claude Code, on a PC or in Termux:'),
+  return h('div', { class: 'card hot' }, h('span', { class: 'eyebrow' }, 'Expert Craft · free · on this phone'), h('h3', {}, 'Teach a 200B model your data, on your phone'),
+    h('p', { class: 'muted', style: 'font-size:14.5px' }, 'Graft: a big open model (Qwen3 235B, DeepSeek R1, gpt-oss 120B, or any model this engine runs) stays frozen, and a small graft on top learns your facts, names, wording and style. The model reads your text once; then the graft trains without it, at thousands of tokens per second on CPU cores (measured on a PC; phones not yet). Use it in Chat, or in any app through the local OpenAI/Ollama server.'),
+    h('div', { class: 'note' }, h('b', {}, 'Honest limit. '), 'Reading your text through a 200B model on a phone takes hours (es_graft plan measures it first), and a graft teaches facts and style, not new abilities. Measured on a PC: 0 to 119 of 120 questions about made-up facts answered right, general answers unchanged.'),
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'Also: train a model with up to 70 billion parameters from scratch (Flash Experts). Give it to your AI as a skill (no MCP). Claude Code, on a PC or in Termux:'),
     cmdBlock('/plugin install expert-craft --marketplace Tharunmaks/Stream-'),
-    h('p', { class: 'muted', style: 'font-size:14px' }, 'Any other agent that reads a skills folder, or by hand:'),
-    cmdBlock('curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh\n# by hand:\npkg install -y python python-numpy clang\npython3 ~/.claude/skills/expert-craft/scripts/expertcraft.py phone-plan 70e9 --minutes 600'),
-    h('div', { class: 'row' }, h('a', { class: 'btn', href: 'craft.html' }, 'Open Expert Craft')));
+    h('p', { class: 'muted', style: 'font-size:14px' }, 'Or by hand in Termux:'),
+    cmdBlock('git clone https://github.com/Tharunmaks/Stream-.git ~/Stream- && cd ~/Stream- && make es_graft es_chat es_serve es_get\n./es_graft plan -g MODEL.gguf --data notes.txt\n./es_graft read -g MODEL.gguf --data notes.txt -o my.esfeat\n./es_graft train my.esfeat -o my.esgraft\n./es_chat -g MODEL.gguf -A my.esgraft'),
+    h('div', { class: 'row' }, h('a', { class: 'btn', href: 'craft.html#graft' }, 'Open Expert Craft')));
 }
 /* ----- agents browser ----- */
 function agentsCard() {

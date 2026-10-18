@@ -1,5 +1,7 @@
 # Expert Craft reference
 
+Graft (teach a frozen big model your data): see [graft.md](graft.md). This page covers Flash Experts (training from scratch).
+
 ## How it works (Flash Experts)
 
 A dense 70B model costs 6 x 70e9 x tokens FLOPs to train: about 4e20 per billion tokens, hundreds of years on a phone CPU. So the model
