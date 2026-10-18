@@ -1101,39 +1101,67 @@ static void graft_ctx(const int32_t *toks, int pos0, int p, int32_t *ctx) {
     es_engine_canon_ctx(win, n, ctx);
 }
 
+/* ---------------- adapter: a small residual adapter after every layer, h += B_l A_l (h / rms h) ----------------
+ * Trained without backpropagation (es_graft zo: zeroth-order, two forward passes per step), so training needs no more memory
+ * than running the model. B starts at zero: a new adapter changes nothing. */
+static int AD_ON, AD_R; static float *AD; static uint64_t AD_SEED, AD_STEPS;   /* per layer: A (r x n) then B (n x r) */
+static void adapter_apply(int l, int N) {
+    const int n = M.n_embd, r = AD_R;
+    const float *A = AD + (size_t)l * 2 * r * n, *B = A + (size_t)r * n;
+    for (int i = 0; i < N; i++) {
+        float *x = BX + (size_t)i * n;
+        double ss = 0; for (int j = 0; j < n; j++) ss += (double)x[j] * x[j];
+        const float inv = (float)(1.0 / sqrt(ss / n + 1e-6));
+        float u[64];
+        for (int k = 0; k < r; k++) { const float *a = A + (size_t)k * n; float s = 0; for (int j = 0; j < n; j++) s += a[j] * x[j]; u[k] = s * inv; }
+        for (int j = 0; j < n; j++) { const float *b = B + (size_t)j * r; float s = 0; for (int k = 0; k < r; k++) s += b[k] * u[k]; x[j] += s; }
+    }
+}
+
+/* one layer for the N tokens in BX (positions pos0..), with the current sequence's caches */
+static void layer_n(int l, int N, int pos0) {
+    const int n = M.n_embd;
+    layer *L = &M.L[l];
+    arena_reset();
+    for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
+    if (L->recr) linear_attn_n(l, N); else attention_n(l, N, pos0);
+    for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+    arena_reset();
+    for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
+    if (L->moe) moe_n(l, N);
+    else dense_n(&L->ffn_gate, &L->ffn_up, &L->ffn_down, BACT, N, BTMP);
+    if (L->sh_gate.data) {
+        for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+        dense_n(&L->sh_gate, &L->sh_up, &L->sh_down, BACT, N, BTMP);
+        if (L->sh_gate_inp.data) {   /* Qwen2-MoE: the shared expert is scaled by sigmoid(gate . x) */
+            float gt[BMAX];
+            jobn(&L->sh_gate_inp, BACT, gt, 1, N);
+            run_jobs();
+            for (int i = 0; i < N; i++) { const float s = 1.0f / (1.0f + expf(-gt[i])); for (int j = 0; j < n; j++) BTMP[(size_t)i * n + j] *= s; }
+        }
+    }
+    for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+    if (AD_ON) adapter_apply(l, N);
+}
+/* the scores of BX rows from.. (N rows in BX): BXN gets their normed state, BLOG rows 0.. their scores */
+static void logits_n(int N, int from) {
+    const int n = M.n_embd;
+    arena_reset();
+    const int cnt = N - from;
+    for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(from + j) * n, M.output_norm.data, n, M.eps); prep(&BACT[j], BXN + (size_t)j * n, n); }
+    jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt);
+    run_jobs();
+}
+
 /* N tokens through the whole model; logits of tokens logits_from.. go to BLOG rows 0.. */
 static void forward_n(const int32_t *toks, int N, int pos0, int logits_from) {
     const int n = M.n_embd;
     for (int i = 0; i < N; i++) es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)toks[i], BX + (size_t)i * n, n);
     TRACE_TOKEN = pos0;
-    for (int l = 0; l < M.n_layer; l++) {
-        layer *L = &M.L[l];
-        arena_reset();
-        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
-        if (L->recr) linear_attn_n(l, N); else attention_n(l, N, pos0);
-        for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
-        arena_reset();
-        for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
-        if (L->moe) moe_n(l, N);
-        else dense_n(&L->ffn_gate, &L->ffn_up, &L->ffn_down, BACT, N, BTMP);
-        if (L->sh_gate.data) {
-            for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
-            dense_n(&L->sh_gate, &L->sh_up, &L->sh_down, BACT, N, BTMP);
-            if (L->sh_gate_inp.data) {   /* Qwen2-MoE: the shared expert is scaled by sigmoid(gate . x) */
-                float gt[BMAX];
-                jobn(&L->sh_gate_inp, BACT, gt, 1, N);
-                run_jobs();
-                for (int i = 0; i < N; i++) { const float s = 1.0f / (1.0f + expf(-gt[i])); for (int j = 0; j < n; j++) BTMP[(size_t)i * n + j] *= s; }
-            }
-        }
-        for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
-    }
+    for (int l = 0; l < M.n_layer; l++) layer_n(l, N, pos0);
     if (logits_from >= N) return;
-    arena_reset();
+    logits_n(N, logits_from);
     const int cnt = N - logits_from;
-    for (int j = 0; j < cnt; j++) { rmsnorm(BXN + (size_t)j * n, BX + (size_t)(logits_from + j) * n, M.output_norm.data, n, M.eps); prep(&BACT[j], BXN + (size_t)j * n, n); }
-    jobn(&M.output, BACT, BLOG, (size_t)M.n_vocab, cnt);
-    run_jobs();
     if (GRAFT_ON && !GRAFT_OFF)
         for (int j = 0; j < cnt; j++) {
             int32_t ctx[ES_GRAFT_CTX];
@@ -2138,6 +2166,7 @@ static void df_init(void) {
     uint64_t h = 0xcbf29ce484222325ull; const int shape[6] = {M.n_layer, M.n_embd, M.n_head, M.n_head_kv, M.head_dim, M.n_vocab};
     h = fnv(h, shape, sizeof shape); h = fnv(h, INFO.name, strlen(INFO.name)); h = fnv(h, &G.file_size, sizeof G.file_size);
     for (uint64_t i = 0; i < G.n_tensors; i++) { h = fnv(h, G.t[i].name, strlen(G.t[i].name)); h = fnv(h, &G.t[i].offset, sizeof G.t[i].offset); }
+    if (AD_ON) h = fnv(h, AD, sizeof(float) * (size_t)M.n_layer * 2 * AD_R * M.n_embd);   /* an adapter changes every row */
     FINGER = h;
     e = getenv("ES_KV_DIR");
     if (e) snprintf(DF_DIR, sizeof DF_DIR, "%s", e);
@@ -2445,4 +2474,155 @@ int es_engine_set_graft(const char *path, char *err, size_t cap) {
     GRAFT_ON = 1;
     return 0;
 #endif
+}
+
+/* ---------------- adapter API ---------------- */
+static uint64_t ad_mix(uint64_t z) { z += 0x9e3779b97f4a7c15ull; z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull; z = (z ^ (z >> 27)) * 0x94d049bb133111ebull; return z ^ (z >> 31); }
+float es_engine_gauss(uint64_t seed, uint64_t i) {   /* N(0,1), the same number for the same (seed, i) on every device */
+    const uint64_t a = ad_mix(seed ^ ad_mix(2 * i + 1)), b = ad_mix(seed ^ ad_mix(2 * i + 2));
+    const double u1 = ((a >> 11) + 1.0) / 9007199254740993.0, u2 = (b >> 11) / 9007199254740992.0;
+    return (float)(sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2));
+}
+size_t es_engine_adapter_count(void) { return AD ? (size_t)M.n_layer * 2 * AD_R * M.n_embd : 0; }
+float *es_engine_adapter_params(void) { return AD; }
+int es_engine_adapter_rank(void) { return AD_R; }
+/* the adapter's numbers changed: forget everything computed with the old ones */
+void es_engine_adapter_changed(void) {
+    POS = 0; FIRST = 1; SNAP_POS = -1; ACCN = ACCI = 0;
+    if (SLOTS) for (int i = 0; i < NSLOTS; i++) SLOTS[i].n = 0;
+#ifndef __EMSCRIPTEN__
+    if (DF_ON > 0) DF_ON = 0;   /* prompts saved on disk were computed without it */
+#endif
+}
+int es_engine_adapter_new(int rank, uint64_t seed) {
+    if (rank < 1 || rank > 64) return -1;
+    free(AD); AD_R = rank; AD_SEED = seed; AD_STEPS = 0;
+    const int n = M.n_embd;
+    AD = calloc((size_t)M.n_layer * 2 * rank * n, sizeof(float));
+    if (!AD) return -1;
+    for (int l = 0; l < M.n_layer; l++) {   /* A random, B zero */
+        float *A = AD + (size_t)l * 2 * rank * n;
+        for (size_t i = 0; i < (size_t)rank * n; i++) A[i] = es_engine_gauss(seed, (uint64_t)l * rank * n + i) / sqrtf((float)n);
+    }
+    AD_ON = 1;
+    es_engine_adapter_changed();
+    return 0;
+}
+int es_engine_adapter_save(const char *path, uint64_t steps, char *err, size_t cap) {
+    char tmp[4096]; snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { snprintf(err, cap, "cannot write %s", tmp); return -1; }
+    const uint32_t h[4] = {1, (uint32_t)M.n_layer, (uint32_t)M.n_embd, (uint32_t)AD_R};
+    const uint64_t q[3] = {es_engine_fingerprint(), AD_SEED, steps};
+    int bad = fwrite("ESADAPT1", 1, 8, f) != 8 || fwrite(h, sizeof h, 1, f) != 1 || fwrite(q, sizeof q, 1, f) != 1 ||
+              fwrite(AD, sizeof(float), es_engine_adapter_count(), f) != es_engine_adapter_count();
+    bad |= fclose(f) != 0;
+    if (bad || rename(tmp, path)) { remove(tmp); snprintf(err, cap, "cannot write %s", path); return -1; }
+    return 0;
+}
+/* load an adapter trained for this model; *seed and *steps (may be NULL) get its starting seed and steps trained */
+int es_engine_adapter_load(const char *path, uint64_t *seed, uint64_t *steps, char *err, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(err, cap, "cannot open %s", path); return -1; }
+    char mg[8]; uint32_t h[4]; uint64_t q[3];
+    if (fread(mg, 8, 1, f) != 1 || memcmp(mg, "ESADAPT1", 8) || fread(h, sizeof h, 1, f) != 1 || fread(q, sizeof q, 1, f) != 1 || h[0] != 1) {
+        fclose(f); snprintf(err, cap, "%s is not an adapter", path); return -1;
+    }
+    if ((int)h[1] != M.n_layer || (int)h[2] != M.n_embd || h[3] < 1 || h[3] > 64 || q[0] != es_engine_fingerprint()) {
+        fclose(f); snprintf(err, cap, "%s was trained on another model", path); return -1;
+    }
+    float *a = malloc(sizeof(float) * (size_t)h[1] * 2 * h[3] * h[2]);
+    if (!a || fread(a, sizeof(float), (size_t)h[1] * 2 * h[3] * h[2], f) != (size_t)h[1] * 2 * h[3] * h[2]) { free(a); fclose(f); snprintf(err, cap, "%s is cut short", path); return -1; }
+    fclose(f);
+    free(AD); AD = a; AD_R = (int)h[3]; AD_SEED = q[1]; AD_STEPS = q[2]; AD_ON = 1;
+    if (seed) *seed = q[1];
+    if (steps) *steps = q[2];
+    es_engine_adapter_changed();
+    return 0;
+}
+
+/* ---------------- many sequences, layer by layer ----------------
+ * For a model bigger than RAM every pass streams the experts from flash again. Here all sequences go through layer 1, then all
+ * through layer 2, ...: each layer's weights and experts are read once for the whole group (as in FlexGen). Each sequence
+ * keeps its own attention cache and recurrent state; lane[s] picks the adapter version it runs with (es_engine_adapter_lanes).
+ * Outputs are the same numbers as one sequence at a time. */
+static float *AD_LANE[2];
+void es_engine_adapter_lanes(float *lane0, float *lane1) { AD_LANE[0] = lane0; AD_LANE[1] = lane1; }
+double es_engine_flash_mb(void) { return STAT_READ_MB; }
+int es_engine_features_multi(int S, const int32_t *const *ids, const int *len, const uint8_t *const *want, const int *lane,
+                             void (*cb)(int s, int pos, const float *x, const float *logits, void *ud), void *ud) {
+    const int n = M.n_embd;
+    if (S < 1) return 0;
+    size_t T = 0;
+    for (int s = 0; s < S; s++) { if (len[s] < 1 || len[s] >= M.ctx) return -1; T += (size_t)len[s]; }
+    float *H = malloc(sizeof(float) * T * n);
+    size_t *off = malloc(sizeof(size_t) * S);
+    float **kcs = calloc((size_t)S, sizeof(float *)), **vcs = calloc((size_t)S, sizeof(float *)), ***ssms = calloc((size_t)S, sizeof(float **)), ***convs = calloc((size_t)S, sizeof(float **));
+    if (!H || !off || !kcs || !vcs || !ssms || !convs) { free(H); free(off); free(kcs); free(vcs); free(ssms); free(convs); return -1; }
+    float *kc0 = KC, *vc0 = VC, **ssm0 = SSM, **conv0 = CONV, *ad0 = AD;
+#ifndef __EMSCRIPTEN__
+    const int la0 = LOOKAHEAD;
+    LOOKAHEAD = 0;   /* guessing the next layer's experts would push out experts the other sequences still need */
+#endif
+    const size_t kcb = sizeof(float) * (size_t)(NKVL ? NKVL : 1) * M.ctx * M.kvk, vcb = M.kvv ? sizeof(float) * (size_t)(NKVL ? NKVL : 1) * M.ctx * M.kvv : 0;
+    int ok = 1;
+    for (int s = 0; s < S && ok; s++) {
+        if (s == 0) { kcs[0] = KC; vcs[0] = VC; ssms[0] = SSM; convs[0] = CONV; if (M.recurrent) recurrent_zero(); continue; }
+        kcs[s] = malloc(kcb); vcs[s] = vcb ? malloc(vcb) : NULL;
+        if (!kcs[s] || (vcb && !vcs[s])) { ok = 0; break; }
+        if (M.recurrent) {
+            ssms[s] = calloc((size_t)M.n_layer, sizeof(float *)); convs[s] = calloc((size_t)M.n_layer, sizeof(float *));
+            if (!ssms[s] || !convs[s]) { ok = 0; break; }
+            for (int l = 0; l < M.n_layer; l++) if (SSM[l]) {
+                ssms[s][l] = calloc(ssm_floats(), sizeof(float)); convs[s][l] = calloc(conv_floats(), sizeof(float));
+                if (!ssms[s][l] || !convs[s][l]) { ok = 0; break; }
+            }
+        } else { ssms[s] = SSM; convs[s] = CONV; }
+    }
+    if (ok) {
+        size_t o = 0;
+        for (int s = 0; s < S; s++) {
+            off[s] = o;
+            for (int i = 0; i < len[s]; i++)
+                es_dequant_row(M.tok_embd.type, (const uint8_t *)M.tok_embd.data + es_row_bytes(M.tok_embd.type, n) * (size_t)ids[s][i], H + (o + i) * n, n);
+            o += (size_t)len[s];
+        }
+        GRAFT_OFF = 1;
+        for (int l = 0; l < M.n_layer; l++)
+            for (int s = 0; s < S; s++) {
+                KC = kcs[s]; VC = vcs[s]; SSM = ssms[s]; CONV = convs[s];
+                AD = lane && AD_LANE[lane[s] & 1] ? AD_LANE[lane[s] & 1] : ad0;
+                for (int i = 0; i < len[s]; i += BMAX) {
+                    const int cnt = len[s] - i < BMAX ? len[s] - i : BMAX;
+                    float *h = H + (off[s] + i) * n;
+                    memcpy(BX, h, sizeof(float) * (size_t)cnt * n);
+                    TRACE_TOKEN = i;
+                    layer_n(l, cnt, i);
+                    memcpy(h, BX, sizeof(float) * (size_t)cnt * n);
+                }
+            }
+        for (int s = 0; s < S; s++)   /* the scores of the wanted positions */
+            for (int i = 0; i < len[s]; i += BMAX) {
+                const int cnt = len[s] - i < BMAX ? len[s] - i : BMAX;
+                int from = cnt;
+                for (int j = 0; j < cnt; j++) if (!want || !want[s] || want[s][i + j]) { from = j; break; }
+                if (from == cnt) continue;
+                memcpy(BX, H + (off[s] + i) * n, sizeof(float) * (size_t)cnt * n);
+                logits_n(cnt, from);
+                for (int j = from; j < cnt; j++)
+                    if (!want || !want[s] || want[s][i + j]) cb(s, i + j, BXN + (size_t)(j - from) * n, BLOG + (size_t)(j - from) * M.n_vocab, ud);
+            }
+        GRAFT_OFF = 0;
+    }
+    KC = kc0; VC = vc0; SSM = ssm0; CONV = conv0; AD = ad0;
+#ifndef __EMSCRIPTEN__
+    LOOKAHEAD = la0;
+#endif
+    for (int s = 1; s < S; s++) {
+        free(kcs[s]); free(vcs[s]);
+        if (M.recurrent && ssms[s]) { for (int l = 0; l < M.n_layer; l++) { if (ssms[s][l]) free(ssms[s][l]); if (convs[s] && convs[s][l]) free(convs[s][l]); } free(ssms[s]); free(convs[s]); }
+    }
+    free(H); free(off); free(kcs); free(vcs); free(ssms); free(convs);
+    POS = 0; FIRST = 1; SNAP_POS = -1; ACCN = ACCI = 0;   /* the conversation's cache now holds sequence 0 */
+    return ok ? 0 : -1;
 }

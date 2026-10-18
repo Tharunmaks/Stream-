@@ -68,7 +68,7 @@ static int has_flag(int argc, char **argv, const char *name) { for (int i = 0; i
 static const char *positional(int argc, char **argv, int which) {
     static const char *with_value[] = {"-g", "--data", "-o", "--seq", "--k", "--tokens", "--minutes", "-j", "--epochs", "--experts", "--m", "--f",
                                        "--lr", "--elr", "--mlr", "--batch", "--val-every", "--seed", "-c", "-C", "--anchor", "--anchor-weight",
-                                       "--sample", NULL};
+                                       "--sample", "--group", "--examples", "--rank", "--eps", "--steps", "--eval-every", "--min-battery", "--init-seed", "--scale", NULL};
     int k = 0;
     for (int i = 2; i < argc; i++) {
         int opt = argv[i][0] == '-' && argv[i][1];
@@ -122,6 +122,8 @@ static void on_position(int pos, const float *x, const float *lg, void *ud) {
     if (fwrite(r, rec_size(d, kc), 1, c->fp) != 1) { fprintf(stderr, "cannot write the feature file\n"); exit(1); }
     c->written++;
 }
+
+static void on_position_s(int s, int pos, const float *x, const float *lg, void *ud) { on_position(pos, x, lg, (read_ctx *)ud + s); }
 
 /* ---- the memory: contexts of the training examples and what followed them ---- */
 typedef struct { es_mem_ent *e; uint64_t cap, n; } memb;
@@ -379,7 +381,6 @@ static int cmd_read(int argc, char **argv) {
         if (fwrite(z, FEAT_OFF, 1, fp) != 1) die("cannot write %s", out);
     }
     H.skipped = (uint64_t)skipped;
-    uint8_t *want = malloc((size_t)seq + 16);
     read_ctx c = {.fp = fp, .d = d, .K = K, .kc = kc, .nv = nv, .buf = malloc(rec_size(d, kc)), .mem = &mem};
     signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
     const double t0 = now_s();
@@ -387,24 +388,34 @@ static int cmd_read(int argc, char **argv) {
     for (int e = (int)H.n_seq; e < nex; e++) fwd_left += len[e];
     fprintf(stderr, "reading %d examples (%.0f tokens to learn from, %.0f anchor tokens) through the frozen model; every %d-th example is held out for checking\n",
             ndata, learn, anchor_tok, val_every);
-    for (int e = (int)H.n_seq; e < nex; e++) {
+    const int group = atoi(arg_of(argc, argv, "--group", "2048"));   /* tokens read together, layer by layer: a model bigger than RAM is streamed once per group */
+    read_ctx *cs = malloc(sizeof(read_ctx) * 4096);
+    const int32_t **gid = malloc(sizeof(int32_t *) * 4096); int *glen = malloc(sizeof(int) * 4096); uint8_t **gwant = malloc(sizeof(uint8_t *) * 4096);
+    for (int e = (int)H.n_seq; e < nex;) {
         if (STOP || (minutes > 0 && now_s() - t0 > minutes * 60)) break;
-        const int n = len[e];
-        memset(want, 0, (size_t)n);
-        int nw = 0;
-        for (int p = first[e]; p < n - 1; p++) { want[p] = 1; nw++; }
-        c.seq_id = e; c.train = !val[e]; c.anchor = anc[e]; c.ids = pool + off[e]; c.n = n; c.written = 0;
-        if (nw && es_engine_features(c.ids, n, want, on_position, &c)) die("%s", "an example does not fit the context");
+        int S = 0, n = 0, nw = 0;
+        for (; e + S < nex && S < 4096 && (S == 0 || n + len[e + S] <= group); S++) {
+            const int k = e + S;
+            cs[S] = c; cs[S].seq_id = k; cs[S].train = !val[k]; cs[S].anchor = anc[k]; cs[S].ids = pool + off[k]; cs[S].n = len[k]; cs[S].written = 0;
+            gid[S] = pool + off[k]; glen[S] = len[k];
+            gwant[S] = calloc((size_t)len[k], 1);
+            for (int p = first[k]; p < len[k] - 1; p++) { gwant[S][p] = 1; nw++; }
+            n += len[k];
+        }
+        if (es_engine_features_multi(S, gid, glen, (const uint8_t *const *)gwant, NULL, on_position_s, cs)) die("%s", "an example does not fit the context");
         fflush(fp);
-        H.n_rec += c.written; H.n_seq = (uint64_t)e + 1; H.n_tok += (uint64_t)nw;
+        for (int k = 0; k < S; k++) { H.n_rec += cs[k].written; free(gwant[k]); }
+        e += S;
+        H.n_seq = (uint64_t)e; H.n_tok += (uint64_t)nw;
         if (pwrite(fileno(fp), &H, sizeof H, 0) != (ssize_t)sizeof H) die("cannot update %s", out);
         fwd += n; fwd_left -= n;
         const double el = now_s() - t0, rate = fwd / (el > 0 ? el : 1);
-        fprintf(stderr, "\r  %llu/%d examples | the model reads %.2f tokens/s | about %.0f min left ", (unsigned long long)H.n_seq, nex, rate,
-                rate > 0 ? fwd_left / rate / 60 : 0);
+        fprintf(stderr, "\r  %llu/%d examples | the model reads %.2f tokens/s | %.0f MB of experts read | about %.0f min left ", (unsigned long long)H.n_seq, nex, rate,
+                es_engine_flash_mb(), rate > 0 ? fwd_left / rate / 60 : 0);
     }
     fprintf(stderr, "\n");
     fclose(fp);
+    free(cs); free(gid); free(glen); free(gwant);
     if (H.n_rec == 0) die("%s", "no training positions: is the data empty?");
     write_rows(out, d, kc, nv);
     if ((int)H.n_seq < nex) fprintf(stderr, "stopped early: run the same command again to continue\n");
@@ -717,6 +728,7 @@ static void plan_pos(int pos, const float *x, const float *lg, void *ud) {   /* 
     double all = 0; for (int i = 0; i < PL.nv; i++) all += exp((double)lg[i] - lg[top[0]]);
     PL.sink += all + k + pos;
 }
+static void plan_pos_s(int s, int pos, const float *x, const float *lg, void *ud) { (void)s; plan_pos(pos, x, lg, ud); }
 static double train_speed(int d, int kc, int m, int f, int T) {   /* positions per second of the training step, measured */
     es_graft g; char err[64];
     if (es_graft_new(&g, d, m, f, 32, 0, 1000, 1, NULL, err, sizeof err)) return 0;
@@ -764,9 +776,13 @@ static int cmd_plan(int argc, char **argv) {
     if (!X.ndata) die("%s", "no examples in the data");
     /* reading speed: the first examples through the frozen model, exactly as read does it */
     PL.K = K; PL.nv = nv;
-    double done = 0; const double t0 = now_s();
-    for (int e = 0; e < X.nex && done < sample; e++) { es_engine_features(X.pool + X.off[e], X.len[e], NULL, plan_pos, NULL); done += X.len[e]; }
-    const double rs = done / (now_s() - t0);
+    double done = 0; int S = 0;
+    while (S < X.nex && done < sample) done += X.len[S++];
+    const int32_t **gid = malloc(sizeof(int32_t *) * (S ? S : 1)); int *glen = malloc(sizeof(int) * (S ? S : 1));
+    for (int e = 0; e < S; e++) { gid[e] = X.pool + X.off[e]; glen[e] = X.len[e]; }
+    const double t0 = now_s(), f0 = es_engine_flash_mb();
+    es_engine_features_multi(S, gid, glen, NULL, NULL, plan_pos_s, NULL);   /* as read does it: together, layer by layer */
+    const double rs = done / (now_s() - t0), fmb = es_engine_flash_mb() - f0;
     int T = atoi(arg_of(argc, argv, "-j", "0")); if (T <= 0) T = cpu_count();
     const int kc = K + ES_MEM_ORDERS * ES_MEM_PER;
     const double ts = train_speed(d, kc, 64, 256, T);
@@ -780,11 +796,254 @@ static int cmd_plan(int argc, char **argv) {
     printf("  1. read: the frozen model reads %.0f tokens once. Measured here: %.2f tokens/s -> about %s (stop any time, run again to continue)\n",
            X.forward_tok, rs, t1);
     printf("     feature file: %.2f GB on this disk\n", feat_gb);
+    if (fmb > 1) printf("     storage: %.0f MB of experts read for %.0f tokens (the model is bigger than RAM: reading speed depends on storage speed)\n", fmb, done);
     printf("  2. train: about %.0f positions/s on %d threads -> 3 epochs in about %s (the big model is not used again)\n", ts, T, t2);
     printf("  3. use: es_chat -g MODEL -A NAME.esgraft (or es_serve --graft): the graft adds about 1-2 ms per token\n");
+    {   /* the other route: adapters inside the model trained by zo (two forward passes per step, no feature file) */
+        const double ex = X.forward_tok / (X.nex ? X.nex : 1), step_s = 2 * 4 * ex / rs;
+        char t3[64], t4[64]; say_time(t3, sizeof t3, step_s); say_time(t4, sizeof t4, 1000 * step_s);
+        printf("  or zo (adapters inside every layer, no backprop): one step = 4 examples x 2 passes = about %s here; 1,000 steps = about %s\n", t3, t4);
+    }
     printf("honest summary: the model's own weights stay frozen. The graft learns the facts, names, wording and style of your data, and reading\n"
            "the data through the big model once is the slow part. It cannot give the model abilities its weights do not have.\n");
     return 0;
+}
+
+/* ------------------------------------------------------------------ zo: adapters inside the model, trained without backprop
+ * MeZO (Malladi et al. 2023): one random direction z per step, drawn from a seed; the loss with the adapter moved +eps*z and
+ * -eps*z gives the slope g along z; the update is -lr*g*z. Only forward passes, so training needs the memory of running the
+ * model and nothing more: each layer's weights (and experts) are read, used and dropped, exactly as when chatting. A step is
+ * fully described by (seed, g, lr): the step log is all another device needs to replay it (es_graft zo-merge). */
+typedef struct { double sum[2]; long n[2]; const int32_t *const *ids; const int *lane; } zo_acc;
+static void zo_pos(int s, int pos, const float *x, const float *lg, void *ud) {
+    (void)x;
+    zo_acc *a = ud;
+    int nv; { int d; es_engine_dims(&d, &nv); }
+    double mx = lg[0]; for (int i = 1; i < nv; i++) if (lg[i] > mx) mx = lg[i];
+    double z = 0; for (int i = 0; i < nv; i++) z += exp((double)lg[i] - mx);
+    const int ln = a->lane ? a->lane[s] & 1 : 0;
+    a->sum[ln] += mx + log(z) - lg[a->ids[s][pos + 1]];
+    a->n[ln]++;
+}
+/* mean loss of the examples which[0..nw), each run with the adapter versions of the given lanes (NULL: the adapter as it is),
+ * all in one layer-by-layer pass: the model is read once. loss[lane], count[lane]. */
+static void zo_loss2(const examples *X, const int *which, int nw, const int *lanes, int nl, double *loss, long *count) {
+    const int S = nw * nl;
+    const int32_t **ids = malloc(sizeof(int32_t *) * S); int *len = malloc(sizeof(int) * S), *lane = malloc(sizeof(int) * S);
+    uint8_t **want = malloc(sizeof(uint8_t *) * S);
+    for (int k = 0; k < nw; k++)
+        for (int j = 0; j < nl; j++) {
+            const int s = k * nl + j, e = which[k];
+            ids[s] = X->pool + X->off[e]; len[s] = X->len[e]; lane[s] = lanes ? lanes[j] : 0;
+            want[s] = calloc((size_t)len[s], 1);
+            for (int p = X->first[e]; p < len[s] - 1; p++) want[s][p] = 1;
+        }
+    zo_acc a = {{0, 0}, {0, 0}, ids, lanes ? lane : NULL};
+    if (es_engine_features_multi(S, ids, len, (const uint8_t *const *)want, lanes ? lane : NULL, zo_pos, &a)) die("%s", "an example does not fit the context");
+    for (int j = 0; j < 2; j++) { loss[j] = a.n[j] ? a.sum[j] / a.n[j] : 0; if (count) count[j] = a.n[j]; }
+    for (int s = 0; s < S; s++) free(want[s]);
+    free(ids); free(len); free(lane); free(want);
+}
+static double zo_loss(const examples *X, const int *which, int nw, long *count) {   /* in groups of 32 examples */
+    double sum = 0; long n = 0;
+    for (int k = 0; k < nw; k += 32) {
+        double l[2]; long c[2];
+        zo_loss2(X, which + k, nw - k < 32 ? nw - k : 32, NULL, 1, l, c);
+        sum += l[0] * c[0]; n += c[0];
+    }
+    if (count) *count = n;
+    return n ? sum / n : 0;
+}
+static void zo_move(float *th, const float *th0, size_t P, uint64_t seed, float scale) {   /* th = th0 + scale * z(seed) */
+    for (size_t i = 0; i < P; i++) th[i] = th0[i] + scale * es_engine_gauss(seed, i);
+}
+typedef struct { uint64_t seed; float g, lr; } zo_step;
+static int cmd_zo(int argc, char **argv) {
+    const char *data = arg_of(argc, argv, "--data", NULL), *out = arg_of(argc, argv, "-o", NULL);
+    if (!data || !out) die("%s", "usage: es_graft zo -g MODEL.gguf --data FILE.txt|FILE.jsonl -o NAME.esadapt [--steps N] [--minutes M] [--rank 8] [--batch 4] [--lr 1e-3] [--eps 1e-3] [--seed S] [--init-seed S] [--resume] [--plain]");
+    const int seq = atoi(arg_of(argc, argv, "--seq", "256")), rank = atoi(arg_of(argc, argv, "--rank", "8")), B = atoi(arg_of(argc, argv, "--batch", "4"));
+    const int val_every = atoi(arg_of(argc, argv, "--val-every", "20")), eval_every = atoi(arg_of(argc, argv, "--eval-every", "50"));
+    const double steps_max = atof(arg_of(argc, argv, "--steps", "200")), minutes = atof(arg_of(argc, argv, "--minutes", "0")), max_tok = atof(arg_of(argc, argv, "--tokens", "0"));
+    const float lr = (float)atof(arg_of(argc, argv, "--lr", "1e-3")), eps = (float)atof(arg_of(argc, argv, "--eps", "1e-3"));
+    const double min_batt = atof(arg_of(argc, argv, "--min-battery", "0"));
+    if (seq > 512 || seq < 16 || rank < 1 || rank > 64 || B < 1) die("%s", "--seq 16..512, --rank 1..64, --batch >= 1");
+    init_engine(argc, argv, seq + 16);
+    examples X; collect(&X, data, "none", seq, max_tok, val_every);
+    examples A; collect(&A, data, "auto", seq, 1, 1000000);   /* the built-in general text, to see how much it changes */
+    int *tr = malloc(sizeof(int) * X.nex), *va = malloc(sizeof(int) * X.nex), *an = malloc(sizeof(int) * (A.nex + 1)), ntr = 0, nva = 0, nan = 0;
+    for (int e = 0; e < X.nex; e++) { if (X.val[e]) va[nva++] = e; else tr[ntr++] = e; }
+    for (int e = 0; e < A.nex; e++) if (A.anc[e]) an[nan++] = e;
+    if (!ntr) die("%s", "no training examples");
+    char err[512], lp[4096]; snprintf(lp, sizeof lp, "%s.zolog", out);
+    uint64_t seed0 = 0, step = 0;
+    if (has_flag(argc, argv, "--resume") && !access(out, F_OK)) { if (es_engine_adapter_load(out, &seed0, &step, err, sizeof err)) die("%s", err); }
+    else {
+        seed0 = (uint64_t)atoll(arg_of(argc, argv, "--init-seed", "1"));   /* devices that will merge their training start from the same seed */
+        if (es_engine_adapter_new(rank, seed0)) die("%s", "out of memory for the adapter");
+        char sp[4096]; snprintf(sp, sizeof sp, "%s.start", out);   /* the common start: every device's log is replayed on it */
+        if (es_engine_adapter_save(sp, 0, err, sizeof err)) die("%s", err);
+        FILE *lf = fopen(lp, "wb"); if (!lf) die("cannot write %s", lp);
+        const uint64_t hdr[2] = {es_engine_fingerprint(), seed0};
+        fwrite("ESZOLOG1", 1, 8, lf); fwrite(hdr, sizeof hdr, 1, lf); fclose(lf);
+    }
+    const size_t P = es_engine_adapter_count();
+    float *th = es_engine_adapter_params(), *th0 = malloc(sizeof(float) * P), *tp = malloc(sizeof(float) * P), *tm = malloc(sizeof(float) * P);
+    memcpy(th0, th, sizeof(float) * P);
+    es_engine_info in; es_engine_get_info(&in);
+    fprintf(stderr, "adapter: rank %d after each of %d layers = %.2fM trainable numbers; the model's own weights stay frozen\n", es_engine_adapter_rank(), in.layers, P / 1e6);
+    fprintf(stderr, "data: %d training and %d held-out examples | %d per step, 2 forward passes each | lr %g, eps %g\n", ntr, nva, B, lr, eps);
+    long nt;
+    const double t_eval = now_s();
+    const double v0 = nva ? zo_loss(&X, va, nva, &nt) : 0, a0 = nan ? zo_loss(&A, an, nan, NULL) : 0;
+    const double eval_s = now_s() - t_eval;
+    if (nva) fprintf(stderr, "held out at the start: %.4f (perplexity %.2f), %ld tokens | general text %.4f | %.0f s to evaluate\n", v0, exp(v0), nt, a0, eval_s);
+    signal(SIGINT, on_sig); signal(SIGTERM, on_sig);
+    FILE *lf = fopen(lp, "ab");
+    const double t0 = now_s(); double toks = 0, run = 0; int rn = 0;
+    uint64_t done = 0;
+    int *bt = malloc(sizeof(int) * B);
+    const int norm = !has_flag(argc, argv, "--plain");   /* --plain: MeZO as published */
+    /* the directions and batches: devices that will merge use different --seed values; a resumed run continues the same stream */
+    RNGS ^= (uint64_t)atoll(arg_of(argc, argv, "--seed", "0")) * 0x9e3779b97f4a7c15ull;
+    for (uint64_t i = 0; i < step * (uint64_t)(B + 1); i++) rnd();
+    double g2 = 0, gabs = 0;
+    for (; done < steps_max && !STOP; done++, step++) {
+        if (minutes > 0 && now_s() - t0 > minutes * 60) break;
+        if (min_batt > 0) {   /* phone: pause while the battery is low and not charging */
+            for (;;) {
+                FILE *bf = fopen("/sys/class/power_supply/battery/capacity", "r"), *sf = fopen("/sys/class/power_supply/battery/status", "r");
+                int cap = 100; char st[32] = "Charging";
+                if (bf) { if (fscanf(bf, "%d", &cap) != 1) cap = 100; fclose(bf); }
+                if (sf) { if (!fgets(st, sizeof st, sf)) strcpy(st, "Charging"); fclose(sf); }
+                if (cap >= min_batt || !strncmp(st, "Charging", 8) || !strncmp(st, "Full", 4) || STOP) break;
+                fprintf(stderr, "\r  paused: battery %d%% and not charging ", cap); sleep(60);
+            }
+        }
+        const uint64_t seed = rnd();
+        for (int k = 0; k < B; k++) bt[k] = tr[rnd() % (uint64_t)ntr];
+        /* both perturbed versions in one layer-by-layer pass: each layer (and expert) is read once for the whole step */
+        zo_move(tp, th0, P, seed, eps); zo_move(tm, th0, P, seed, -eps);
+        es_engine_adapter_lanes(tp, tm);
+        static const int lanes[2] = {0, 1};
+        double L2[2]; long C2[2];
+        zo_loss2(&X, bt, B, lanes, 2, L2, C2);
+        es_engine_adapter_lanes(NULL, NULL);
+        const double lp_ = L2[0], lm = L2[1]; const long c1 = C2[0], c2 = C2[1];
+        /* the slope along z, divided by its running size and clipped: one noisy loss difference cannot throw the adapter
+         * far (plain MeZO diverged at step sizes that learn at a useful speed) */
+        const double graw = (lp_ - lm) / (2.0 * eps);
+        g2 = g2 == 0 ? graw * graw : 0.95 * g2 + 0.05 * graw * graw;
+        double gn = graw / sqrt(g2 + 1e-12);
+        if (gn > 3) gn = 3;
+        if (gn < -3) gn = -3;
+        const float g = (float)(norm ? gn : graw);
+        gabs += fabs(graw);
+        zo_move(th0, th0, P, seed, -lr * g); memcpy(th, th0, sizeof(float) * P); es_engine_adapter_changed();
+        const zo_step rec = {seed, g, lr};
+        if (lf) { fwrite(&rec, sizeof rec, 1, lf); fflush(lf); }
+        toks += c1 + c2; run += 0.5 * (lp_ + lm); rn++;
+        if ((done + 1) % eval_every == 0 || done + 1 == steps_max) {
+            const double el = now_s() - t0;
+            fprintf(stderr, "  step %llu | train loss %.4f | mean |slope| %.3g | %.1f s per step, %.0f tokens/s through the model", (unsigned long long)step + 1, run / rn,
+                    gabs / rn, el / (done + 1), toks / el);
+            gabs = 0;
+            if (nva) { const double v = zo_loss(&X, va, nva, NULL); fprintf(stderr, " | held out %.4f", v); }
+            fprintf(stderr, "\n");
+            run = 0; rn = 0;
+            if (es_engine_adapter_save(out, step + 1, err, sizeof err)) die("%s", err);
+        }
+    }
+    if (lf) fclose(lf);
+    if (es_engine_adapter_save(out, step, err, sizeof err)) die("%s", err);
+    const double v1 = nva ? zo_loss(&X, va, nva, NULL) : 0, a1 = nan ? zo_loss(&A, an, nan, NULL) : 0;
+    fprintf(stderr, "trained %llu steps in %.1f min\n", (unsigned long long)done, (now_s() - t0) / 60);
+    if (nva) fprintf(stderr, "held out: %.4f -> %.4f (perplexity %.2f -> %.2f, %+.1f%%) | general text %.4f -> %.4f\n", v0, v1, exp(v0), exp(v1), 100 * (exp(v1 - v0) - 1), a0, a1);
+    printf("RESULT steps=%llu minutes=%.1f held_out_before=%.5f held_out_after=%.5f general_before=%.5f general_after=%.5f\n", (unsigned long long)done, (now_s() - t0) / 60, v0, v1, a0, a1);
+    fprintf(stderr, "saved %s and its step log %s. Use it: es_chat -g MODEL.gguf -Z %s   (es_serve: --adapter)\n", out, lp, out);
+    return 0;
+}
+
+/* Merge what other devices trained: replay their step logs (16 bytes per step) on this adapter. No model weights move and
+ * no data leaves a device; the logs only say "move along the direction from seed s by this much". */
+static int cmd_zo_merge(int argc, char **argv) {
+    const char *base = positional(argc, argv, 0), *out = arg_of(argc, argv, "-o", NULL);
+    const double scale = atof(arg_of(argc, argv, "--scale", "1"));
+    if (!base || !out) die("%s", "usage: es_graft zo-merge START.esadapt LOG1.zolog [LOG2.zolog ...] -o MERGED.esadapt [--scale 0.5]");
+    FILE *f = fopen(base, "rb"); if (!f) die("cannot open %s", base);
+    char mg[8]; uint32_t h[4]; uint64_t q[3];
+    if (fread(mg, 8, 1, f) != 1 || memcmp(mg, "ESADAPT1", 8) || fread(h, sizeof h, 1, f) != 1 || fread(q, sizeof q, 1, f) != 1) die("%s is not an adapter", base);
+    const size_t P = (size_t)h[1] * 2 * h[3] * h[2];
+    float *th = malloc(sizeof(float) * P);
+    if (!th || fread(th, sizeof(float), P, f) != P) die("%s is cut short", base);
+    fclose(f);
+    uint64_t steps = q[2];
+    for (int k = 1;; k++) {
+        const char *lg = positional(argc, argv, k);
+        if (!lg) break;
+        FILE *lf = fopen(lg, "rb"); if (!lf) die("cannot open %s", lg);
+        uint64_t hdr[2];
+        if (fread(mg, 8, 1, lf) != 1 || memcmp(mg, "ESZOLOG1", 8) || fread(hdr, sizeof hdr, 1, lf) != 1) die("%s is not a step log", lg);
+        if (hdr[0] != q[0]) die("%s belongs to another model", lg);
+        if (hdr[1] != q[1]) die("%s started from another adapter (other --init-seed): merging needs the same start", lg);
+        zo_step r; long n = 0;
+        while (fread(&r, sizeof r, 1, lf) == 1) { const float s = (float)(-r.lr * r.g * scale); for (size_t i = 0; i < P; i++) th[i] += s * es_engine_gauss(r.seed, i); n++; }
+        fclose(lf);
+        steps += (uint64_t)n;
+        fprintf(stderr, "%s: %ld steps replayed\n", lg, n);
+    }
+    f = fopen(out, "wb"); if (!f) die("cannot write %s", out);
+    q[2] = steps;
+    fwrite("ESADAPT1", 1, 8, f); fwrite(h, sizeof h, 1, f); fwrite(q, sizeof q, 1, f);
+    if (fwrite(th, sizeof(float), P, f) != P || fclose(f)) die("cannot write %s", out);
+    fprintf(stderr, "wrote %s\n", out);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ multicheck: many sequences layer by layer = one at a time */
+static struct { float *ref; size_t *at; int nv; int which; double worst; long n; } MC;
+static void mc_single(int pos, const float *x, const float *lg, void *ud) { (void)x; (void)ud; (void)pos; memcpy(MC.ref + MC.at[MC.which]++ * (size_t)MC.nv, lg, sizeof(float) * MC.nv); }
+static void mc_multi(int s, int pos, const float *x, const float *lg, void *ud) {
+    (void)x; (void)ud; (void)pos;
+    const float *r = MC.ref + MC.at[s]++ * (size_t)MC.nv;
+    for (int i = 0; i < MC.nv; i++) { const double d = fabs((double)r[i] - lg[i]); if (d > MC.worst) MC.worst = d; }
+    MC.n++;
+}
+static int cmd_multicheck(int argc, char **argv) {
+    const char *data = arg_of(argc, argv, "--data", NULL);
+    const int K = atoi(arg_of(argc, argv, "--examples", "6")), seq = atoi(arg_of(argc, argv, "--seq", "128"));
+    if (!data) die("%s", "usage: es_graft multicheck -g MODEL.gguf --data FILE [--examples 6] [--adapter]");
+    init_engine(argc, argv, seq + 16);
+    int d; es_engine_dims(&d, &MC.nv);
+    examples X; collect(&X, data, "none", seq, 0, 0);
+    const int S = X.nex < K ? X.nex : K;
+    size_t tot = 0; for (int e = 0; e < S; e++) tot += (size_t)X.len[e];
+    MC.ref = malloc(sizeof(float) * tot * MC.nv); MC.at = calloc((size_t)S, sizeof(size_t));
+    size_t base = 0; size_t *start = malloc(sizeof(size_t) * S);
+    const int with_ad = has_flag(argc, argv, "--adapter");
+    float *alt = NULL;
+    if (with_ad) {   /* a nonzero adapter, and a second version for odd sequences (the two MeZO passes) */
+        es_engine_adapter_new(4, 7);
+        float *p = es_engine_adapter_params(); const size_t P = es_engine_adapter_count();
+        alt = malloc(sizeof(float) * P);
+        for (size_t i = 0; i < P; i++) { p[i] += 0.05f * es_engine_gauss(11, i); alt[i] = p[i] + 0.05f * es_engine_gauss(12, i); }
+        es_engine_adapter_changed();
+    }
+    float *main_ad = with_ad ? malloc(sizeof(float) * es_engine_adapter_count()) : NULL;
+    if (with_ad) memcpy(main_ad, es_engine_adapter_params(), sizeof(float) * es_engine_adapter_count());
+    for (int e = 0; e < S; e++) {   /* one at a time, the ordinary way */
+        start[e] = base; MC.at[e] = base; MC.which = e;
+        if (with_ad) { memcpy(es_engine_adapter_params(), (e & 1) ? alt : main_ad, sizeof(float) * es_engine_adapter_count()); es_engine_adapter_changed(); }
+        es_engine_features(X.pool + X.off[e], X.len[e], NULL, mc_single, NULL);
+        base += (size_t)X.len[e];
+    }
+    if (with_ad) { memcpy(es_engine_adapter_params(), main_ad, sizeof(float) * es_engine_adapter_count()); es_engine_adapter_changed(); es_engine_adapter_lanes(main_ad, alt); }
+    const int32_t **ids = malloc(sizeof(int32_t *) * S); int *len = malloc(sizeof(int) * S), *lane = malloc(sizeof(int) * S);
+    for (int e = 0; e < S; e++) { ids[e] = X.pool + X.off[e]; len[e] = X.len[e]; lane[e] = e & 1; MC.at[e] = start[e]; }
+    const double f0 = es_engine_flash_mb();
+    es_engine_features_multi(S, ids, len, NULL, with_ad ? lane : NULL, mc_multi, NULL);
+    printf("%d sequences, %ld positions: largest score difference, layer by layer vs one at a time: %.3g (expert data read: %.0f MB)\n", S, MC.n, MC.worst, es_engine_flash_mb() - f0);
+    printf("MULTICHECK %s\n", MC.worst == 0 ? "OK (bit-identical)" : MC.worst < 1e-3 ? "OK" : "MISMATCH");
+    return MC.worst < 1e-3 ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ check: the engine runs the graft as training assumed */
@@ -957,6 +1216,8 @@ int main(int argc, char **argv) {
                         "  es_graft train my.esfeat -o my.esgraft [--epochs 3] [--minutes M] [--m 64] [--experts N] [-j T]\n"
                         "  es_graft eval  my.esfeat my.esgraft\n"
                         "  es_graft check -g MODEL.gguf my.esgraft --data text.txt\n"
+                        "  es_graft zo    -g MODEL.gguf --data FILE -o my.esadapt [--steps N] [--rank 8]   adapters inside the model, no backprop (MeZO)\n"
+                        "  es_graft zo-merge START.esadapt A.zolog B.zolog -o merged.esadapt      merge other devices' training from their step logs\n"
                         "  es_graft selftest\n"
                         "then: es_chat -g MODEL.gguf -A my.esgraft   or   es_serve -g MODEL.gguf --graft my.esgraft\n");
         return 2;
@@ -967,6 +1228,9 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "eval")) return cmd_eval(argc, argv);
     if (!strcmp(argv[1], "check")) return cmd_check(argc, argv);
     if (!strcmp(argv[1], "plan")) return cmd_plan(argc, argv);
+    if (!strcmp(argv[1], "zo")) return cmd_zo(argc, argv);
+    if (!strcmp(argv[1], "multicheck")) return cmd_multicheck(argc, argv);
+    if (!strcmp(argv[1], "zo-merge")) return cmd_zo_merge(argc, argv);
     if (!strcmp(argv[1], "selftest")) return cmd_selftest();
     die("unknown command %s", argv[1]);
     return 2;

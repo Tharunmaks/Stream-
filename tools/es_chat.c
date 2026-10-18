@@ -72,17 +72,17 @@ static void usage(void) {
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
             "               [-c context=2048] [-C cache_mb=1024] [-j threads=auto (fast cores)] [-s seed]\n"
             "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n"
-            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on]\n               Graft: [-A my.esgraft  a graft trained with es_graft]\n");
+            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on]\n               Graft: [-A my.esgraft  a graft trained with es_graft] [-Z my.esadapt  an adapter trained with es_graft zo]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
     es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 0, .lookahead = 1, .warm = 1};
-    const char *prompt = NULL, *dump_ids = NULL, *dump_path = NULL, *graft = NULL;
+    const char *prompt = NULL, *dump_ids = NULL, *dump_path = NULL, *graft = NULL, *adapter = NULL;
     int max_new = 256, raw = 0, top_k = 40, opt;
     float temp = 0.7f, top_p = 0.9f;
     uint64_t seed = 42;
-    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:S:A:")) != -1) {
+    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:S:A:Z:")) != -1) {
         switch (opt) {
         case 'm': o.pack = optarg; break;
         case 'g': o.gguf = optarg; break;
@@ -107,6 +107,7 @@ int main(int argc, char **argv) {
         case 'i': o.io_threads = atoi(optarg); break;
         case 'S': o.spec = atoi(optarg); if (o.spec == 0) o.spec = -2; break;   /* Turbo: longest guess per step, -S 0 = off */
         case 'A': graft = optarg; break;                     /* a graft trained with es_graft */
+        case 'Z': adapter = optarg; break;                   /* an adapter trained with es_graft zo */
         default: usage();
         }
     }
@@ -123,6 +124,10 @@ int main(int argc, char **argv) {
           in.core_mb, in.load_s, in.cache_slots, in.cache_mb, in.ctx, in.kv_mb);
     STAGE("      %s | RAM now %ld MB\n", o.pack ? "experts from the pack" : in.experts && !in.cache_slots ? "whole model mapped in RAM (zero copy)" : "experts read straight from the GGUF", es_rss_mb());
     if (in.remote) STAGE("      %s\n", in.remote);
+    if (adapter) {
+        if (es_engine_adapter_load(adapter, NULL, NULL, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
+        STAGE("      adapter %s: inside every layer of the frozen model\n", adapter);
+    }
     if (graft) {
         if (es_engine_set_graft(graft, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
         STAGE("      graft %s: on top of the frozen model\n", graft);

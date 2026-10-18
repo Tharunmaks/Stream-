@@ -92,6 +92,22 @@ uint64_t es_engine_fingerprint(void);
 void es_engine_dims(int *n_embd, int *n_vocab);
 const char *es_engine_arch(void);
 int  es_engine_output_raw(uint32_t *type, const uint8_t **data, size_t *row_bytes);
+/* ---- Adapter: a small residual adapter after every layer, trained without backpropagation (es_graft zo) ---- */
+int    es_engine_adapter_new(int rank, uint64_t seed);                 /* A random from seed, B = 0 (changes nothing yet) */
+int    es_engine_adapter_load(const char *path, uint64_t *seed, uint64_t *steps, char *err, size_t cap);
+int    es_engine_adapter_save(const char *path, uint64_t steps, char *err, size_t cap);
+size_t es_engine_adapter_count(void);                                 /* its numbers ... */
+float *es_engine_adapter_params(void);                                /* ... which may be changed in place, then: */
+void   es_engine_adapter_changed(void);                               /* forget everything computed with the old numbers */
+int    es_engine_adapter_rank(void);
+float  es_engine_gauss(uint64_t seed, uint64_t i);                    /* N(0,1), identical on every device */
+void   es_engine_adapter_lanes(float *lane0, float *lane1);           /* adapter versions for es_engine_features_multi (NULL = the adapter) */
+/* Several sequences through the model layer by layer: each layer's weights and experts are read once for all of them (a model
+ * bigger than RAM is streamed once per group instead of once per 64 tokens). cb(s, pos, ...) as es_engine_features. lane[s]
+ * picks the adapter version of sequence s (NULL: all the same). Same numbers as one sequence at a time. */
+int    es_engine_features_multi(int S, const int32_t *const *ids, const int *len, const uint8_t *const *want, const int *lane,
+                                void (*cb)(int s, int pos, const float *x, const float *logits, void *ud), void *ud);
+double es_engine_flash_mb(void);                                      /* expert data read from storage so far, MB */
 /* Remember which experts were used (read back by warm start). */
 void es_engine_save_profile(void);
 

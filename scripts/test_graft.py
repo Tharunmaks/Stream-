@@ -8,6 +8,8 @@
 3. check: the engine runs the graft exactly as training computed it (batched reading vs one-token-at-a-time generation).
 4. the held-out wording of every question, answered greedily: right facts with the graft vs without.
 5. general questions (not in the data, not in the built-in anchors): the graft must keep the base model's answers.
+6. many sequences layer by layer (one read of each layer for all) = one sequence at a time, bit for bit, also with two adapter versions.
+7. zo (MeZO adapters): a few steps, stopped and resumed; replaying the 16-byte step log on the start reproduces the adapter bit for bit.
 """
 import json
 import os
@@ -98,5 +100,15 @@ with tempfile.TemporaryDirectory(prefix='es_graft_test_') as d:
     check('4 answers new facts', g >= 0.8 * len(test) and g > b, 'right facts: base model %d/%d, with graft %d/%d' % (b, len(test), g, len(test)))
     b, g = ask(GENERAL), ask(GENERAL, graft)
     check('5 keeps general knowledge', g >= b - 1, 'general questions right: base model %d/%d, with graft %d/%d' % (b, len(GENERAL), g, len(GENERAL)))
+    r = subprocess.run([G, 'multicheck', '-g', MODEL, '--data', data, '--examples', '5', '--adapter'], capture_output=True, text=True)
+    check('6 layer by layer = one at a time', r.returncode == 0 and 'bit-identical' in r.stdout, r.stdout.strip().splitlines()[0] if r.stdout else r.stderr[-200:])
+    ad = os.path.join(d, 'z.esadapt')
+    zo = [G, 'zo', '-g', MODEL, '--data', data, '-o', ad, '--steps', '2', '--eval-every', '2', '--batch', '2', '--seq', '128', '--val-every', '4']
+    r = subprocess.run(zo, capture_output=True, text=True)
+    r1 = subprocess.run(zo + ['--resume'], capture_output=True, text=True)   # stopped and continued
+    r2 = subprocess.run([G, 'zo-merge', ad + '.start', ad + '.zolog', '-o', ad + '.merged'], capture_output=True, text=True)
+    same = r.returncode == 0 and r1.returncode == 0 and r2.returncode == 0 and open(ad, 'rb').read() == open(ad + '.merged', 'rb').read()
+    check('7 zo step log replays exactly', same, (r.stderr + r1.stderr + r2.stderr).strip().splitlines()[-1] if not same else
+          '2 steps + 2 resumed: the adapter file reproduced from 64 bytes of step log')
 print('ALL PASSED' if not bad else '%d FAILED' % bad)
 sys.exit(1 if bad else 0)
