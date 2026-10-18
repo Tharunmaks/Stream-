@@ -25,7 +25,7 @@ So the graft teaches the model *your* facts, names, wording and style. It cannot
 
 | Step | What runs | Cost |
 |---|---|---|
-| 1. `es_graft read` | The frozen model reads your data (and the anchors) once, in batches of 64 tokens. For every position it saves the final hidden state and the base model's top-32 candidates and scores in a feature file. | The model's prompt-reading speed. This is the slow part for a 200B model, and it is resumable. |
+| 1. `es_graft read` | The frozen model reads your data (and the anchors) once. Examples go through it in groups of up to 2,048 tokens, layer by layer, so a model bigger than RAM streams its experts once per group, not once per 64 tokens (measured: 10x fewer bytes read). For every position it saves the final hidden state and the base model's top-32 candidates and scores in a feature file. | The model's prompt-reading speed. This is the slow part for a 200B model, and it is resumable. |
 | 2. `es_graft train` | The graft trains from the feature file only; the big model is not used again. | The same for a 1B and a 235B model. Measured: about 9,500 tokens/s on 4 cores of a PC. |
 | 3. `es_chat -A` / `es_serve --graft` | The frozen model plus the graft on every token. | About 1-2 ms per token: Qwen2.5-0.5B generated 33.3 -> 31.5 tokens/s; for OLMoE (7B) the difference was within noise. |
 
@@ -49,7 +49,7 @@ Chat examples use the model's own chat template, and only the answer is learned.
 about: every 20th example (`--val-every`) is held out to measure what the graft really learned.
 
 Options:
-* `read`: `--seq 512` (example length), `--k 32` (candidates), `--tokens N`, `--minutes M`, `--anchor auto|none|FILE`, `--no-memory`.
+* `read`: `--seq 512` (example length), `--k 32` (candidates), `--tokens N`, `--minutes M`, `--anchor auto|none|FILE`, `--no-memory`, `--group 2048` (tokens per layer-by-layer group).
 * `train`: `--epochs 3`, `--minutes M`, `--anchor-weight 3`, `--m 64` (graft width), `--resume`, `--experts N` (hashed memory experts on flash; experimental, see below).
 
 ## Measured (4-core x86 PC; phone not measured yet)
@@ -80,6 +80,11 @@ engine runs; how long reading takes on your device is what `plan` measures.
 
 Hashed memory experts in a sparse file on flash (`--experts N`, Engram-style) are implemented and gradient-checked, but they gave no
 measurable gain in any test above (facts: the same 119/120 and 23/24, held-out loss 0.0054 vs 0.0055). They are off by default.
+
+## Changing the inside of the model
+
+The graft works on the model's output. To change the layers themselves without backpropagation, see [zo.md](zo.md):
+MeZO adapters, layer-by-layer reading and federated merging, with measurements.
 
 ## Honest limits
 

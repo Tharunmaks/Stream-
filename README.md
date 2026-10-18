@@ -75,6 +75,14 @@ about 1e-6). Honest limits: reading the data through a 200B model on a phone tak
 facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
 `python3 scripts/test_graft.py MODEL.gguf`.
 
+**Layer-by-layer reading and training inside the model (MeZO).** For models bigger than RAM, `es_graft read` and `es_graft zo` run
+groups of examples through the model layer by layer (as FlexGen does): each layer's experts are read from flash once for the whole group.
+Outputs are bit-identical to one sequence at a time on every architecture, and the bytes read fell 10.4x for OLMoE (`es_graft multicheck`).
+`es_graft zo` trains small adapters inside every layer with MeZO: two forward passes per step, no backpropagation, the memory of running the
+model. Every step is 16 bytes (seed, slope, step size), so devices can merge their training by replaying each other's step logs
+(`es_graft zo-merge`, bit-identical). Measured honestly: on SmolLM2-135M it lowered held-out perplexity by 1.9% in 17 minutes, where the
+graft gave 17.3% in 74 seconds. Details: [`craft/skills/expert-craft/zo.md`](craft/skills/expert-craft/zo.md).
+
 **Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
 Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
 `curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.
