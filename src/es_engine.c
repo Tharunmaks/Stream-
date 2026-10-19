@@ -910,7 +910,7 @@ static void attention_n(int l, int N, int pos0) {
             float *q = BQ + (size_t)i * qd, *k = BKV + (size_t)i * kvd, *v = BV2 + (size_t)i * kvd;
             add_bias(q, &L->bq, qd); add_bias(k, &L->bk, kvd); add_bias(v, &L->bv, kvd);
             if (L->q_norm.data) {
-                if (L->q_norm.cols == n) rmsnorm(q, q, L->q_norm.data, qd, M.eps);
+                if (L->q_norm.cols == qd && qd != hd) rmsnorm(q, q, L->q_norm.data, qd, M.eps);
                 else for (int h = 0; h < M.n_head; h++) rmsnorm(q + h * hd, q + h * hd, L->q_norm.data, hd, M.eps);
             }
             if (L->k_norm.data) {
