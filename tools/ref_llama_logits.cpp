@@ -8,7 +8,7 @@ int main(int argc, char **argv) {
     llama_backend_init();
     auto mp = llama_model_default_params();
     llama_model *m = llama_model_load_from_file(argv[1], mp);
-    auto cp = llama_context_default_params(); cp.n_ctx = 512; cp.n_batch = 512; cp.n_threads = 4; if (getenv("KVF32")) { cp.type_k = GGML_TYPE_F32; cp.type_v = GGML_TYPE_F32; }
+    auto cp = llama_context_default_params(); cp.n_ctx = 512; cp.n_batch = 512; cp.n_threads = 4; if (getenv("KVF32")) { cp.type_k = GGML_TYPE_F32; cp.type_v = GGML_TYPE_F32; cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED; }   // exact: no 16-bit rounding
     llama_context *ctx = llama_init_from_model(m, cp);
     std::vector<llama_token> toks; for (int i = 3; i < argc; i++) toks.push_back(atoi(argv[i]));
     int nv = llama_vocab_n_tokens(llama_model_get_vocab(m));

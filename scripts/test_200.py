@@ -4,10 +4,11 @@
     make es_chat es_get && python3 scripts/test_200.py --llama-cpp ./llama.cpp [--tier mini|small|big|all] [--work DIR] [--resume]
 
 Three tiers, each checked against something independent:
-  mini   91 small random models, 7 per design (Llama, Mistral, Qwen2, Qwen3, Qwen2-MoE, Qwen3-MoE, Mixtral, OLMoE, gpt-oss,
+  mini   105 small random models, 7 per design (Llama, Mistral, Qwen2, Qwen3, Qwen2-MoE, Qwen3-MoE, Mixtral, OLMoE, gpt-oss,
          DeepSeek V2, DeepSeek V3, Qwen3.5 dense and MoE), with shapes, attention layouts, expert counts, routing and rope
          settings drawn from what real models use. Built with Hugging Face transformers, converted with llama.cpp's
          convert_hf_to_gguf.py, run by es_chat: every logit must match PyTorch (float32, exact activations).
+         Plus 7 Kimi K3 designs (scripts/tiny_kimi_k3.py), each checked twice against llama.cpp in exact mode.
   small  real GGUF files (scripts/models_200.json), many quantizations, downloaded whole, run on a real text: the engine's
          8-bit activation rounding must be no worse than llama.cpp's (each measured as KL against the engine with exact
          activations), and engine and llama.cpp (same file, same token ids) may differ only by those roundings. Also perplexity.
@@ -283,6 +284,38 @@ def run_mini():
                     if os.path.exists(f): os.remove(f)
 
 
+def run_mini_k3():
+    """Kimi K3 has no PyTorch reference here: tiny random GGUFs (scripts/tiny_kimi_k3.py) against llama.cpp, both exact (float32
+    weights and activations, llama.cpp with a float32 cache and no flash attention). Each design is checked twice: without the
+    cross-layer residual mix to a strict tolerance, and with it to a looser one, because that mix is a softmax that amplifies
+    float32 rounding (reordering only the engine's own rounding there moves the logits by as much as llama.cpp differs)."""
+    ref = ref_tool()
+    for v in range(7):
+        for strict in (True, False):
+            out = os.path.join(W, 'k3.gguf')
+            r = subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'tiny_kimi_k3.py'), out, tokdir('qwen'), '--seed', str(v)] + (['--no-res'] if strict else []),
+                               capture_output=True, text=True)
+            if r.returncode: record('mini', 'mini kimi-k3   #%d%s' % (v + 1, 'a' if strict else 'b'), False, 'generator failed: ' + r.stderr.strip()[-150:]); continue
+            c = json.loads(r.stdout.strip().splitlines()[-1])
+            name = 'mini kimi-k3   #%d%s L%d d%d h%d kda%d E%d k%d lat%d %s kv%s' % (v + 1, 'a' if strict else 'b', c['n_layer'], c['n_embd'], c['heads'], c['kda_head'],
+                                                                         c['experts'], c['used'], c['latent'], 'no-res' if strict else 'res%d' % c['res_block'], ''.join(map(str, c['kv'])))
+            if not want(name): continue
+            try:
+                ids = random.Random(v).sample(range(10, 30000), 24)
+                a, err, _ = engine_logits(out, ids, {'ES_FLOAT_ACT': '1'}, ('-q', '-j', '2'))
+                if a is None: record('mini', name, False, 'engine failed: ' + (err.strip().splitlines() or ['?'])[-1][:150]); continue
+                rb = os.path.join(W, 'ref.bin')
+                if os.path.exists(rb): os.remove(rb)
+                rr = subprocess.run([ref, out, rb, *map(str, ids)], env=dict(os.environ, KVF32='1'), capture_output=True, text=True)
+                if rr.returncode or not os.path.exists(rb): record('mini', name, False, 'llama.cpp failed: ' + (rr.stderr.strip().splitlines() or ['?'])[-1][:150]); continue
+                b = np.fromfile(rb, dtype=np.float32).reshape(len(ids), -1)[:, :a.shape[1]]
+                d = float(np.abs(a - b).max()); scale = float(np.abs(b).max())
+                ok = d <= (2e-5 if strict else 1e-3) * max(1.0, scale) and (a.argmax(1) == b.argmax(1)).all()
+                record('mini', name, ok, 'vs llama.cpp: max |logit difference| %.2e (logits up to %.1f), %d positions' % (d, scale, len(ids)), diff=d, scale=scale)
+            finally:
+                if os.path.exists(out): os.remove(out)
+
+
 # ------------------------------------------------------------------------------------------------ small: real models vs llama.cpp
 TEXT = ('The old lighthouse keeper climbed the spiral stairs every evening at sunset. He lit the great lamp, wrote the weather in '
         'his logbook, and watched the ships pass safely around the rocky point. In 1912 the light was replaced by an electric one, '
@@ -382,7 +415,7 @@ def run_big(models):
 
 
 lists = json.load(open(os.path.join(ROOT, 'scripts', 'models_200.json')))
-if args.tier in ('mini', 'all'): run_mini()
+if args.tier in ('mini', 'all'): run_mini(); run_mini_k3()
 if args.tier in ('small', 'all'): run_small(lists['small'])
 if args.tier in ('big', 'all'): run_big(lists['big'])
 

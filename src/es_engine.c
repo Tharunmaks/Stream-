@@ -46,7 +46,7 @@ static int BATCH_OK;
 /* ---------------- weights ---------------- */
 typedef struct { uint32_t type; int rows, cols; const void *data; } W;
 
-enum { AR_STD, AR_GPTOSS, AR_DS2, AR_QWEN35 };
+enum { AR_STD, AR_GPTOSS, AR_DS2, AR_QWEN35, AR_K3 };
 enum { GATE_SOFTMAX, GATE_SIGMOID, GATE_SOFTMAX_CHOSEN };
 
 typedef struct {
@@ -59,6 +59,9 @@ typedef struct {
     W gate_inp_b, exp_probs_b;                /* router bias (gpt-oss); expert selection bias (DeepSeek-V3) */
     W gate_exps_b, up_exps_b, down_exps_b;    /* per-expert biases (gpt-oss) */
     W qkv, zgate, conv1d, dt_b, ssm_a, ssm_beta, ssm_alpha, ssm_norm, ssm_out;   /* Gated DeltaNet layer (Qwen3.5) */
+    W conv_q, conv_k, conv_v, f_a, f_b, kda_g;  /* Kimi K3 delta attention: q/k/v convolutions, decay gate, output gate */
+    W o_gate, res_attn, res_ffn;               /* Kimi K3: MLA output gate; cross-layer residual scores */
+    W routed_down, routed_up, routed_norm;     /* Kimi K3: experts work in a smaller latent space */
     int moe, swa, recr;
 } layer;
 
@@ -83,6 +86,10 @@ typedef struct {
     int recurrent, conv_k, conv_dim, hk, dk_l, hv, dv_l, attn_gated;
     /* attention geometry: dk/dv per head inside attention, kvk/kvv floats per cached position, qd = Q floats per token, od = o input */
     int dk, dv, kvk, kvv, qd, od;
+    int mla;                                  /* DeepSeek-style latent attention (DeepSeek V2/V3, Kimi K2/K3) */
+    /* Kimi K3: situ activation, cross-layer residual mixing every res_bs layers, decay gate bound, expert latent width */
+    float situ_b, situ_lb, kda_lb; int res_bs, n_lat;
+    W output_res;
     W tok_embd, output, output_norm;
     layer *L;
     uint8_t **tptr;     /* RAM copy of each non-expert tensor, by tensor index */
@@ -229,6 +236,10 @@ static float *KC, *VC;   /* [kv layer][ctx][kvk] and [kv layer][ctx][kvv] (no VC
 static int *KVI, NKVL;   /* cache index of each layer (-1: a recurrent layer, which keeps a state instead) and the number of cached layers */
 static float **SSM, **CONV, **SSM_SNAP, **CONV_SNAP; static int SNAP_POS = -1;   /* recurrent states, and a copy at the end of the last prompt */
 static float *BQKV, *BZ, *BBETA, *BALPHA, *BLIN, *BGATE;
+static float *BFA, *BLAT, *BLATO;   /* Kimi K3: decay-gate bottleneck; expert input and output in the latent space */
+/* Kimi K3 cross-layer residuals: per token, the layer inputs banked every res_bs layers ([token][checkpoint][n_embd]).
+ * RESP points at the stacks of the tokens now in BX (RESB, or per sequence in es_engine_features_multi). */
+static float *RESB, *RESP; static int RES_NCK;
 /* batch buffers: up to BMAX tokens */
 static float *BX, *BXN, *BTMP, *BQ, *BQA, *BKV, *BQM, *BATL, *BATTN, *BGU, *BH, *BYE, *BROUT, *BLOG, *BV2;
 static es_act BACT[BMAX], BACT2[BMAX];
@@ -253,7 +264,7 @@ typedef struct { int layer, pos; const float *q; float *out; } att_arg;
 static void att_task(int tid, int n, void *arg) {
     const att_arg *aa = arg;
     const layer *L = &M.L[aa->layer];
-    const int mla = M.kind == AR_DS2, dk = M.dk, dv = M.dv, grp = M.n_head / M.n_head_kv;
+    const int mla = M.mla, dk = M.dk, dv = M.dv, grp = M.n_head / M.n_head_kv;
     const float *kc = KC + (size_t)KVI[aa->layer] * M.ctx * M.kvk;
     const float *vc = mla ? kc : VC + (size_t)KVI[aa->layer] * M.ctx * M.kvv;
     const int vstride = mla ? M.kvk : M.kvv;
@@ -789,6 +800,11 @@ static int route(int l, float *r, int *sel, float *w) {
     return k;
 }
 
+/* Kimi K3's situ: beta tanh(g / beta) sigmoid(g) * lb tanh(u / lb) (lb <= 0: u as it is) */
+static inline float act_situ(float g, float u) {
+    const float a = M.situ_b * tanhf(g / M.situ_b) / (1.0f + expf(-g));
+    return a * (M.situ_lb > 0 ? M.situ_lb * tanhf(u / M.situ_lb) : u);
+}
 static inline float act_oai(float g, float u) {   /* gpt-oss: clamped SwiGLU, alpha 1.702, limit 7 */
     const float x = g < 7.0f ? g : 7.0f, y = u < -7.0f ? -7.0f : u > 7.0f ? 7.0f : u;
     return x / (1.0f + expf(1.702f * -x)) * (y + 1.0f);
@@ -797,9 +813,13 @@ static inline float act_oai(float g, float u) {   /* gpt-oss: clamped SwiGLU, al
 /* experts for N tokens: input BXN (prepared in BACT), output BTMP */
 static void moe_n(int l, int N) {
     const layer *L = &M.L[l];
-    const int ne = M.n_exp, n = M.n_embd;
-    jobn(&L->gate_inp, BACT, BROUT, (size_t)ne, N);
+    const int ne = M.n_exp, lat = L->routed_down.data != NULL, n = lat ? M.n_lat : M.n_embd;   /* n: the experts' width */
+    static es_act BACTL[BMAX];
+    const es_act *xin = BACT;
+    jobn(&L->gate_inp, BACT, BROUT, (size_t)ne, N);   /* the router reads the full-width input */
+    if (lat) jobn(&L->routed_down, BACT, BLAT, (size_t)n, N);
     run_jobs();
+    if (lat) { for (int i = 0; i < N; i++) prep(&BACTL[i], BLAT + (size_t)i * n, n); xin = BACTL; }
     int sel[BMAX][MAXK], kk[BMAX];
     float w[BMAX][MAXK];
     for (int i = 0; i < N; i++) {
@@ -842,7 +862,7 @@ static void moe_n(int l, int N) {
         load_experts(l, uex + c0, cn, g + c0, u_ + c0, d + c0);
         ff = g[c0].rows;
         for (int u = c0; u < c0 + cn; u++) {
-            for (int q = 0; q < cnt[u]; q++) xa[start[u] + q] = BACT[tok_of[start[u] + q]];
+            for (int q = 0; q < cnt[u]; q++) xa[start[u] + q] = xin[tok_of[start[u] + q]];
             jobn(&g[u], xa + start[u], BGU + (size_t)start[u] * 2 * ff, (size_t)2 * ff, cnt[u]);
             jobn(&u_[u], xa + start[u], BGU + (size_t)start[u] * 2 * ff + ff, (size_t)2 * ff, cnt[u]);
         }
@@ -855,6 +875,7 @@ static void moe_n(int l, int N) {
                 if (L->gate_exps_b.data) { const float *b = (const float *)L->gate_exps_b.data + (size_t)e * ff; for (int i = 0; i < ff; i++) gg[i] += b[i]; }
                 if (L->up_exps_b.data) { const float *b = (const float *)L->up_exps_b.data + (size_t)e * ff; for (int i = 0; i < ff; i++) uu[i] += b[i]; }
                 if (M.act_oai) for (int i = 0; i < ff; i++) hh[i] = act_oai(gg[i], uu[i]);
+                else if (M.situ_b > 0) for (int i = 0; i < ff; i++) hh[i] = act_situ(gg[i], uu[i]);
                 else for (int i = 0; i < ff; i++) hh[i] = gg[i] / (1.0f + expf(-gg[i])) * uu[i];
                 prep(&ha[r], hh, ff);
             }
@@ -868,12 +889,21 @@ static void moe_n(int l, int N) {
             }
     }
     for (int t = 0; t < N; t++) {
-        float *out = BTMP + (size_t)t * n;
+        float *out = (lat ? BLATO : BTMP) + (size_t)t * n;
         for (int i = 0; i < n; i++) {
             float s = 0;
             for (int j = 0; j < kk[t]; j++) s += w[t][j] * BYE[(size_t)rowof[t][j] * n + i];
             out[i] = s;
         }
+    }
+    if (lat) {   /* back from the latent space: norm, then up-projection */
+        for (int t = 0; t < N; t++) {
+            float *o = BLATO + (size_t)t * n;
+            if (L->routed_norm.data) rmsnorm(o, o, L->routed_norm.data, n, M.eps);
+            prep(&BACTL[t], o, n);
+        }
+        jobn(&L->routed_up, BACTL, BTMP, (size_t)M.n_embd, N);
+        run_jobs();
     }
 }
 
@@ -884,7 +914,8 @@ static void dense_n(const W *wg, const W *wu, const W *wd, const es_act *acts, i
     run_jobs();
     for (int i = 0; i < N; i++) {
         const float *g = BGU + (size_t)i * 2 * ff; float *h = BH + (size_t)i * ff;
-        for (int j = 0; j < ff; j++) h[j] = g[j] / (1.0f + expf(-g[j])) * g[ff + j];
+        if (M.situ_b > 0) for (int j = 0; j < ff; j++) h[j] = act_situ(g[j], g[ff + j]);
+        else for (int j = 0; j < ff; j++) h[j] = g[j] / (1.0f + expf(-g[j])) * g[ff + j];
         prep(&BACT2[i], h, ff);
     }
     jobn(wd, BACT2, out, (size_t)M.n_embd, N);
@@ -895,7 +926,7 @@ static void dense_n(const W *wg, const W *wu, const W *wd, const es_act *acts, i
 static void attention_n(int l, int N, int pos0) {
     const layer *L = &M.L[l];
     const int n = M.n_embd;
-    if (M.kind != AR_DS2) {
+    if (!M.mla) {
         const int hd = M.head_dim, kvd = M.kvk, qd = M.n_head * hd;
         const int qrow = M.attn_gated ? 2 * qd : qd;
         jobn(&L->q, BACT, BQ, (size_t)qrow, N); jobn(&L->k, BACT, BKV, (size_t)kvd, N); jobn(&L->v, BACT, BV2, (size_t)kvd, N);
@@ -930,6 +961,7 @@ static void attention_n(int l, int N, int pos0) {
         const int H = M.n_head, nope = M.nope, rd = M.rope_d, kvl = M.kv_lora, qh = nope + rd, kvw = kvl + rd;
         if (L->q_a.data) jobn(&L->q_a, BACT, BQA, (size_t)M.q_lora, N); else jobn(&L->q, BACT, BQ, (size_t)H * qh, N);
         jobn(&L->kv_a, BACT, BKV, (size_t)kvw, N);
+        if (L->o_gate.data) jobn(&L->o_gate, BACT, BGATE, (size_t)M.od, N);   /* Kimi K3: output gate from the layer input */
         run_jobs();
         if (L->q_a.data) {
             for (int i = 0; i < N; i++) { float *qa = BQA + (size_t)i * M.q_lora; rmsnorm(qa, qa, L->q_a_norm.data, M.q_lora, M.eps); prep(&BACT2[i], qa, M.q_lora); }
@@ -941,9 +973,8 @@ static void attention_n(int l, int N, int pos0) {
             float *kv = BKV + (size_t)i * kvw, *row = KC + ((size_t)KVI[l] * M.ctx + pos0 + i) * M.kvk;
             rmsnorm(row, kv, L->kv_a_norm.data, kvl, M.eps);
             memcpy(row + kvl, kv + kvl, sizeof(float) * (size_t)rd);
-            rope(row + kvl, 1, rd, pos0 + i);
             float *q = BQ + (size_t)i * H * qh;
-            rope(q + nope, H, qh, pos0 + i);
+            if (M.kind != AR_K3) { rope(row + kvl, 1, rd, pos0 + i); rope(q + nope, H, qh, pos0 + i); }   /* K3's latent attention has no positions */
             for (int h = 0; h < H; h++) {   /* absorbed: q_lat[h] = k_b[h] . q_nope[h] */
                 prep(&qn[i * H + h], q + (size_t)h * qh, nope);
                 W kb = rows_of(&L->k_b, h * kvl, kvl);
@@ -964,6 +995,7 @@ static void attention_n(int l, int N, int pos0) {
                 jobn(&vb, &qn[i * H + h], BATTN + ((size_t)i * H + h) * M.v_head, 0, 1);
             }
         run_jobs();
+        if (L->o_gate.data) for (size_t i = 0; i < (size_t)N * M.od; i++) BATTN[i] *= 1.0f / (1.0f + expf(-BGATE[i]));
     }
     arena_reset();
     for (int i = 0; i < N; i++) prep(&BACT2[i], BATTN + (size_t)i * M.od, M.od);
@@ -987,9 +1019,13 @@ static void gdn_task(int tid, int n, void *arg) {
         const float *q = ga->qkv + (size_t)(h % hk) * dk, *k = ga->qkv + (size_t)hk * dk + (size_t)(h % hk) * dk;
         const float *v = ga->qkv + (size_t)2 * hk * dk + (size_t)h * dv;
         float *S = SSM[ga->l] + (size_t)h * dk * dv, *o = ga->out + (size_t)h * dv;
-        const float g = expf(ga->g[h]), b = ga->beta[h];
+        const float *gk = M.kind == AR_K3 ? ga->g + (size_t)h * dk : NULL;   /* Kimi delta attention: a decay per key channel */
+        const float g = gk ? 1.0f : expf(ga->g[h]), b = ga->beta[h];
         for (int j = 0; j < dv; j++) kvm[j] = 0;
-        for (int i = 0; i < dk; i++) { float *row = S + (size_t)i * dv; for (int j = 0; j < dv; j++) { row[j] *= g; kvm[j] += row[j] * k[i]; } }
+        for (int i = 0; i < dk; i++) {
+            float *row = S + (size_t)i * dv; const float gi = gk ? expf(gk[i]) : g;
+            for (int j = 0; j < dv; j++) { row[j] *= gi; kvm[j] += row[j] * k[i]; }
+        }
         for (int j = 0; j < dv; j++) kvm[j] = (v[j] - kvm[j]) * b;
         for (int j = 0; j < dv; j++) o[j] = 0;
         for (int i = 0; i < dk; i++) {
@@ -1040,6 +1076,50 @@ static void linear_attn_n(int l, int N) {
     arena_reset();
     for (int i = 0; i < N; i++) prep(&BACT2[i], BLIN + (size_t)i * vd, vd);
     jobn(&L->ssm_out, BACT2, BTMP, (size_t)M.n_embd, N);
+    run_jobs();
+}
+/* Kimi delta attention (Kimi K3): q, k and v each through a causal convolution and SiLU; q and k L2-normalised per head; a decay
+ * per key channel, g = lb * sigmoid(exp(A_log) (f_b(f_a(x)) + dt)) (or softplus(...) * -exp(A_log) without a bound); then the
+ * delta rule as in gdn_task; the output RMS-normalised per head and gated by sigmoid(g_proj(x)). */
+static void kda_n(int l, int N) {
+    const layer *L = &M.L[l];
+    const int H = M.hv, d = M.dk_l, di = H * d, cd = 3 * di, K = M.conv_k;
+    jobn(&L->q, BACT, BQKV, (size_t)cd, N); jobn(&L->k, BACT, BQKV + di, (size_t)cd, N); jobn(&L->v, BACT, BQKV + 2 * di, (size_t)cd, N);
+    jobn(&L->f_a, BACT, BFA, (size_t)d, N); jobn(&L->ssm_beta, BACT, BBETA, (size_t)H, N); jobn(&L->kda_g, BACT, BZ, (size_t)di, N);
+    run_jobs();
+    for (int i = 0; i < N; i++) prep(&BACT2[i], BFA + (size_t)i * d, d);
+    jobn(&L->f_b, BACT2, BALPHA, (size_t)di, N);
+    run_jobs();
+    const float *cw[3] = {L->conv_q.data, L->conv_k.data, L->conv_v.data}, *dtb = L->dt_b.data, *A = L->ssm_a.data, *nw = L->ssm_norm.data;
+    float *cs = CONV[l];   /* the last K-1 inputs of every channel of [q | k | v] */
+    for (int t = 0; t < N; t++) {
+        float *x = BQKV + (size_t)t * cd;
+        for (int c = 0; c < cd; c++) {
+            const float *wc = cw[c / di] + (size_t)(c % di) * K;
+            float y = wc[K - 1] * x[c];
+            for (int j = 0; j < K - 1; j++) y += wc[j] * cs[(size_t)j * cd + c];
+            for (int j = 0; j < K - 2; j++) cs[(size_t)j * cd + c] = cs[(size_t)(j + 1) * cd + c];
+            cs[(size_t)(K - 2) * cd + c] = x[c];
+            x[c] = y / (1.0f + expf(-y));
+        }
+        for (int h = 0; h < H; h++) { l2norm(x + (size_t)h * d, d, M.eps); l2norm(x + di + (size_t)h * d, d, M.eps); }
+        float beta[256], *g = BALPHA + (size_t)t * di;
+        for (int h = 0; h < H; h++) beta[h] = 1.0f / (1.0f + expf(-BBETA[(size_t)t * H + h]));
+        for (int c = 0; c < di; c++) {   /* A holds -exp(A_log) */
+            const float a = g[c] + dtb[c], Ah = A[c / d];
+            g[c] = M.kda_lb > -INFINITY ? M.kda_lb / (1.0f + expf(a * Ah)) : (a > 20.0f ? a : log1pf(expf(a))) * Ah;
+        }
+        gdn_arg ga = {l, x, BLIN + (size_t)t * di, beta, g};
+        if (NT == 1) gdn_task(0, 1, &ga); else es_cpool_run(CP, gdn_task, &ga);
+        float *o = BLIN + (size_t)t * di; const float *z = BZ + (size_t)t * di;
+        for (int h = 0; h < H; h++) {
+            rmsnorm(o + (size_t)h * d, o + (size_t)h * d, nw, d, M.eps);
+            for (int j = 0; j < d; j++) o[(size_t)h * d + j] *= 1.0f / (1.0f + expf(-z[(size_t)h * d + j]));
+        }
+    }
+    arena_reset();
+    for (int i = 0; i < N; i++) prep(&BACT2[i], BLIN + (size_t)i * di, di);
+    jobn(&L->o, BACT2, BTMP, (size_t)M.n_embd, N);
     run_jobs();
 }
 static size_t ssm_floats(void) { return (size_t)M.hv * M.dk_l * M.dv_l; }
@@ -1119,15 +1199,52 @@ static void adapter_apply(int l, int N) {
 }
 
 /* one layer for the N tokens in BX (positions pos0..), with the current sequence's caches */
+/* Kimi K3 cross-layer residuals: a softmax over the banked layer inputs of token i (nb of them) and the current stream x, each
+ * scored by w . rms-normalised(it); the mix of the raw values goes to out */
+static void res_mix(const float *x, const W *w, int i, int nb, float *out) {
+    const int n = M.n_embd;
+    if (nb == 0 || !w->data) { if (out != x) memcpy(out, x, sizeof(float) * (size_t)n); return; }
+    const float *st = RESP + (size_t)i * RES_NCK * n, *wv = w->data;
+    float sc[64], mx = -INFINITY, sum = 0;
+    for (int c = 0; c <= nb; c++) {
+        const float *v = c < nb ? st + (size_t)c * n : x;
+        double ss = 0, dw = 0;
+        for (int j = 0; j < n; j++) { ss += (double)v[j] * v[j]; dw += (double)v[j] * wv[j]; }
+        sc[c] = (float)(dw / sqrt(ss / n + M.eps));
+        if (sc[c] > mx) mx = sc[c];
+    }
+    for (int c = 0; c <= nb; c++) { sc[c] = expf(sc[c] - mx); sum += sc[c]; }
+    for (int j = 0; j < n; j++) {
+        float a = sc[nb] / sum * x[j];
+        for (int c = 0; c < nb; c++) a += sc[c] / sum * st[(size_t)c * n + j];
+        out[j] = a;
+    }
+}
+static int res_banked(int l) { return M.res_bs > 0 ? (l + M.res_bs - 1) / M.res_bs : 0; }   /* layer inputs banked before layer l */
 static void layer_n(int l, int N, int pos0) {
     const int n = M.n_embd;
     layer *L = &M.L[l];
+    const int k3 = M.kind == AR_K3, nb = k3 ? res_banked(l) : 0, bank = k3 && M.res_bs > 0 && l % M.res_bs == 0;
     arena_reset();
-    for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->attn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
-    if (L->recr) linear_attn_n(l, N); else attention_n(l, N, pos0);
-    for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
+    for (int i = 0; i < N; i++) {
+        float *x = BX + (size_t)i * n, *xn = BXN + (size_t)i * n;
+        if (k3) {
+            res_mix(x, &L->res_attn, i, nb, xn);
+            if (bank) memcpy(RESP + ((size_t)i * RES_NCK + nb) * n, x, sizeof(float) * (size_t)n);   /* the raw layer input */
+            rmsnorm(xn, xn, L->attn_norm.data, n, M.eps);
+        } else rmsnorm(xn, x, L->attn_norm.data, n, M.eps);
+        prep(&BACT[i], xn, n);
+    }
+    if (L->recr) { if (k3) kda_n(l, N); else linear_attn_n(l, N); } else attention_n(l, N, pos0);
+    if (bank) memcpy(BX, BTMP, sizeof(float) * (size_t)N * n);   /* a banked layer restarts the stream from its attention output */
+    else for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
     arena_reset();
-    for (int i = 0; i < N; i++) { rmsnorm(BXN + (size_t)i * n, BX + (size_t)i * n, L->ffn_norm.data, n, M.eps); prep(&BACT[i], BXN + (size_t)i * n, n); }
+    for (int i = 0; i < N; i++) {
+        float *x = BX + (size_t)i * n, *xn = BXN + (size_t)i * n;
+        if (k3) { res_mix(x, &L->res_ffn, i, nb + bank, xn); rmsnorm(xn, xn, L->ffn_norm.data, n, M.eps); }
+        else rmsnorm(xn, x, L->ffn_norm.data, n, M.eps);
+        prep(&BACT[i], xn, n);
+    }
     if (L->moe) moe_n(l, N);
     else dense_n(&L->ffn_gate, &L->ffn_up, &L->ffn_down, BACT, N, BTMP);
     if (L->sh_gate.data) {
@@ -1142,6 +1259,8 @@ static void layer_n(int l, int N, int pos0) {
     }
     for (size_t i = 0; i < (size_t)N * n; i++) BX[i] += BTMP[i];
     if (AD_ON) adapter_apply(l, N);
+    if (k3 && l == M.n_layer - 1 && M.res_bs > 0)   /* the final mix over every banked input */
+        for (int i = 0; i < N; i++) res_mix(BX + (size_t)i * n, &M.output_res, i, res_banked(M.n_layer), BX + (size_t)i * n);
 }
 /* the scores of BX rows from.. (N rows in BX): BXN gets their normed state, BLOG rows 0.. their scores */
 static void logits_n(int N, int from) {
@@ -1246,6 +1365,7 @@ static const char *template_kind_of(const char *t) {
     if (!t) return "raw";
     if (strstr(t, "[SYSTEM_PROMPT]")) return "mistral_v7";
     if (strstr(t, "<|im_middle|>")) return "kimi";
+    if (strstr(t, "<|end_of_msg|>") && strstr(t, "<|open|>")) return "kimi3";   /* Kimi K3: <|open|>tag attrs<|sep|> ... <|close|>tag<|sep|> */
     if (strstr(t, "<|channel|>") || (strstr(t, "<|start|>") && strstr(t, "<|message|>"))) return "harmony";
     if (strstr(t, DS_USER)) return "deepseek";
     if (strstr(t, "<|im_start|>") && strstr(t, "reasoning_effort")) return "qwen38";   /* Qwen3.8: a reasoning-effort system line, thinking kept in the history */
@@ -1273,6 +1393,20 @@ static const char *qwen38_effort(void) {
     if (e && !strcmp(e, "low")) return "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.";
     return "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 }
+/* Kimi K3 (template rendered with jinja and copied): thinking is on at effort max unless ES_REASONING says low, high or off */
+#define K3_MSG(role, text) "<|open|>message role=\"" role "\"<|sep|>" text "<|close|>message<|sep|><|end_of_msg|>"
+static const char *k3_effort(void) {
+    const char *e = getenv("ES_REASONING");
+    return e && (!strcmp(e, "off") || !strcmp(e, "none")) ? NULL : e && (!strcmp(e, "low") || !strcmp(e, "high")) ? e : "max";
+}
+static void k3_effort_msg(char *out, size_t cap) {
+    const char *e = k3_effort();
+    if (!e) { out[0] = 0; return; }
+    snprintf(out, cap, "<|open|>message role=\"system\" type=\"thinking-effort\"<|sep|>`thinking_effort` guides on how much to think in your thinking channel "
+             "(not including the response channel), supported values include `low`, `medium`, `high`, and `max`.\nNow the system is invoked with "
+             "`thinking_effort=%s`.<|close|>message<|sep|><|end_of_msg|>", e);
+}
+static const char *k3_answer_start(void) { return k3_effort() ? "<|open|>message role=\"assistant\"<|sep|><|open|>think<|sep|>" : "<|open|>message role=\"assistant\"<|sep|><|open|>response<|sep|>"; }
 static void format_turn(char *out, size_t cap, const char *msg, int first) {
     /* later turns first close the previous answer: its end token was
      * sampled but not fed back into the model */
@@ -1299,6 +1433,11 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
         snprintf(out, cap, "%s" DS_USER "%s" DS_ASSISTANT, first ? DS_BOS : DS_EOS, msg);
     else if (TK("kimi"))
         snprintf(out, cap, "%s<|im_user|>user<|im_middle|>%s<|im_end|><|im_assistant|>assistant<|im_middle|>", first ? KIMI_SYS : "<|im_end|>", msg);
+    else if (TK("kimi3")) {
+        char sys[512] = "";
+        if (first) k3_effort_msg(sys, sizeof sys);
+        snprintf(out, cap, "%s" K3_MSG("user", "%s") "%s", first ? sys : "<|end_of_msg|>", msg, k3_answer_start());
+    }
     else if (TK("harmony")) {
         char sys[512] = "";
         if (first) harmony_system(sys, sizeof sys);
@@ -1311,7 +1450,7 @@ static void format_turn(char *out, size_t cap, const char *msg, int first) {
 int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     size_t o = 0;
 #define PUT(...) do { int w_ = snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__); if (w_ < 0 || o + (size_t)w_ >= cap) return -1; o += (size_t)w_; } while (0)
-    const int cthink = TK("chatml_think"), chatml = TK("chatml") || cthink, tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony");
+    const int cthink = TK("chatml_think"), chatml = TK("chatml") || cthink, tulu = TK("tulu"), llama3 = TK("llama3"), msp = TK("mistral_sp"), mistral = TK("mistral") || msp, ds = TK("deepseek"), kimi = TK("kimi"), harmony = TK("harmony"), kimi3 = TK("kimi3");
     const char *sp = msp ? " " : "";
     const int v7 = TK("mistral_v7");
     if (v7) {   /* <s>[SYSTEM_PROMPT]..[/SYSTEM_PROMPT][INST]user[/INST]answer</s>[INST].. */
@@ -1368,6 +1507,7 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     }
     if (kimi) { int has = 0; for (int i = 0; i < n; i++) has |= m[i].role && !strcmp(m[i].role, "system"); if (!has) PUT(KIMI_SYS); }
     if (harmony) { char sys[512]; harmony_system(sys, sizeof sys); PUT("%s", sys); }
+    if (kimi3) { char sys[512]; k3_effort_msg(sys, sizeof sys); PUT("%s", sys); }
     const char *pending_sys = NULL;   /* Mistral has no system role: it goes in front of the next user message */
     for (int i = 0; i < n; i++) {
         const char *r = m[i].role ? m[i].role : "user", *c = m[i].content ? m[i].content : "";
@@ -1387,6 +1527,12 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
             if (sys) PUT("<|im_system|>system<|im_middle|>%s<|im_end|>", c);
             else if (as) PUT("<|im_assistant|>assistant<|im_middle|>%s<|im_end|>", c);
             else PUT("<|im_user|>user<|im_middle|>%s<|im_end|>", c);
+        } else if (kimi3) {
+            if (as && strstr(c, "</think>")) { c = strstr(c, "</think>") + 8; while (*c == '\n') c++; }   /* earlier thinking is not sent back */
+            if (sys) PUT(K3_MSG("system", "%s"), c);
+            else if (as) PUT("<|open|>message role=\"assistant\"<|sep|>%s<|open|>response<|sep|>%s<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>",
+                             k3_effort() ? "<|open|>think<|sep|><|close|>think<|sep|>" : "", c);
+            else PUT(K3_MSG("user", "%s"), c);
         } else if (harmony) {
             if (sys) PUT("<|start|>developer<|message|># Instructions\n\n%s\n\n<|end|>", c);
             else if (as) PUT("<|start|>assistant<|channel|>final<|message|>%s<|end|>", c);
@@ -1399,6 +1545,7 @@ int es_engine_render(const es_msg *m, int n, char *out, size_t cap) {
     else if (ds) PUT(DS_ASSISTANT);
     else if (kimi) PUT("<|im_assistant|>assistant<|im_middle|>");
     else if (harmony) PUT("<|start|>assistant");
+    else if (kimi3) PUT("%s", k3_answer_start());
     else if (mistral) { if (pending_sys) PUT("%s[INST] %s [/INST]", sp, pending_sys); }
     else PUT("Assistant:");
 #undef PUT
@@ -1437,6 +1584,25 @@ static int harmony_piece(int tok, const char *piece, int pl, char *buf, int cap)
     if (H_STATE == HS_CHAN) { for (int i = 0; i < pl && H_CHANLEN < (int)sizeof H_CHAN - 1; i++) H_CHAN[H_CHANLEN++] = piece[i]; return 0; }
     if (H_STATE == HS_FRESH) H_STATE = HS_MSG;   /* an answer that does not start with harmony markup is shown as it is */
     if (H_STATE != HS_MSG) return 0;
+    const int n = pl < cap ? pl : cap;
+    memmove(buf, piece, (size_t)n);
+    return n;
+}
+
+/* Kimi K3 answers "thoughts<|close|>think<|sep|><|open|>response<|sep|>answer<|close|>response<|sep|>...": the thoughts go out
+ * inside <think>...</think>, the answer as it is, the tag markup not at all */
+static int K3_OPEN = -1, K3_CLOSE = -1, K3_SEP = -1, K3_STATE, K3_CLOSING; static char K3_TAG[24]; static int K3_TAGLEN;
+enum { K3_TEXT, K3_INTAG, K3_DONE };
+static int k3_piece(int tok, const char *piece, int pl, char *buf, int cap) {
+    if (tok == K3_OPEN || tok == K3_CLOSE) { K3_STATE = K3_INTAG; K3_CLOSING = tok == K3_CLOSE; K3_TAGLEN = 0; return 0; }
+    if (tok == K3_SEP && K3_STATE == K3_INTAG) {
+        K3_TAG[K3_TAGLEN] = 0; K3_STATE = K3_TEXT;
+        if (K3_CLOSING && !strncmp(K3_TAG, "think", 5)) return snprintf(buf, (size_t)cap, "</think>\n") < cap ? 9 : 0;
+        if (K3_CLOSING && !strncmp(K3_TAG, "response", 8)) K3_STATE = K3_DONE;
+        return 0;
+    }
+    if (K3_STATE == K3_INTAG) { for (int i = 0; i < pl && K3_TAGLEN < (int)sizeof K3_TAG - 1; i++) K3_TAG[K3_TAGLEN++] = piece[i]; return 0; }
+    if (K3_STATE == K3_DONE || tok == K3_SEP) return 0;
     const int n = pl < cap ? pl : cap;
     memmove(buf, piece, (size_t)n);
     return n;
@@ -1548,7 +1714,9 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     else if (!strcmp(a, "gpt-oss")) { M.kind = AR_GPTOSS; M.rope_neox = 1; M.gating = GATE_SOFTMAX_CHOSEN; M.act_oai = 1; }
     else if (!strcmp(a, "deepseek2")) { M.kind = AR_DS2; M.rope_neox = 0; }
     else if (!strcmp(a, "qwen35moe") || !strcmp(a, "qwen35")) { M.kind = AR_QWEN35; M.rope_neox = 1; M.norm_topk = 1; M.attn_gated = 1; }
-    else ERR("architecture '%s' is not supported yet (llama, mixtral, qwen2, qwen2moe, qwen3, qwen3moe, qwen35, qwen35moe, olmoe, gpt-oss and deepseek2 are)", a);
+    else if (!strcmp(a, "kimi-k3")) { M.kind = AR_K3; M.rope_neox = 0; }
+    else ERR("architecture '%s' is not supported yet (llama, mixtral, qwen2, qwen2moe, qwen3, qwen3moe, qwen35, qwen35moe, olmoe, gpt-oss, deepseek2 and kimi-k3 are)", a);
+    M.mla = M.kind == AR_DS2 || M.kind == AR_K3;
     M.n_layer -= (int)HPI("nextn_predict_layers", 0);   /* extra next-token-prediction blocks at the end are not part of the model's forward pass */
     snprintf(key, sizeof key, "%s.expert_weights_norm", a);
     if (es_gguf_find(&G, key)) M.norm_topk = (int)es_gguf_int(&G, key, M.norm_topk);
@@ -1558,7 +1726,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     if (M.n_exp < 0 || M.n_exp > 1024 || M.n_used > MAXK || (M.n_exp > 0 && M.n_used <= 0) || M.n_group > 64) ERR("unsupported expert layout");
 
     /* attention geometry */
-    if (M.kind == AR_DS2) {
+    if (M.mla) {
         M.q_lora = (int)HPI("attention.q_lora_rank", 0);
         M.kv_lora = (int)HPI("attention.kv_lora_rank", 0);
         M.rope_d = (int)HPI("rope.dimension_count", 64);
@@ -1585,6 +1753,17 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         M.dv_l = M.hv ? inner / M.hv : 0;
         M.conv_dim = 2 * M.hk * M.dk_l + M.hv * M.dv_l;
         if (M.hv <= 0 || M.hk <= 0 || M.hv % M.hk || M.hv > 256 || M.conv_k < 2 || M.conv_k > 16) ERR("unsupported linear-attention shape");
+    }
+    if (M.kind == AR_K3) {   /* Kimi delta attention: as many heads as attention, q/k/v each convolved, one head size for keys and values */
+        M.conv_k = (int)HPI("ssm.conv_kernel", 4);
+        M.dk_l = M.dv_l = (int)HPI("kda.head_dim", 128);
+        M.hk = M.hv = M.n_head;
+        M.conv_dim = 3 * M.hv * M.dk_l;
+        M.kda_lb = HPF("kda.gate_lower_bound", -INFINITY);
+        M.situ_b = HPF("activation.situ_beta", 0.0f); M.situ_lb = HPF("activation.situ_linear_beta", 0.0f);
+        M.res_bs = (int)HPI("attn_res.block_size", 0);
+        M.n_lat = (int)HPI("expert_latent_length", 0);
+        if (M.hv <= 0 || M.hv > 256 || M.conv_k < 2 || M.conv_k > 16 || M.situ_b <= 0) ERR("unsupported Kimi K3 shape");
     }
     if (M.kind == AR_GPTOSS) { M.n_swa = (int)HPI("attention.sliding_window", 0); }
     M.temp_scale = HPF("attention.temperature_scale", 0.0f);
@@ -1630,7 +1809,8 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
             const float org = M.attn_factor * (1.0f + 0.1f * logf(1.0f / M.freq_scale));
             const float ms = org * (1.0f + 0.1f * log_mul * logf(1.0f / M.freq_scale));
             M.kq_scale = 1.0f * ms * ms / sqrtf((float)(M.nope + M.rope_d));
-        } else M.kq_scale = 1.0f / sqrtf((float)M.head_dim);
+        } else if (M.kind == AR_K3) M.kq_scale = 1.0f / sqrtf((float)(M.nope + M.rope_d));   /* K3's MLA has no rotation at all */
+        else M.kq_scale = 1.0f / sqrtf((float)M.head_dim);
         if (getenv("ES_DEBUG")) fprintf(stderr, "rope: n_rot %d neox %d base %g freq_scale %g ext %g attn_factor %g corr %g..%g orig %d kq_scale %g\n",
                                         M.n_rot, M.rope_neox, M.rope_base, M.freq_scale, M.ext_factor, M.attn_factor, M.corr[0], M.corr[1], M.n_ctx_orig, M.kq_scale);
     }
@@ -1690,12 +1870,32 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         for (int l = 0; l < M.n_layer; l++) { M.L[l].recr = rl && (uint64_t)l < nr ? rl[l] != 0 : (l + 1) % interval != 0; if (M.L[l].recr) M.recurrent = 1; }
         free(rl);
     }
+    if (M.kind == AR_K3) {   /* layers without k/v heads are delta-attention layers */
+        uint64_t nr = 0;
+        snprintf(key, sizeof key, "%s.attention.head_count_kv", M.arch);
+        int32_t *kv = es_gguf_ints(&G, key, &nr);
+        if (!kv || nr < (uint64_t)M.n_layer) ERR("Kimi K3: no per-layer attention.head_count_kv");
+        for (int l = 0; l < M.n_layer; l++) { M.L[l].recr = kv[l] == 0; if (M.L[l].recr) M.recurrent = 1; }
+        free(kv);
+        M.output_res = load_w("output_res_score.weight", M.res_bs > 0);
+    }
     const int swa_pat = (int)HPI("attention.sliding_window_pattern", M.kind == AR_GPTOSS ? 2 : 0);
     for (int l = 0; l < M.n_layer; l++) {
         layer *L = &M.L[l];
 #define T_(field, name, req) do { snprintf(key, sizeof key, "blk.%d." name, l); L->field = load_w(key, req); } while (0)
         T_(attn_norm, "attn_norm.weight", 1);
-        if (M.kind == AR_DS2) {
+        if (M.kind == AR_K3) { T_(res_attn, "attn_res_score.weight", M.res_bs > 0); T_(res_ffn, "ffn_res_score.weight", M.res_bs > 0); }
+        if (M.kind == AR_K3 && L->recr) {
+            T_(q, "attn_q.weight", 1); T_(k, "attn_k.weight", 1); T_(v, "attn_v.weight", 1);
+            T_(conv_q, "ssm_conv1d_q.weight", 1); T_(conv_k, "ssm_conv1d_k.weight", 1); T_(conv_v, "ssm_conv1d_v.weight", 1);
+            T_(f_a, "ssm_f_a.weight", 1); T_(f_b, "ssm_f_b.weight", 1); T_(ssm_beta, "ssm_beta.weight", 1); T_(ssm_a, "ssm_a", 1);
+            T_(dt_b, "ssm_dt.bias", 1); T_(kda_g, "ssm_g.weight", 1); T_(ssm_norm, "ssm_norm.weight", 1);
+            const int di = M.hv * M.dk_l;
+            const W *cv[3] = {&L->conv_q, &L->conv_k, &L->conv_v};
+            for (int c = 0; c < 3; c++) if (cv[c]->type != GGML_F32 || cv[c]->cols != M.conv_k || cv[c]->rows != di) ERR("layer %d: unexpected delta-attention convolution", l);
+            if (L->dt_b.type != GGML_F32 || L->ssm_a.type != GGML_F32 || L->ssm_norm.type != GGML_F32 || L->ssm_a.cols != M.hv || L->ssm_norm.cols != M.dk_l)
+                ERR("layer %d: unexpected delta-attention tensors", l);
+        } else if (M.mla) {
             T_(q_a, "attn_q_a.weight", 0); T_(q_a_norm, "attn_q_a_norm.weight", 0); T_(q_b, "attn_q_b.weight", 0);
             if (!L->q_a.data) T_(q, "attn_q.weight", 1);
             T_(kv_a, "attn_kv_a_mqa.weight", 1); T_(kv_a_norm, "attn_kv_a_norm.weight", 1);
@@ -1721,6 +1921,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
                 L->v_b = (W){kvb.type, H * M.v_head, kl, vb};
             }
             if (L->q_a.data && (!L->q_a_norm.data || !L->q_b.data)) ERR("layer %d: incomplete q projection", l);
+            if (M.kind == AR_K3) T_(o_gate, "attn_gate.weight", 0);
         } else if (L->recr) {
             T_(qkv, "attn_qkv.weight", 1); T_(zgate, "attn_gate.weight", 1); T_(conv1d, "ssm_conv1d.weight", 1);
             T_(dt_b, "ssm_dt.bias", 1); T_(ssm_a, "ssm_a", 1); T_(ssm_beta, "ssm_beta.weight", 1); T_(ssm_alpha, "ssm_alpha.weight", 1);
@@ -1734,7 +1935,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
             if (!L->bq.data != !L->bk.data || !L->bq.data != !L->bv.data) ERR("layer %d has only some of the Q/K/V biases", l);
             T_(sinks, "attn_sinks.weight", 0);
         }
-        if (!L->recr) { T_(o, "attn_output.weight", 1); T_(bo, "attn_output.bias", 0); }
+        if (!L->recr || M.kind == AR_K3) { T_(o, "attn_output.weight", 1); T_(bo, "attn_output.bias", 0); }
         T_(ffn_norm, "ffn_norm.weight", 0);
         if (!L->ffn_norm.data) T_(ffn_norm, "post_attention_norm.weight", 1);
         T_(gate_inp, "ffn_gate_inp.weight", 0); T_(gate_inp_b, "ffn_gate_inp.bias", 0); T_(exp_probs_b, "exp_probs_b.bias", 0);
@@ -1742,6 +1943,8 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         T_(sh_gate, "ffn_gate_shexp.weight", 0); T_(sh_up, "ffn_up_shexp.weight", 0); T_(sh_down, "ffn_down_shexp.weight", 0);
         T_(sh_gate_inp, "ffn_gate_inp_shexp.weight", 0);
         T_(gate_exps_b, "ffn_gate_exps.bias", 0); T_(up_exps_b, "ffn_up_exps.bias", 0); T_(down_exps_b, "ffn_down_exps.bias", 0);
+        T_(routed_down, "ffn_routed_down.weight", 0); T_(routed_up, "ffn_routed_up.weight", 0); T_(routed_norm, "ffn_routed_norm.weight", 0);
+        if (!L->routed_down.data != !L->routed_up.data || (L->routed_down.data && L->routed_down.rows != M.n_lat)) ERR("layer %d: incomplete expert latent projections", l);
 #undef T_
         L->moe = L->gate_inp.data != NULL;
         L->swa = swa_pat > 0 && (l % swa_pat) < swa_pat - 1;
@@ -1759,6 +1962,10 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         es_tok_set_eog(T, es_tok_find(T, "<|call|>"), 1);
     }
     if (TK("kimi")) es_tok_set_eog(T, es_tok_find(T, "<|im_end|>"), 1);
+    if (TK("kimi3")) {
+        K3_OPEN = es_tok_find(T, "<|open|>"); K3_CLOSE = es_tok_find(T, "<|close|>"); K3_SEP = es_tok_find(T, "<|sep|>");
+        es_tok_set_eog(T, es_tok_find(T, "<|end_of_msg|>"), 1);
+    }
     if (TK("deepseek")) es_tok_set_eog(T, es_tok_find(T, DS_EOS), 1);
 
     /* threads: compute on the fastest cores, readers on the rest */
@@ -1872,21 +2079,30 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     const size_t gu_rows = (size_t)BMAX * K;
     const int ffg = ffx > ffmax ? ffx : ffmax;
     const int H = M.n_head;
-    const size_t qlen = M.kind == AR_DS2 ? (size_t)H * (M.nope + M.rope_d) : (size_t)M.qd * (M.attn_gated ? 2 : 1);
-    const size_t kvw = M.kind == AR_DS2 ? (size_t)(M.kv_lora + M.rope_d) : (size_t)M.kvk;
+    const size_t qlen = M.mla ? (size_t)H * (M.nope + M.rope_d) : (size_t)M.qd * (M.attn_gated ? 2 : 1);
+    const size_t kvw = M.mla ? (size_t)(M.kv_lora + M.rope_d) : (size_t)M.kvk;
     BX = malloc(sizeof(float) * (size_t)n * BMAX); BXN = malloc(sizeof(float) * (size_t)n * BMAX); BTMP = malloc(sizeof(float) * (size_t)n * BMAX);
     BQ = malloc(sizeof(float) * qlen * BMAX); BKV = malloc(sizeof(float) * kvw * BMAX); BV2 = malloc(sizeof(float) * (size_t)M.kvk * BMAX);
     BATTN = malloc(sizeof(float) * (size_t)(M.od > M.qd ? M.od : M.qd) * BMAX);
-    if (M.kind == AR_DS2) {
+    if (M.mla) {
         BQA = malloc(sizeof(float) * (size_t)(M.q_lora + 1) * BMAX);
         BQM = malloc(sizeof(float) * (size_t)H * M.dk * BMAX);
         BATL = malloc(sizeof(float) * (size_t)H * M.kv_lora * BMAX);
         if (H > 256) ERR("too many attention heads (%d)", H);
     }
     if (M.attn_gated) BGATE = malloc(sizeof(float) * (size_t)M.qd * BMAX);
+    if (M.kind == AR_K3) {
+        const int nl = M.n_lat > 0 ? M.n_lat : n, nck = M.res_bs > 0 ? (M.n_layer + M.res_bs - 1) / M.res_bs + 1 : 1;
+        BGATE = malloc(sizeof(float) * (size_t)M.od * BMAX);
+        BFA = malloc(sizeof(float) * (size_t)M.dk_l * BMAX);
+        BLAT = malloc(sizeof(float) * (size_t)nl * BMAX); BLATO = malloc(sizeof(float) * (size_t)nl * BMAX);
+        if (nck > 63) ERR("Kimi K3: too many residual checkpoints (%d)", nck);
+        RES_NCK = nck; RESB = malloc(sizeof(float) * (size_t)nck * n * BMAX); RESP = RESB;
+        if (!BGATE || !BFA || !BLAT || !BLATO || !RESB) ERR("out of memory");
+    }
     if (M.recurrent) {
         BQKV = malloc(sizeof(float) * (size_t)M.conv_dim * BMAX); BZ = malloc(sizeof(float) * (size_t)M.hv * M.dv_l * BMAX);
-        BBETA = malloc(sizeof(float) * (size_t)M.hv * BMAX); BALPHA = malloc(sizeof(float) * (size_t)M.hv * BMAX); BLIN = malloc(sizeof(float) * (size_t)M.hv * M.dv_l * BMAX);
+        BBETA = malloc(sizeof(float) * (size_t)M.hv * BMAX); BALPHA = malloc(sizeof(float) * (size_t)M.hv * (M.kind == AR_K3 ? M.dk_l : 1) * BMAX); BLIN = malloc(sizeof(float) * (size_t)M.hv * M.dv_l * BMAX);
         SSM = calloc((size_t)M.n_layer, sizeof(float *)); CONV = calloc((size_t)M.n_layer, sizeof(float *));
         SSM_SNAP = calloc((size_t)M.n_layer, sizeof(float *)); CONV_SNAP = calloc((size_t)M.n_layer, sizeof(float *));
         for (int l = 0; l < M.n_layer; l++) if (M.L[l].recr) {
@@ -1904,7 +2120,8 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
     RC = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1)); RS = malloc(sizeof(float) * (size_t)(M.n_rot / 2 + 1));
     {   /* everything prepared between two arena resets: one layer's activations of the whole batch */
         size_t fl = (size_t)BMAX * ((size_t)2 * n + qlen + (size_t)M.od + (size_t)M.q_lora + gu_rows / BMAX * ffg + ffg + (size_t)M.hv * M.dv_l);
-        if (M.kind == AR_DS2) fl += (size_t)BMAX * H * (size_t)(M.nope > M.kv_lora ? M.nope : M.kv_lora);
+        if (M.mla) fl += (size_t)BMAX * H * (size_t)(M.nope > M.kv_lora ? M.nope : M.kv_lora);
+        if (M.kind == AR_K3) fl += (size_t)BMAX * ((size_t)2 * (M.n_lat > 0 ? M.n_lat : n) + M.dk_l + M.od);
         es_act_arena_init(sizeof(es_blk_q80) * (fl / 32 + 4096));
         Q8K_CAP = fl / 256 + 1024;
         Q8K = malloc(sizeof(es_block_q8_K) * Q8K_CAP);
@@ -2009,12 +2226,13 @@ static int draft_tokens(int32_t *out, int max) {
 }
 
 static int ANS_FRESH;   /* nothing of the answer shown yet (SentencePiece answers start with a space to drop); the prompt opened <think> */
-static void answer_start(void) { ANS_FRESH = 1; ANS_THINK = TK("chatml_think") || TK("qwen38"); H_STATE = HS_FRESH; H_THINK = 0; }
+static void answer_start(void) { ANS_FRESH = 1; ANS_THINK = TK("chatml_think") || TK("qwen38") || (TK("kimi3") && k3_effort()); H_STATE = HS_FRESH; H_THINK = 0; K3_STATE = K3_TEXT; }
 /* the text of one answer token */
 static int piece_out(int tok, char *buf, int cap) {
     int n = es_tok_piece(T, tok, 0, buf, cap);
     if (ANS_THINK && cap > n + 8) { memmove(buf + 8, buf, (size_t)n); memcpy(buf, "<think>\n", 8); n += 8; ANS_THINK = 0; }
     if (TK("harmony")) n = harmony_piece(tok, buf, n, buf, cap);
+    if (TK("kimi3")) n = k3_piece(tok, buf, n, buf, cap);
     if (ANS_FRESH && n > 0) {
         ANS_FRESH = 0;
         if (es_tok_is_spm(T) && buf[0] == ' ') { memmove(buf, buf + 1, (size_t)n - 1); n--; }
@@ -2557,6 +2775,8 @@ int es_engine_features_multi(int S, const int32_t *const *ids, const int *len, c
     for (int s = 0; s < S; s++) { if (len[s] < 1 || len[s] >= M.ctx) return -1; T += (size_t)len[s]; }
     float *H = malloc(sizeof(float) * T * n);
     size_t *off = malloc(sizeof(size_t) * S);
+    float *rs = M.kind == AR_K3 && M.res_bs > 0 ? malloc(sizeof(float) * T * RES_NCK * n) : NULL;   /* each position's residual checkpoints */
+    if (M.kind == AR_K3 && M.res_bs > 0 && !rs) { free(H); free(off); return -1; }
     float **kcs = calloc((size_t)S, sizeof(float *)), **vcs = calloc((size_t)S, sizeof(float *)), ***ssms = calloc((size_t)S, sizeof(float **)), ***convs = calloc((size_t)S, sizeof(float **));
     if (!H || !off || !kcs || !vcs || !ssms || !convs) { free(H); free(off); free(kcs); free(vcs); free(ssms); free(convs); return -1; }
     float *kc0 = KC, *vc0 = VC, **ssm0 = SSM, **conv0 = CONV, *ad0 = AD;
@@ -2597,6 +2817,7 @@ int es_engine_features_multi(int S, const int32_t *const *ids, const int *len, c
                     float *h = H + (off[s] + i) * n;
                     memcpy(BX, h, sizeof(float) * (size_t)cnt * n);
                     TRACE_TOKEN = i;
+                    if (rs) RESP = rs + (off[s] + i) * RES_NCK * n;
                     layer_n(l, cnt, i);
                     memcpy(h, BX, sizeof(float) * (size_t)cnt * n);
                 }
@@ -2614,7 +2835,8 @@ int es_engine_features_multi(int S, const int32_t *const *ids, const int *len, c
             }
         GRAFT_OFF = 0;
     }
-    KC = kc0; VC = vc0; SSM = ssm0; CONV = conv0; AD = ad0;
+    KC = kc0; VC = vc0; SSM = ssm0; CONV = conv0; AD = ad0; RESP = RESB;
+    free(rs);
 #ifndef __EMSCRIPTEN__
     LOOKAHEAD = la0;
 #endif
