@@ -75,6 +75,11 @@ about 1e-6). Honest limits: reading the data through a 200B model on a phone tak
 facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
 `python3 scripts/test_graft.py MODEL.gguf`.
 
+**Tested on 218 models (`scripts/test_200.py`).** 105 small random models covering 14 designs, compared logit by logit with
+PyTorch (Kimi K3: with llama.cpp); 43 real GGUF files in many quantizations, compared with llama.cpp; and 70 real giant files from 14B
+to 2.4T parameters (9.1 TB in all), loaded and run from their headers alone (`es_get --skeleton`, every weight zero: this proves
+support, not answer quality). All 218 pass. The run found and fixed a Qwen3 q-norm bug and added Kimi K3. Details: [`docs/test-200.md`](docs/test-200.md).
+
 **Layer-by-layer reading and training inside the model (MeZO).** For models bigger than RAM, `es_graft read` and `es_graft zo` run
 groups of examples through the model layer by layer (as FlexGen does): each layer's experts are read from flash once for the whole group.
 Outputs are bit-identical to one sequence at a time on every architecture, and the bytes read fell 10.4x for OLMoE (`es_graft multicheck`).
