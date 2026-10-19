@@ -8,8 +8,9 @@ Three tiers, each checked against something independent:
          DeepSeek V2, DeepSeek V3, Qwen3.5 dense and MoE), with shapes, attention layouts, expert counts, routing and rope
          settings drawn from what real models use. Built with Hugging Face transformers, converted with llama.cpp's
          convert_hf_to_gguf.py, run by es_chat: every logit must match PyTorch (float32, exact activations).
-  small  real GGUF files (scripts/models_200.json), many quantizations, downloaded whole: the engine's logits on a real text
-         are compared with llama.cpp's (the same file, the same token ids). Also the engine's perplexity on that text.
+  small  real GGUF files (scripts/models_200.json), many quantizations, downloaded whole, run on a real text: the engine's
+         logits must agree with llama.cpp's (same file, same token ids), and its 8-bit activation rounding must be no worse
+         than llama.cpp's (each measured as KL against the engine with exact activations). Also perplexity on the text.
   big    real giant GGUF files, 14B to 2.4T parameters: only the headers are downloaded (es_get --skeleton, every weight reads
          as zero). The engine must load the real structure (all parts, tensors, formats, hyperparameters) and run a forward
          pass. This checks support, not answer quality: the weights are not there.
@@ -299,6 +300,14 @@ def ref_tool():
     return exe
 
 
+def lsm(x):
+    x = x.astype(np.float64); m = x.max(1, keepdims=True)
+    return x - m - np.log(np.exp(x - m).sum(1, keepdims=True))
+
+
+def kl(lp, lq): return float((np.exp(lp) * (lp - lq)).sum(1).mean())   # KL(p || q) from log-probabilities, mean over positions
+
+
 def run_small(models):
     ref = ref_tool()
     tokz = os.path.join(LC, 'build', 'bin', 'llama-tokenize')
@@ -320,22 +329,26 @@ def run_small(models):
             ids = json.loads(line[-1])[:64]
             a, err, es_s = engine_logits(path, ids, None, ('-q',))
             if a is None: record('small', name, False, 'engine failed: ' + (err.strip().splitlines() or ['?'])[-1][:150]); continue
-            nll = [float(np.log(np.exp(a[i] - a[i].max()).sum()) + a[i].max() - a[i][ids[i + 1]]) for i in range(len(ids) - 1)]
-            ppl = math.exp(sum(nll[8:]) / len(nll[8:]))
+            x, err, _ = engine_logits(path, ids, {'ES_FLOAT_ACT': '1'}, ('-q',))   # exact activations: only the weights are rounded
+            if x is None: record('small', name, False, 'engine (exact activations) failed: ' + (err.strip().splitlines() or ['?'])[-1][:150]); continue
+            la, lx = lsm(a), lsm(x)
+            ppl = math.exp(-float(np.mean([la[i, ids[i + 1]] for i in range(8, len(ids) - 1)])))
             out = os.path.join(W, 'ref.bin')
             if os.path.exists(out): os.remove(out)
             rr = subprocess.run([ref, path, out, *map(str, ids)], capture_output=True, text=True)
             if rr.returncode or not os.path.exists(out):
                 record('small', name, ppl < 60 and np.isfinite(a).all(), 'no llama.cpp reference (%s); engine perplexity on the text %.1f' %
                        ((rr.stderr.strip().splitlines() or ['?'])[-1][:80], ppl), ppl=ppl); continue
-            b = np.fromfile(out, dtype=np.float32).reshape(len(ids), -1)[:, :a.shape[1]]
-            def sm(x): e = np.exp(x - x.max(1, keepdims=True)); return e / e.sum(1, keepdims=True)
-            pb, pa = sm(b.astype(np.float64)), sm(a.astype(np.float64))
-            kl = float((pb * (np.log(pb + 1e-30) - np.log(pa + 1e-30))).sum(1).mean())
-            top = float((a.argmax(1) == b.argmax(1)).mean())
-            ok = kl < 0.01 and top >= 0.9 and np.isfinite(a).all()
-            record('small', name, ok, 'vs llama.cpp: same top token %d%%, KL %.1e | perplexity %.1f | %d tokens, engine %.0f s, download %.0f s' %
-                   (round(100 * top), kl, ppl, len(ids), es_s, dl_s), kl=kl, top1=top, ppl=ppl)
+            lb = lsm(np.fromfile(out, dtype=np.float32).reshape(len(ids), -1)[:, :a.shape[1]])
+            # Both engines round the activations (8-bit) for speed; that alone moves the scores, a lot for models with large
+            # activation outliers. The engine passes when it agrees with llama.cpp (KL < 0.05, same top token >= 85%) and its
+            # rounding is no worse than llama.cpp's, each measured as KL against the engine with exact activations.
+            e_err, l_err, d = kl(lx, la), kl(lx, lb), kl(lb, la)
+            top = float((la.argmax(1) == lb.argmax(1)).mean())
+            px = math.exp(-float(np.mean([lx[i, ids[i + 1]] for i in range(8, len(ids) - 1)])))
+            ok = np.isfinite(a).all() and d < 0.05 and top >= 0.85 and e_err <= 1.5 * l_err + 1e-3
+            record('small', name, ok, 'vs llama.cpp KL %.1e, top token %d%% | rounding error: engine %.1e, llama.cpp %.1e | perplexity %.2f (exact %.2f) | %.0f s' %
+                   (d, round(100 * top), e_err, l_err, ppl, px, es_s), kl=d, kl_engine=e_err, kl_llama=l_err, top1=top, ppl=ppl, ppl_exact=px, dl_s=dl_s)
         except Exception as e:
             record('small', name, False, 'error: %s' % str(e).splitlines()[0][:160])
         finally:
