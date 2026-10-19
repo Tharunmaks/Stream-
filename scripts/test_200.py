@@ -341,12 +341,14 @@ def run_small(models):
                        ((rr.stderr.strip().splitlines() or ['?'])[-1][:80], ppl), ppl=ppl); continue
             lb = lsm(np.fromfile(out, dtype=np.float32).reshape(len(ids), -1)[:, :a.shape[1]])
             # Both engines round the activations (8-bit) for speed; that alone moves the scores, a lot for models with large
-            # activation outliers. The engine passes when it agrees with llama.cpp (KL < 0.05, same top token >= 85%) and its
-            # rounding is no worse than llama.cpp's, each measured as KL against the engine with exact activations.
+            # activation outliers. The engine passes when its rounding is no worse than llama.cpp's, each measured as KL against
+            # the engine with exact activations, and it agrees with llama.cpp (KL < 0.05, same top token >= 85%) unless it is
+            # clearly more exact. The weight decoders themselves are checked bit for bit by test_quants.py.
             e_err, l_err, d = kl(lx, la), kl(lx, lb), kl(lb, la)
             top = float((la.argmax(1) == lb.argmax(1)).mean())
             px = math.exp(-float(np.mean([lx[i, ids[i + 1]] for i in range(8, len(ids) - 1)])))
-            ok = np.isfinite(a).all() and d < 0.05 and top >= 0.85 and e_err <= 1.5 * l_err + 1e-3
+            closer = e_err < 0.5 * l_err   # clearly more exact than llama.cpp: then disagreeing with it is llama.cpp's rounding
+            ok = np.isfinite(a).all() and e_err <= 1.5 * l_err + 1e-3 and (closer or (d < 0.05 and top >= 0.85))
             record('small', name, ok, 'vs llama.cpp KL %.1e, top token %d%% | rounding error: engine %.1e, llama.cpp %.1e | perplexity %.2f (exact %.2f) | %.0f s' %
                    (d, round(100 * top), e_err, l_err, ppl, px, es_s), kl=d, kl_engine=e_err, kl_llama=l_err, top1=top, ppl=ppl, ppl_exact=px, dl_s=dl_s)
         except Exception as e:
