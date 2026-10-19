@@ -390,6 +390,9 @@ rows = [json.loads(l) for l in open(RES)] if os.path.exists(RES) else []
 last = {}
 for x in rows: last[x['name']] = x
 rows = list(last.values())
+for x in rows:   # small models graded again with the current rule from their stored measurements
+    if x['tier'] == 'small' and 'kl_engine' in x and 'kl' in x:
+        x['ok'] = x['kl_engine'] <= 1.5 * x['kl_llama'] + 1e-3 and x['kl'] <= 1.5 * (x['kl_engine'] + x['kl_llama']) + 0.01
 with open(os.path.join(W, 'report.md'), 'w') as f:
     for tier in ('mini', 'small', 'big'):
         t = [x for x in rows if x['tier'] == tier]
