@@ -172,10 +172,11 @@ def yarn_ds(r):
 
 
 def fam_dsv3(r):
-    ne = r.choice([8, 16, 32]); ng = r.choice([g for g in (1, 2, 4, 8) if ne // g >= 2]); tg = r.randint(1, ng)
+    ne = r.choice([8, 16, 32]); h = r.choice([2, 4]); ng = r.choice([g for g in (1, 2, 4, 8) if ne // g >= 2]); tg = r.randint(1, ng)
     k = r.choice([x for x in (1, 2, 4, 8) if x <= tg * (ne // ng)])
     return 'DeepseekV3ForCausalLM', 'DeepseekV3Config', 'deepseek', dict(hidden_size=r.choice([64, 128]), intermediate_size=192, moe_intermediate_size=r.choice([32, 64]),
-        num_hidden_layers=r.randint(2, 3), num_attention_heads=r.choice([2, 4]), num_key_value_heads=4, n_shared_experts=r.choice([1, 2]), n_routed_experts=ne,
+        num_hidden_layers=r.randint(2, 3), num_attention_heads=h, num_key_value_heads=h,   # MLA: one latent, as many k/v heads as q heads
+        n_shared_experts=r.choice([1, 2]), n_routed_experts=ne,
         num_experts_per_tok=k, n_group=ng, topk_group=tg, routed_scaling_factor=r.choice([1.0, 2.5]), first_k_dense_replace=r.choice([0, 1]),
         norm_topk_prob=True, q_lora_rank=r.choice([32, 64]), kv_lora_rank=r.choice([16, 32]), qk_nope_head_dim=r.choice([16, 32]), qk_rope_head_dim=16,
         v_head_dim=r.choice([16, 32]), max_position_embeddings=163840, rope_theta=10000.0, rope_scaling=yarn_ds(r), tie_word_embeddings=False,
@@ -183,9 +184,10 @@ def fam_dsv3(r):
 
 
 def fam_dsv2(r):
-    ne = r.choice([8, 16])
+    ne = r.choice([8, 16]); h = r.choice([2, 4])
     return 'DeepseekV2ForCausalLM', 'DeepseekV2Config', 'deepseek', dict(hidden_size=r.choice([64, 128]), intermediate_size=192, moe_intermediate_size=r.choice([32, 64]),
-        num_hidden_layers=r.randint(2, 3), num_attention_heads=r.choice([2, 4]), num_key_value_heads=4, n_shared_experts=r.choice([1, 2]), n_routed_experts=ne,
+        num_hidden_layers=r.randint(2, 3), num_attention_heads=h, num_key_value_heads=h,   # MLA: one latent, as many k/v heads as q heads
+        n_shared_experts=r.choice([1, 2]), n_routed_experts=ne,
         num_experts_per_tok=r.choice([2, 4, 6]), n_group=1, topk_group=1, topk_method='greedy', routed_scaling_factor=1.0, first_k_dense_replace=1,
         norm_topk_prob=False, q_lora_rank=r.choice([None, 32]), kv_lora_rank=r.choice([16, 32]), qk_nope_head_dim=r.choice([16, 32]), qk_rope_head_dim=16,
         v_head_dim=r.choice([16, 32]), max_position_embeddings=163840, rope_theta=10000.0, rope_scaling=yarn_ds(r), tie_word_embeddings=False,
