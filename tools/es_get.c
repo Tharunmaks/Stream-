@@ -10,6 +10,8 @@
  * are handled. The engine finds the source URLs in FILE.esurl next to the first part. Uses curl; HF_TOKEN for gated repos.
  * Running it again resumes: parts of the core already downloaded are not fetched again.
  * --plan only reads the headers (a few MB) and prints how much would be downloaded now and later; nothing is kept.
+ * --skeleton keeps the headers in full-size sparse files and nothing else: every weight reads as zero. The engine loads and
+ * runs it (meaningless output), which checks that it handles the model's structure without downloading the model.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -49,15 +51,16 @@ static int fetch(const char *url, int fd, uint64_t a, uint64_t b, double *done_m
 
 int main(int argc, char **argv) {
     const char *repo = NULL, *file = NULL, *dir = ".";
-    int all = 0, plan = 0;
+    int all = 0, plan = 0, skel = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-d") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--all")) all = 1;
         else if (!strcmp(argv[i], "--plan")) plan = 1;
+        else if (!strcmp(argv[i], "--skeleton")) skel = 1;
         else if (!repo) repo = argv[i];
         else if (!file) file = argv[i];
     }
-    if (!repo || !file) { fprintf(stderr, "usage: es_get REPO FILE [-d DIR] [--all | --plan]\n"); return 2; }
+    if (!repo || !file) { fprintf(stderr, "usage: es_get REPO FILE [-d DIR] [--all | --plan | --skeleton]\n"); return 2; }
     mkdir(dir, 0755);
     int nparts = 1;
     const char *dash = strstr(file, "-00001-of-");
@@ -67,7 +70,7 @@ int main(int argc, char **argv) {
     char path1[4096], urlf[4200];
     snprintf(path1, sizeof path1, "%s/%s", dir, base1);
     snprintf(urlf, sizeof urlf, "%s.esurl", path1);
-    FILE *uf = plan ? fopen("/dev/null", "w") : fopen(urlf, "w");
+    FILE *uf = plan || skel ? fopen("/dev/null", "w") : fopen(urlf, "w");
     if (!uf) { perror(urlf); return 1; }
     double total_core = 0, total_all = 0, total_exp = 0;
     for (int part = 1; part <= nparts; part++) {
@@ -125,8 +128,9 @@ int main(int argc, char **argv) {
         double want = 0;
         for (int i = 0; i < m; i++) want += (rg[i].b - rg[i].a) / 1048576.0;
         total_all += size / 1e9; total_exp += exp_bytes / 1e9; total_core += want / 1024.0;
-        if (plan) {
+        if (plan || skel) {
             fprintf(stderr, "  core %.2f GB, routed experts %.2f GB\n", want / 1024.0, exp_bytes / 1e9);
+            if (skel) { es_gguf_close(&g); close(fd); free(rg); continue; }
             es_gguf_close(&g); close(fd); unlink(path); free(rg);
             continue;
         }
@@ -144,6 +148,7 @@ int main(int argc, char **argv) {
     }
     fprintf(uf, "%s\n", all ? "complete" : "experts-on-demand");
     fclose(uf);
+    if (skel) { printf("skeleton: %s (%.1f GB, every weight zero)\n", path1, total_all); return 0; }
     if (plan) {
         printf("plan: model %.1f GB; download now (core) %.1f GB; routed experts %.1f GB, fetched when first used\n", total_all, total_core, total_exp);
         return 0;

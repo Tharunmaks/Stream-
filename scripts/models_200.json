@@ -1,0 +1,572 @@
+{
+ "_about": "Real GGUF files for scripts/test_200.py. small: downloaded whole and compared with llama.cpp. big: only the headers (es_get --skeleton), loaded and run with every weight zero.",
+ "small": [
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q2_K.gguf",
+   "gb": 0.09
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q3_K_M.gguf",
+   "gb": 0.09
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q4_0.gguf",
+   "gb": 0.09
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
+   "gb": 0.11
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q5_K_M.gguf",
+   "gb": 0.11
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q6_K.gguf",
+   "gb": 0.14
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-Q8_0.gguf",
+   "gb": 0.14
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-IQ4_XS.gguf",
+   "gb": 0.09
+  },
+  {
+   "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+   "file": "SmolLM2-135M-Instruct-f16.gguf",
+   "gb": 0.27
+  },
+  {
+   "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
+   "file": "SmolLM2-360M-Instruct-Q4_K_M.gguf",
+   "gb": 0.27
+  },
+  {
+   "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
+   "file": "SmolLM2-360M-Instruct-Q8_0.gguf",
+   "gb": 0.39
+  },
+  {
+   "repo": "bartowski/SmolLM2-360M-Instruct-GGUF",
+   "file": "SmolLM2-360M-Instruct-IQ3_M.gguf",
+   "gb": 0.22
+  },
+  {
+   "repo": "bartowski/SmolLM2-1.7B-Instruct-GGUF",
+   "file": "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
+   "gb": 1.06
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q2_k.gguf",
+   "gb": 0.42
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q3_k_m.gguf",
+   "gb": 0.43
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q4_0.gguf",
+   "gb": 0.43
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+   "gb": 0.49
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q5_k_m.gguf",
+   "gb": 0.52
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q6_k.gguf",
+   "gb": 0.65
+  },
+  {
+   "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-0.5b-instruct-q8_0.gguf",
+   "gb": 0.68
+  },
+  {
+   "repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "Qwen2.5-0.5B-Instruct-IQ2_M.gguf",
+   "gb": 0.33
+  },
+  {
+   "repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "Qwen2.5-0.5B-Instruct-IQ3_XS.gguf",
+   "gb": 0.34
+  },
+  {
+   "repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "Qwen2.5-0.5B-Instruct-IQ4_XS.gguf",
+   "gb": 0.35
+  },
+  {
+   "repo": "bartowski/Qwen2.5-0.5B-Instruct-GGUF",
+   "file": "Qwen2.5-0.5B-Instruct-Q3_K_L.gguf",
+   "gb": 0.37
+  },
+  {
+   "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+   "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+   "gb": 1.12
+  },
+  {
+   "repo": "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+   "file": "qwen2.5-coder-0.5b-instruct-q8_0.gguf",
+   "gb": 0.68
+  },
+  {
+   "repo": "Qwen/Qwen3-0.6B-GGUF",
+   "file": "Qwen3-0.6B-Q8_0.gguf",
+   "gb": 0.64
+  },
+  {
+   "repo": "unsloth/Qwen3-0.6B-GGUF",
+   "file": "Qwen3-0.6B-Q4_K_M.gguf",
+   "gb": 0.4
+  },
+  {
+   "repo": "unsloth/Qwen3-0.6B-GGUF",
+   "file": "Qwen3-0.6B-IQ4_NL.gguf",
+   "gb": 0.38
+  },
+  {
+   "repo": "unsloth/Qwen3-0.6B-GGUF",
+   "file": "Qwen3-0.6B-UD-IQ2_XXS.gguf",
+   "gb": 0.23
+  },
+  {
+   "repo": "unsloth/Qwen3-1.7B-GGUF",
+   "file": "Qwen3-1.7B-Q4_K_M.gguf",
+   "gb": 1.11
+  },
+  {
+   "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+   "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+   "gb": 2.5
+  },
+  {
+   "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+   "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+   "gb": 0.81
+  },
+  {
+   "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+   "file": "Llama-3.2-1B-Instruct-IQ3_M.gguf",
+   "gb": 0.66
+  },
+  {
+   "repo": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+   "file": "Llama-3.2-1B-Instruct-Q6_K.gguf",
+   "gb": 1.02
+  },
+  {
+   "repo": "bartowski/Llama-3.2-3B-Instruct-GGUF",
+   "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+   "gb": 2.02
+  },
+  {
+   "repo": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+   "file": "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+   "gb": 0.67
+  },
+  {
+   "repo": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+   "file": "tinyllama-1.1b-chat-v1.0.Q2_K.gguf",
+   "gb": 0.48
+  },
+  {
+   "repo": "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+   "file": "Mistral-7B-Instruct-v0.3-Q2_K.gguf",
+   "gb": 2.72
+  },
+  {
+   "repo": "bartowski/OLMoE-1B-7B-0924-Instruct-GGUF",
+   "file": "OLMoE-1B-7B-0924-Instruct-Q2_K.gguf",
+   "gb": 2.56
+  },
+  {
+   "repo": "bartowski/OLMoE-1B-7B-0924-Instruct-GGUF",
+   "file": "OLMoE-1B-7B-0924-Instruct-IQ4_XS.gguf",
+   "gb": 3.72
+  },
+  {
+   "repo": "mradermacher/DeepSeek-V2-Lite-Chat-GGUF",
+   "file": "DeepSeek-V2-Lite-Chat.Q2_K.gguf",
+   "gb": 6.43
+  },
+  {
+   "repo": "qwp4w3hyb/Qwen1.5-MoE-A2.7B-Chat-iMat-GGUF",
+   "file": "qwen1.5-moe-a2.7b-chat-imat-IQ2_XS.gguf",
+   "gb": 5.45
+  }
+ ],
+ "big": [
+  {
+   "repo": "unsloth/Qwen3.8-2.4T-A95B-GGUF",
+   "file": "UD-IQ1_S/Qwen3.8-2.4T-A95B-UD-IQ1_S-00001-of-00012.gguf",
+   "gb": 508.39
+  },
+  {
+   "repo": "unsloth/Kimi-K3-GGUF",
+   "file": "UD-TQ1_0/Kimi-K3-UD-TQ1_0-00001-of-00012.gguf",
+   "gb": 508.91
+  },
+  {
+   "repo": "unsloth/Kimi-K3-GGUF",
+   "file": "UD-IQ1_S/Kimi-K3-UD-IQ1_S-00001-of-00014.gguf",
+   "gb": 594.04
+  },
+  {
+   "repo": "unsloth/Kimi-K2-Instruct-0905-GGUF",
+   "file": "UD-TQ1_0/Kimi-K2-Instruct-0905-UD-TQ1_0-00001-of-00006.gguf",
+   "gb": 248.61
+  },
+  {
+   "repo": "unsloth/Kimi-K2-Instruct-0905-GGUF",
+   "file": "UD-IQ1_M/Kimi-K2-Instruct-0905-UD-IQ1_M-00001-of-00007.gguf",
+   "gb": 304.82
+  },
+  {
+   "repo": "unsloth/Kimi-K2-Instruct-0905-GGUF",
+   "file": "Q2_K/Kimi-K2-Instruct-0905-Q2_K-00001-of-00008.gguf",
+   "gb": 374.12
+  },
+  {
+   "repo": "unsloth/Kimi-K2-Thinking-GGUF",
+   "file": "UD-TQ1_0/Kimi-K2-Thinking-UD-TQ1_0-00001-of-00006.gguf",
+   "gb": 246.85
+  },
+  {
+   "repo": "unsloth/Mistral-Large-3-675B-Instruct-2512-GGUF",
+   "file": "UD-IQ1_S/Mistral-Large-3-675B-Instruct-2512-UD-IQ1_S-00001-of-00004.gguf",
+   "gb": 190.8
+  },
+  {
+   "repo": "unsloth/Mistral-Large-3-675B-Instruct-2512-GGUF",
+   "file": "Q4_K_M/Mistral-Large-3-675B-Instruct-2512-Q4_K_M-00001-of-00009.gguf",
+   "gb": 406.99
+  },
+  {
+   "repo": "unsloth/DeepSeek-R1-0528-GGUF",
+   "file": "UD-IQ1_S/DeepSeek-R1-0528-UD-IQ1_S-00001-of-00004.gguf",
+   "gb": 185.49
+  },
+  {
+   "repo": "unsloth/DeepSeek-R1-0528-GGUF",
+   "file": "DeepSeek-R1-0528-UD-TQ1_0.gguf",
+   "gb": 161.62
+  },
+  {
+   "repo": "unsloth/DeepSeek-R1-0528-GGUF",
+   "file": "Q4_K_M/DeepSeek-R1-0528-Q4_K_M-00001-of-00009.gguf",
+   "gb": 404.94
+  },
+  {
+   "repo": "unsloth/DeepSeek-V3-0324-GGUF",
+   "file": "UD-IQ1_S/DeepSeek-V3-0324-UD-IQ1_S-00001-of-00004.gguf",
+   "gb": 186.24
+  },
+  {
+   "repo": "unsloth/DeepSeek-V3-0324-GGUF",
+   "file": "Q2_K/DeepSeek-V3-0324-Q2_K-00001-of-00005.gguf",
+   "gb": 244.03
+  },
+  {
+   "repo": "unsloth/DeepSeek-V3.1-GGUF",
+   "file": "DeepSeek-V3.1-UD-TQ1_0.gguf",
+   "gb": 170.5
+  },
+  {
+   "repo": "unsloth/DeepSeek-V3.1-GGUF",
+   "file": "Q4_K_M/DeepSeek-V3.1-Q4_K_M-00001-of-00009.gguf",
+   "gb": 405.4
+  },
+  {
+   "repo": "unsloth/DeepSeek-R1-GGUF",
+   "file": "DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf",
+   "gb": 140.23
+  },
+  {
+   "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
+   "file": "UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf",
+   "gb": 106.82
+  },
+  {
+   "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
+   "file": "UD-IQ2_XXS/Qwen3.5-397B-A17B-UD-IQ2_XXS-00001-of-00004.gguf",
+   "gb": 114.87
+  },
+  {
+   "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
+   "file": "MXFP4_MOE/Qwen3.5-397B-A17B-MXFP4_MOE-00001-of-00006.gguf",
+   "gb": 237.35
+  },
+  {
+   "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
+   "file": "Q4_K_M/Qwen3.5-397B-A17B-Q4_K_M-00001-of-00006.gguf",
+   "gb": 244.09
+  },
+  {
+   "repo": "unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+   "file": "Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf",
+   "gb": 149.72
+  },
+  {
+   "repo": "unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+   "file": "Q2_K/Qwen3-Coder-480B-A35B-Instruct-Q2_K-00001-of-00004.gguf",
+   "gb": 174.66
+  },
+  {
+   "repo": "unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+   "file": "Q4_K_M/Qwen3-Coder-480B-A35B-Instruct-Q4_K_M-00001-of-00006.gguf",
+   "gb": 290.06
+  },
+  {
+   "repo": "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+   "file": "Q2_K/Qwen3-235B-A22B-Instruct-2507-Q2_K-00001-of-00002.gguf",
+   "gb": 85.69
+  },
+  {
+   "repo": "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+   "file": "Q4_K_M/Qwen3-235B-A22B-Instruct-2507-Q4_K_M-00001-of-00003.gguf",
+   "gb": 142.15
+  },
+  {
+   "repo": "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+   "file": "Q6_K/Qwen3-235B-A22B-Instruct-2507-Q6_K-00001-of-00004.gguf",
+   "gb": 193.02
+  },
+  {
+   "repo": "unsloth/Qwen3-235B-A22B-Instruct-2507-GGUF",
+   "file": "IQ4_XS/Qwen3-235B-A22B-Instruct-2507-IQ4_XS-00001-of-00003.gguf",
+   "gb": 125.48
+  },
+  {
+   "repo": "unsloth/Qwen3-235B-A22B-Thinking-2507-GGUF",
+   "file": "Q3_K_M/Qwen3-235B-A22B-Thinking-2507-Q3_K_M-00001-of-00003.gguf",
+   "gb": 112.45
+  },
+  {
+   "repo": "unsloth/gpt-oss-120b-GGUF",
+   "file": "Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+   "gb": 62.77
+  },
+  {
+   "repo": "unsloth/gpt-oss-120b-GGUF",
+   "file": "gpt-oss-120b-F16.gguf",
+   "gb": 65.37
+  },
+  {
+   "repo": "ggml-org/gpt-oss-120b-GGUF",
+   "file": "gpt-oss-120b-MXFP4.gguf",
+   "gb": 63.39
+  },
+  {
+   "repo": "ggml-org/gpt-oss-20b-GGUF",
+   "file": "gpt-oss-20b-MXFP4.gguf",
+   "gb": 12.11
+  },
+  {
+   "repo": "unsloth/gpt-oss-20b-GGUF",
+   "file": "gpt-oss-20b-Q2_K.gguf",
+   "gb": 11.47
+  },
+  {
+   "repo": "unsloth/gpt-oss-20b-GGUF",
+   "file": "gpt-oss-20b-Q8_0.gguf",
+   "gb": 12.11
+  },
+  {
+   "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+   "file": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+   "gb": 22.13
+  },
+  {
+   "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+   "file": "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf",
+   "gb": 10.76
+  },
+  {
+   "repo": "unsloth/Qwen3-30B-A3B-GGUF",
+   "file": "Qwen3-30B-A3B-Q4_K_M.gguf",
+   "gb": 18.56
+  },
+  {
+   "repo": "unsloth/Qwen3-30B-A3B-GGUF",
+   "file": "Qwen3-30B-A3B-Q8_0.gguf",
+   "gb": 32.48
+  },
+  {
+   "repo": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+   "file": "Qwen3-30B-A3B-Instruct-2507-IQ4_NL.gguf",
+   "gb": 17.31
+  },
+  {
+   "repo": "unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF",
+   "file": "Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf",
+   "gb": 21.73
+  },
+  {
+   "repo": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+   "file": "Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf",
+   "gb": 25.09
+  },
+  {
+   "repo": "unsloth/Qwen3-32B-GGUF",
+   "file": "Qwen3-32B-Q4_K_M.gguf",
+   "gb": 19.76
+  },
+  {
+   "repo": "unsloth/Qwen3-14B-GGUF",
+   "file": "Qwen3-14B-Q4_0.gguf",
+   "gb": 8.54
+  },
+  {
+   "repo": "bartowski/Qwen2.5-72B-Instruct-GGUF",
+   "file": "Qwen2.5-72B-Instruct-Q4_K_M.gguf",
+   "gb": 47.42
+  },
+  {
+   "repo": "bartowski/Qwen2.5-72B-Instruct-GGUF",
+   "file": "Qwen2.5-72B-Instruct-IQ2_M.gguf",
+   "gb": 29.34
+  },
+  {
+   "repo": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+   "file": "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+   "gb": 19.85
+  },
+  {
+   "repo": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+   "file": "Qwen2.5-32B-Instruct-IQ2_XXS.gguf",
+   "gb": 9.03
+  },
+  {
+   "repo": "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF",
+   "file": "Qwen2.5-Coder-32B-Instruct-Q5_K_M.gguf",
+   "gb": 23.26
+  },
+  {
+   "repo": "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+   "file": "DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+   "gb": 19.85
+  },
+  {
+   "repo": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+   "file": "Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf",
+   "gb": 42.52
+  },
+  {
+   "repo": "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
+   "file": "Meta-Llama-3.1-70B-Instruct-IQ2_XS.gguf",
+   "gb": 21.14
+  },
+  {
+   "repo": "bartowski/Llama-3.3-70B-Instruct-GGUF",
+   "file": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
+   "gb": 42.52
+  },
+  {
+   "repo": "bartowski/Llama-3.3-70B-Instruct-GGUF",
+   "file": "Llama-3.3-70B-Instruct-IQ1_M.gguf",
+   "gb": 16.75
+  },
+  {
+   "repo": "bartowski/DeepSeek-R1-Distill-Llama-70B-GGUF",
+   "file": "DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf",
+   "gb": 42.52
+  },
+  {
+   "repo": "bartowski/Mistral-Large-Instruct-2411-GGUF",
+   "file": "Mistral-Large-Instruct-2411-Q4_K_M/Mistral-Large-Instruct-2411-Q4_K_M-00001-of-00002.gguf",
+   "gb": 73.22
+  },
+  {
+   "repo": "bartowski/Mistral-Large-Instruct-2411-GGUF",
+   "file": "Mistral-Large-Instruct-2411-IQ2_XXS.gguf",
+   "gb": 32.43
+  },
+  {
+   "repo": "bartowski/Mistral-Small-24B-Instruct-2501-GGUF",
+   "file": "Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf",
+   "gb": 14.33
+  },
+  {
+   "repo": "bartowski/Mistral-Small-24B-Instruct-2501-GGUF",
+   "file": "Mistral-Small-24B-Instruct-2501-Q6_K.gguf",
+   "gb": 19.35
+  },
+  {
+   "repo": "bartowski/Codestral-22B-v0.1-GGUF",
+   "file": "Codestral-22B-v0.1-Q4_K_M.gguf",
+   "gb": 13.34
+  },
+  {
+   "repo": "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF",
+   "file": "mixtral-8x7b-instruct-v0.1.Q4_K_M.gguf",
+   "gb": 26.44
+  },
+  {
+   "repo": "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF",
+   "file": "mixtral-8x7b-instruct-v0.1.Q2_K.gguf",
+   "gb": 15.64
+  },
+  {
+   "repo": "bartowski/Mixtral-8x22B-v0.1-GGUF",
+   "file": "Mixtral-8x22B-v0.1-Q4_K_M-00001-of-00005.gguf",
+   "gb": 85.59
+  },
+  {
+   "repo": "MaziyarPanahi/Mixtral-8x22B-Instruct-v0.1-GGUF",
+   "file": "Mixtral-8x22B-Instruct-v0.1.Q2_K-00001-of-00003.gguf",
+   "gb": 52.11
+  },
+  {
+   "repo": "bartowski/DeepSeek-V2.5-GGUF",
+   "file": "DeepSeek-V2.5-Q4_K_M/DeepSeek-V2.5-Q4_K_M-00001-of-00004.gguf",
+   "gb": 142.45
+  },
+  {
+   "repo": "Qwen/QwQ-32B-GGUF",
+   "file": "qwq-32b-q4_k_m.gguf",
+   "gb": 19.85
+  },
+  {
+   "repo": "Qwen/Qwen2.5-14B-Instruct-GGUF",
+   "file": "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
+   "gb": 8.99
+  },
+  {
+   "repo": "unsloth/Llama-3.3-70B-Instruct-GGUF",
+   "file": "Llama-3.3-70B-Instruct-Q2_K.gguf",
+   "gb": 26.38
+  },
+  {
+   "repo": "unsloth/Qwen3.8-2.4T-A95B-GGUF",
+   "file": "UD-IQ1_M/Qwen3.8-2.4T-A95B-UD-IQ1_M-00001-of-00013.gguf",
+   "gb": 563.95
+  },
+  {
+   "repo": "Qwen/Qwen2-57B-A14B-Instruct-GGUF",
+   "file": "qwen2-57b-a14b-instruct-q4_k_m.gguf",
+   "gb": 34.85
+  }
+ ]
+}
