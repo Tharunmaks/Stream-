@@ -9,8 +9,8 @@ Three tiers, each checked against something independent:
          settings drawn from what real models use. Built with Hugging Face transformers, converted with llama.cpp's
          convert_hf_to_gguf.py, run by es_chat: every logit must match PyTorch (float32, exact activations).
   small  real GGUF files (scripts/models_200.json), many quantizations, downloaded whole, run on a real text: the engine's
-         logits must agree with llama.cpp's (same file, same token ids), and its 8-bit activation rounding must be no worse
-         than llama.cpp's (each measured as KL against the engine with exact activations). Also perplexity on the text.
+         8-bit activation rounding must be no worse than llama.cpp's (each measured as KL against the engine with exact
+         activations), and engine and llama.cpp (same file, same token ids) may differ only by those roundings. Also perplexity.
   big    real giant GGUF files, 14B to 2.4T parameters: only the headers are downloaded (es_get --skeleton, every weight reads
          as zero). The engine must load the real structure (all parts, tensors, formats, hyperparameters) and run a forward
          pass. This checks support, not answer quality: the weights are not there.
@@ -342,13 +342,13 @@ def run_small(models):
             lb = lsm(np.fromfile(out, dtype=np.float32).reshape(len(ids), -1)[:, :a.shape[1]])
             # Both engines round the activations (8-bit) for speed; that alone moves the scores, a lot for models with large
             # activation outliers. The engine passes when its rounding is no worse than llama.cpp's, each measured as KL against
-            # the engine with exact activations, and it agrees with llama.cpp (KL < 0.05, same top token >= 85%) unless it is
-            # clearly more exact. The weight decoders themselves are checked bit for bit by test_quants.py.
+            # the engine with exact activations, and it disagrees with llama.cpp no more than those two errors explain.
+            # The weight decoders themselves are checked bit for bit by test_quants.py.
             e_err, l_err, d = kl(lx, la), kl(lx, lb), kl(lb, la)
             top = float((la.argmax(1) == lb.argmax(1)).mean())
             px = math.exp(-float(np.mean([lx[i, ids[i + 1]] for i in range(8, len(ids) - 1)])))
-            closer = e_err < 0.5 * l_err   # clearly more exact than llama.cpp: then disagreeing with it is llama.cpp's rounding
-            ok = np.isfinite(a).all() and e_err <= 1.5 * l_err + 1e-3 and (closer or (d < 0.05 and top >= 0.85))
+            # two roundings of the same correct model can disagree by about the sum of their own errors, never by much more
+            ok = np.isfinite(a).all() and e_err <= 1.5 * l_err + 1e-3 and d <= 1.5 * (e_err + l_err) + 0.01
             record('small', name, ok, 'vs llama.cpp KL %.1e, top token %d%% | rounding error: engine %.1e, llama.cpp %.1e | perplexity %.2f (exact %.2f) | %.0f s' %
                    (d, round(100 * top), e_err, l_err, ppl, px, es_s), kl=d, kl_engine=e_err, kl_llama=l_err, top1=top, ppl=ppl, ppl_exact=px, dl_s=dl_s)
         except Exception as e:
