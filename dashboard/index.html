@@ -123,6 +123,16 @@
           <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
       </section>
 
+      <!-- Users -->
+      <section data-view="users" hidden>
+        <div class="card"><div class="hd"><h3>Users</h3><span class="sub" id="usersSub"></span><div class="sp"></div><input class="input" id="userSearch" placeholder="Search" style="max-width:180px;height:32px"></div>
+          <div class="tbl-wrap"><table><thead><tr><th>User</th><th>Joined</th><th>Last sign-in</th><th>ExpertCloud</th><th>ExpertStream</th><th class="r">Today</th><th class="r">Requests</th><th class="r">Tokens</th><th></th></tr></thead>
+          <tbody id="userRows"></tbody></table></div><div id="usersEmpty" hidden></div></div>
+      </section>
+
+      <!-- Billing -->
+      <section data-view="billing" hidden><div id="billingView"></div></section>
+
       <!-- Connect -->
       <section data-view="connect" hidden>
         <div class="banner warn" id="lanWarn" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
@@ -207,11 +217,11 @@ $("#themeBtn").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- navigation
-const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["keys", "API keys"], ["connect", "Connect"]];
+const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["users", "Users"], ["billing", "Billing"], ["keys", "API keys"], ["connect", "Connect"]];
 let VIEW = "overview";
 for (const [id, label] of VIEWS) {
   $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id), h("span", {}, label), id === "nodes" ? h("span", { class: "count", id: "navNodes" }, "0") : null));
-  $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label === "API keys" ? "Keys" : label));
+  if (id !== "keys" && id !== "connect") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label));
 }
 document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
 function go(id) {
@@ -221,6 +231,8 @@ function go(id) {
   $("#title").textContent = VIEWS.find(v => v[0] === id)[1];
   try { history.replaceState(null, "", "#" + id); } catch {}
   if (id === "keys") loadKeys();
+  if (id === "users") loadUsers();
+  if (id === "billing") loadBilling();
   if (id === "playground" && matchMedia("(min-width: 761px)").matches) setTimeout(() => $("#prompt").focus(), 30);
   render();
 }
@@ -410,6 +422,78 @@ function revoke(k) {
       catch (e) { if (e instanceof AuthError) return showLogin(e.message); toast("Could not revoke: " + e.message, "bad"); } } }, "Revoke key")]);
 }
 
+
+// ---------------------------------------------------------------- users and plans
+let USERS = [], PLANLIST = {};
+const inr = n => "₹" + Number(n).toLocaleString("en-IN");
+const day = t => t ? new Date(t * 1000).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "—";
+async function loadUsers() {
+  try { const r = await api("/admin/users"); USERS = r.users; PLANLIST = r.plans; renderUsers(); }
+  catch (e) { if (e instanceof AuthError) return showLogin(e.message); toast("Could not load users: " + e.message, "bad"); }
+}
+function planChip(p) { return h("span", { class: "chip" + (p.price_inr ? " warm" : "") }, h("span", { class: "dot" }), p.name + (p.expires ? " · " + day(p.expires) : "")); }
+function renderUsers() {
+  const q = $("#userSearch").value.trim().toLowerCase(), rows = USERS.filter(u => !q || u.username.toLowerCase().includes(q));
+  const paid = USERS.filter(u => u.plans.cloud.price_inr || u.plans.expertstream.price_inr).length;
+  $("#usersSub").textContent = USERS.length + " users · " + paid + " paying";
+  $("#userRows").replaceChildren(...rows.map(u => h("tr", {}, h("td", {}, h("b", {}, u.username)), h("td", {}, day(u.created)), h("td", {}, u.last_login ? ago(u.last_login) : "—"),
+    h("td", {}, planChip(u.plans.cloud)), h("td", {}, planChip(u.plans.expertstream)), h("td", { class: "r" }, fmt(u.today)), h("td", { class: "r" }, fmt(u.usage.requests)),
+    h("td", { class: "r" }, fmt(u.usage.completion_tokens)), h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => changePlan(u) }, "Change plan")))));
+  const em = $("#usersEmpty"); em.hidden = rows.length > 0; em.replaceChildren(emptyState("users", "No users yet", "People who sign up on your public page show up here."));
+}
+$("#userSearch").addEventListener("input", renderUsers);
+function changePlan(u) {
+  const sel = h("select", { class: "input" }, Object.entries(PLANLIST).map(([k, v]) => h("optgroup", { label: v.title }, v.plans.map(p => h("option", { value: p.id }, v.title + " " + p.name + " · " + inr(p.price_inr) + "/month")))));
+  sel.value = u.plans.cloud.id;
+  const days = h("select", { class: "input" }, [["30", "30 days"], ["90", "90 days"], ["365", "1 year"], ["", "No end date"]].map(([v, l]) => h("option", { value: v }, l)));
+  modal("Change plan for " + u.username, [h("p", { class: "muted", style: "margin:0 0 12px" }, "For people who paid another way, friends or tests. Picking a Free plan ends that product's paid plan."),
+    h("div", { class: "field" }, h("label", { class: "f" }, "Plan"), sel), h("div", { class: "field" }, h("label", { class: "f" }, "For"), days)],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+      try { await api("/admin/users/" + encodeURIComponent(u.username) + "/plan", { method: "POST", body: JSON.stringify({ plan: sel.value, days: days.value ? +days.value : null }) }); close(); toast("Plan changed", "ok"); loadUsers(); }
+      catch (e) { toast(e.message, "bad"); } } }, "Save")]);
+}
+
+// ---------------------------------------------------------------- billing (Razorpay)
+async function loadBilling() {
+  let b; try { b = await api("/admin/billing"); } catch (e) { if (e instanceof AuthError) return showLogin(e.message); return toast(e.message, "bad"); }
+  const f = (label, input, help) => h("div", { class: "field" }, h("label", { class: "f" }, label), input, help ? h("p", { class: "note", style: "margin:4px 0 0" }, help) : null);
+  const kid = h("input", { class: "input", value: b.key_id, placeholder: "rzp_live_... or rzp_test_...", autocapitalize: "off", spellcheck: "false" });
+  const ksec = h("input", { class: "input", type: "password", placeholder: b.configured ? "saved (type to replace)" : "key secret", autocomplete: "off" });
+  const wsec = h("input", { class: "input", type: "password", placeholder: b.webhook_set ? "saved (type to replace)" : "a secret you choose", autocomplete: "off" });
+  const esu = h("input", { class: "input", value: b.apps.expertstream.url, placeholder: "https://your-expertstream-app", autocapitalize: "off", spellcheck: "false" });
+  const paid = b.payments.filter(x => x.status === "paid"), revenue = paid.reduce((a, x) => a + x.amount_paise, 0) / 100;
+  const month = paid.filter(x => x.paid && Date.now() / 1000 - x.paid < 30 * 86400).reduce((a, x) => a + x.amount_paise, 0) / 100;
+  $("#billingView").replaceChildren(
+    h("div", { class: "grid kpis", style: "grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" },
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Revenue, last 30 days"), h("div", { class: "v" }, inr(month))),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Revenue, all time"), h("div", { class: "v" }, inr(revenue))),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Payments"), h("div", { class: "v" }, fmt(paid.length)), h("div", { class: "s" }, b.payments.length - paid.length + " not completed")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Online payment"), h("div", { class: "v", style: "font-size:20px" }, b.configured ? (b.test_mode ? "Test mode" : "Live") : "Off"),
+        h("div", { class: "s" }, b.configured ? (b.webhook_set ? "webhook set" : "add the webhook below") : "add your Razorpay keys"))),
+    h("div", { class: "grid two" },
+      h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Razorpay"), h("span", { class: "sub" }, "UPI, cards, net banking in INR")), h("div", { class: "bd" },
+        h("ol", { class: "steps", style: "margin-bottom:16px" },
+          h("li", {}, h("h4", {}, "Get your keys"), h("p", { class: "muted", style: "margin:0" }, "Razorpay Dashboard, then Account & Settings, then API Keys. Start with Test Mode keys to try it with test cards.")),
+          h("li", {}, h("h4", {}, "Add the webhook"), h("p", { class: "muted", style: "margin:0 0 8px" }, "Settings, then Webhooks, then Add. URL below; events payment.captured and order.paid; a secret you choose (put it here too)."), codeBlock(b.webhook_url))),
+        f("Key id", kid), f("Key secret", ksec, "Stored on this server only; never shown again."), f("Webhook secret", wsec),
+        h("button", { class: "btn primary", onclick: async () => {
+          const body = { key_id: kid.value.trim() }; if (ksec.value) body.key_secret = ksec.value; if (wsec.value) body.webhook_secret = wsec.value;
+          try { await api("/admin/billing", { method: "POST", body: JSON.stringify(body) }); toast("Saved", "ok"); loadBilling(); } catch (e) { toast(e.message, "bad"); } } }, "Save"))),
+      h("div", { class: "grid", style: "align-content:start" },
+        h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "ExpertStream app")), h("div", { class: "bd" },
+          f("App address", esu, "The app switcher in your users' console opens this."),
+          h("button", { class: "btn", onclick: async () => { try { await api("/admin/billing", { method: "POST", body: JSON.stringify({ expertstream_url: esu.value.trim() }) }); toast("Saved", "ok"); } catch (e) { toast(e.message, "bad"); } } }, "Save"),
+          h("p", { class: "note" }, "Your app signs users in with POST /auth/login {username, password}, then GET /account/plans tells it their ExpertStream plan (es_free, es_plus or es_pro). Its data can live in the user's database: /db/... with the same sign-in."))),
+        h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Plans"), h("span", { class: "sub" }, "per month")), h("div", { class: "bd" },
+          h("dl", { class: "kv" }, Object.values(PLANLIST.cloud ? PLANLIST : {}).flatMap(v => v.plans.map(p => [h("dt", {}, v.title + " " + p.name), h("dd", {}, inr(p.price_inr))])).flat()),
+          h("p", { class: "note" }, "To change prices or limits, put a plans.json next to expertcloud.db (see gateway/plans.py)."))))),
+    h("div", { class: "card", style: "margin-top:16px" }, h("div", { class: "hd" }, h("h3", {}, "Payments")),
+      b.payments.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Date", "User", "Plan", "Amount", "Status", "Payment id"].map(t => h("th", {}, t)))),
+        h("tbody", {}, b.payments.map(x => h("tr", {}, h("td", {}, day(x.created)), h("td", {}, x.username), h("td", {}, x.plan), h("td", {}, inr(x.amount_paise / 100)),
+          h("td", {}, h("span", { class: "st " + (x.status === "paid" ? "on" : "off") }, x.status === "paid" ? "Paid" : "Not paid")), h("td", {}, h("code", {}, x.payment_id || "—")))))))
+        : emptyState("billing", "No payments yet", "Payments made in your users' console show up here.")));
+  if (!PLANLIST.cloud) { try { PLANLIST = (await api("/admin/users")).plans; loadBilling(); } catch {} }
+}
 // ---------------------------------------------------------------- connect
 let connectSig = "";
 function renderConnect(L) {

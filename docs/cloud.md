@@ -72,6 +72,39 @@ ExpertCloud is a cloud platform of its own, like the big clouds but built from c
 Accounts are a username and a password (scrypt-hashed); sessions last 30 days. Sign-ups are limited to 5 an hour per address
 and sign-ins to 10 failures per 10 minutes.
 
+## Plans, payments, database and ExpertStream
+
+**Plans** (monthly, INR; `gateway/plans.py`, override with a `plans.json` next to the database):
+
+| ExpertCloud | Price | Limits |
+|---|---|---|
+| Free | ₹0 | 25 AI requests/day, 5/min, answers ≤256 tokens, 1 API key, 5 MB database |
+| Pro | ₹1,700 | 2,000/day, 60/min, ≤4,096 tokens, 10 keys, 1 GB database (10 databases), faster queue |
+| Max | ₹4,000 | 10,000/day, 200/min, ≤8,192 tokens, 50 keys, 10 GB database (50 databases), front of the queue |
+
+| ExpertStream | Price |
+|---|---|
+| Free | ₹0 |
+| Plus | ₹800 |
+| Pro | ₹2,000 |
+
+ExpertStream plans are sold here; the ExpertStream app applies its own features from the plan id.
+
+**Payments: Razorpay** (UPI, cards, net banking). Owner dashboard > Billing: key id and secret (or `RAZORPAY_KEY_ID`,
+`RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`), and the webhook URL `https://YOUR-HOST/billing/webhook` (events
+`payment.captured`, `order.paid`). Every payment is checked by its Razorpay signature; a plan lasts 30 days, paying again extends
+it, and one payment never counts twice. The owner can also give plans by hand (Users > Change plan).
+
+**Database**: each user gets document databases (collections of JSON documents), in the console and over the API with their
+session or API key: `GET/POST /db`, `GET/POST /db/{db}/{collection}` (POST takes one object or a list: an import of another
+database), `GET/PUT/DELETE /db/{db}/{collection}/{id}`, filters with `?where={"field": value}`. Space and count follow the plan.
+
+**Connecting the ExpertStream app** (one account for both, like Drive and Photos): the app signs users in with
+`POST /auth/login {username, password}` (or sends them to sign up at `/`), reads `GET /account/plans` for their ExpertStream plan
+(`es_free`, `es_plus`, `es_pro`), and can keep their data in `/db/...`. The API allows calls from any website (CORS) since it uses
+bearer tokens. To move the app's current data over, export it as JSON and import it per collection. The console's app switcher
+opens the ExpertStream address set in the owner's Billing page.
+
 ## Easiest way: the `cloud` command
 
 ```

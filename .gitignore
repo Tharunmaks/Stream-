@@ -33,3 +33,6 @@ es_fmtbench
 expertcloud.db
 expertcloud.db-*
 __pycache__/
+expertcloud.db*
+clouddata.db*
+plans.json

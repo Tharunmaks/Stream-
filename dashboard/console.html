@@ -6,7 +6,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="dark light">
 <title>ExpertCloud</title>
-<meta name="description" content="A free AI cloud built from shared computers: open models, an OpenAI-compatible API and a playground.">
+<meta name="description" content="ExpertCloud: AI models, an OpenAI-compatible API, a database and a playground, with plans in rupees.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c6cff'/%3E%3Cpath d='M9 22l7-12 7 12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/ui.css">
 <style>
@@ -49,6 +49,33 @@
 .how h3 { margin: 0 0 6px; font-size: 15px; } .how p { margin: 0; color: var(--muted); font-size: 13.5px; }
 .foot { max-width: 1180px; margin: 0 auto; padding: 30px 24px 50px; color: var(--faint); font-size: 12.5px; display: flex; gap: 16px; flex-wrap: wrap; }
 .foot a { color: var(--muted); }
+.plans3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.pcard { padding: 22px; display: flex; flex-direction: column; gap: 4px; position: relative; }
+.pcard.pop { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), var(--shadow); }
+.pcard .tagline { position: absolute; top: -11px; left: 20px; background: var(--accent); color: #fff; }
+.pcard h3 { margin: 0; font-size: 17px; }
+.pcard .price { font-size: 34px; font-weight: 750; letter-spacing: -.03em; margin: 8px 0 12px; }
+.pcard .price small { font-size: 14px; color: var(--muted); font-weight: 550; letter-spacing: 0; }
+.pcard ul { list-style: none; padding: 0; margin: 0 0 18px; display: grid; gap: 8px; flex: 1; }
+.pcard li { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; } .pcard li svg { color: var(--ok); margin-top: 2px; }
+.pcard.cur { border-color: var(--ok); }
+.ptabs { display: inline-flex; background: var(--bg2); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 18px; }
+.ptabs button { border: 0; background: none; height: 34px; padding: 0 16px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
+.ptabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+.apps { position: relative; }
+.apps-pop { position: absolute; right: 0; top: 46px; width: 300px; background: var(--panel); border: 1px solid var(--line2); border-radius: 16px; box-shadow: 0 20px 60px -20px rgba(0,0,0,.6); padding: 12px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; z-index: 30; }
+.apps-pop button, .apps-pop a { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 4px; border-radius: 12px; border: 0; background: none; cursor: pointer; color: var(--text); font-size: 12px; font-weight: 600; text-decoration: none; text-align: center; }
+.apps-pop button:hover, .apps-pop a:hover { background: var(--panel2); }
+.apps-pop .ai { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; color: #fff; }
+.apps-pop .ai svg { width: 22px; height: 22px; }
+.dbcols { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+.dbtree .db { border-bottom: 1px solid var(--line); padding: 12px 16px; }
+.dbtree .db:last-child { border-bottom: 0; }
+.dbtree .dbn { display: flex; align-items: center; gap: 8px; font-weight: 650; }
+.dbtree .coll { display: flex; justify-content: space-between; gap: 8px; width: 100%; border: 0; background: none; color: var(--muted); padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; text-align: left; }
+.dbtree .coll:hover { background: var(--panel2); color: var(--text); } .dbtree .coll.on { background: var(--accent-soft); color: var(--text); }
+.json { font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 860px) { .plans3 { grid-template-columns: 1fr; } .dbcols { grid-template-columns: 1fr; } }
 /* ---------- auth ---------- */
 .seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--bg2); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 18px; }
 .seg button { border: 0; background: none; height: 34px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
@@ -87,15 +114,15 @@
   </nav>
   <header class="hero">
     <div>
-      <span class="badge"><svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Free plan, no credit card</span>
-      <h1 style="margin-top:16px">The free <span>AI cloud</span>, powered by shared computers.</h1>
-      <p class="lead">Run open AI models from any app with an OpenAI-compatible API, try them in the playground, and add your own computer to make the cloud stronger.</p>
+      <span class="badge"><svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Start free, upgrade in rupees</span>
+      <h1 style="margin-top:16px">Your <span>AI cloud</span>. Models, database and API in one place.</h1>
+      <p class="lead">Call open AI models from any app with an OpenAI-compatible API, keep your app's data in the ExpertCloud Database, and use the same account in ExpertStream.</p>
       <div class="cta"><button class="btn primary" data-auth="signup">Create a free account</button><button class="btn" data-auth="login">Sign in</button></div>
     </div>
     <div class="card live">
-      <div class="t"><span class="pill ok" id="liveDot"><span class="dot"></span><span>Live</span></span>Right now on this cloud</div>
+      <div class="t"><span class="pill ok" id="liveDot"><span class="dot"></span><span>Live</span></span>ExpertCloud right now</div>
       <div class="nums">
-        <div class="num"><b id="lNodes">–</b><span>computers online</span></div>
+        <div class="num"><b id="lNodes">–</b><span>servers online</span></div>
         <div class="num"><b id="lCores">–</b><span>CPU cores</span></div>
         <div class="num"><b id="lRam">–</b><span>memory</span></div>
         <div class="num"><b id="lTps">–</b><span>tokens/s, last minute</span></div>
@@ -105,35 +132,31 @@
     </div>
   </header>
   <section class="section">
-    <h2>Everything a cloud gives you, for free</h2>
-    <p class="sub">The same building blocks as the big clouds, run on computers people share.</p>
+    <h2>Everything your app needs</h2>
+    <p class="sub">One account for ExpertCloud and ExpertStream.</p>
     <div class="feats">
-      <div class="card feat"><div class="ic" data-icon="models"></div><h3>AI models</h3><p>Open models served by the cloud. The router picks the fastest free computer for every request.</p></div>
+      <div class="card feat"><div class="ic" data-icon="models"></div><h3>AI models</h3><p>Open models ready to call. Every request goes to the fastest server that is free.</p></div>
       <div class="card feat"><div class="ic" data-icon="bolt"></div><h3>OpenAI-compatible API</h3><p>Point any OpenAI SDK or app at your ExpertCloud address with a free key. Streaming included.</p></div>
-      <div class="card feat"><div class="ic" data-icon="playground"></div><h3>Playground</h3><p>Chat with every model in the browser and see which computer answered and how fast.</p></div>
-      <div class="card feat"><div class="ic" data-icon="compute"></div><h3>Shared compute</h3><p>Add a phone, laptop or server with one command. Sharing gets you priority and no rate limit.</p></div>
+      <div class="card feat"><div class="ic" data-icon="playground"></div><h3>Playground</h3><p>Chat with every model in the browser and see how fast each answer comes.</p></div>
+      <div class="card feat"><div class="ic" data-icon="db"></div><h3>Database</h3><p>Store your app's data as JSON documents, filter it, and import an export of another database in one call.</p></div>
     </div>
   </section>
-  <section class="section">
+  <section class="section" id="pricing">
     <h2>Plans</h2>
-    <p class="sub">Use the cloud for free. Share a computer to get more.</p>
-    <div class="plan">
-      <div class="card"><h3>Free</h3><div class="price">$0<small> / forever</small></div>
-        <ul id="planFree"></ul></div>
-      <div class="card" style="border-color:var(--accent)"><h3>Contributor</h3><div class="price">$0<small> + a computer you share</small></div>
-        <ul><li data-check>Everything in Free</li><li data-check>No rate limit</li><li data-check>Your requests skip the queue</li><li data-check>See the work your computers did</li></ul></div>
-    </div>
+    <p class="sub">Monthly, in Indian rupees. Pay with UPI, cards or net banking.</p>
+    <div id="planTabs"></div>
+    <div class="plans3" id="planCards"></div>
   </section>
   <section class="section" id="docs-public">
     <h2>Start in a minute</h2>
     <p class="sub">Three steps from zero to your first answer.</p>
     <div class="how">
-      <div class="card"><h3>Create an account</h3><p>A username and a password. Nothing else.</p></div>
+      <div class="card"><h3>Create an account</h3><p>A username and a password. Free to start.</p></div>
       <div class="card"><h3>Make an API key</h3><p>In the console under API keys. Use it from curl, Python, JavaScript or any OpenAI app.</p></div>
       <div class="card"><h3>Call a model</h3><p>Model <code>auto</code> picks the best model online. Or try it first in the Playground.</p></div>
     </div>
   </section>
-  <footer class="foot"><span>ExpertCloud</span><span>Prompts are answered by the computers in this cloud.</span><a href="/dashboard">Owner dashboard</a></footer>
+  <footer class="foot"><span>ExpertCloud</span><a href="#pricing">Plans</a><a href="#docs-public">Docs</a><a href="/dashboard">Owner</a></footer>
 </div>
 
 <!-- ======================================================= console -->
@@ -152,7 +175,8 @@
     <header class="top">
       <h2 id="title">Home</h2>
       <div class="sp"></div>
-      <span class="pill" id="status"><span class="dot"></span><span>Connecting</span></span>
+      <span class="pill hide-sm" id="status"><span class="dot"></span><span>Connecting</span></span>
+      <div class="apps"><button class="btn ghost icon" id="appsBtn" aria-label="Apps" aria-haspopup="true"></button></div>
       <button class="btn ghost icon mobile-only" id="logoutTop" aria-label="Sign out"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg></button>
     </header>
     <div class="page">
@@ -160,11 +184,12 @@
 
       <section data-view="home">
         <div class="welcome"><h1 id="hello">Welcome</h1><span class="badge" id="planBadge">Free plan</span><div class="sp"></div><button class="btn primary" data-go="playground">Open the playground</button></div>
+        <div class="card" id="planCard" style="margin-bottom:16px"></div>
         <div class="grid kpis">
           <div class="card kpi"><div class="l">Requests</div><div class="v" id="uReq">0</div><div class="s">made by your keys and the playground</div></div>
           <div class="card kpi"><div class="l">Tokens generated</div><div class="v" id="uOut">0</div><div class="s" id="uIn">—</div></div>
           <div class="card kpi"><div class="l">Tokens saved</div><div class="v" id="uSaved">0</div><div class="s">by prompt compression and the cache</div></div>
-          <div class="card kpi"><div class="l">Tokens you contributed</div><div class="v" id="uContrib">0</div><div class="s">generated by your shared computers</div></div>
+          <div class="card kpi"><div class="l">Cache hits</div><div class="v" id="uContrib">0</div><div class="s">answers returned instantly</div></div>
         </div>
         <div class="grid two">
           <div class="card"><div class="hd"><h3>Cloud status</h3><span class="sub">live</span></div><div class="bd">
@@ -219,6 +244,10 @@
           <div class="tbl-wrap"><table class="keys-tbl"><thead><tr><th>Key</th><th>Label</th><th>Created</th><th class="r">Requests</th><th class="r">Tokens out</th><th>Last used</th><th>Status</th><th></th></tr></thead>
           <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
       </section>
+
+      <section data-view="database" hidden><div id="dbView"></div></section>
+      <section data-view="billing" hidden><div id="billView"></div></section>
+      <section data-view="expertstream" hidden><div id="esView"></div></section>
 
       <section data-view="compute" hidden>
         <div id="computeBox"></div>
@@ -285,10 +314,9 @@ function renderLanding() {
   $("#lNodes").textContent = s ? fmt(s.nodes) : "–"; $("#lCores").textContent = s ? fmt(s.cpu_cores) : "–";
   $("#lRam").textContent = s ? (s.ram_gb >= 1 ? s.ram_gb.toFixed(s.ram_gb >= 10 ? 0 : 1) + " GB" : "0 GB") : "–";
   $("#lTps").textContent = s ? (s.speed.avg_tps || 0).toFixed(1) : "–";
-  const d = $("#liveDot"); d.className = "pill " + (!s ? "bad" : s.nodes ? "ok" : "warn"); d.lastChild.textContent = !s ? "Offline" : s.nodes ? "Live" : "Waiting for computers";
+  const d = $("#liveDot"); d.className = "pill " + (!s ? "bad" : s.nodes ? "ok" : "warn"); d.lastChild.textContent = !s ? "Offline" : s.nodes ? "Live" : "Starting";
   $("#lModels").replaceChildren(...(s && s.models.length ? s.models.map(m => h("span", { class: "chip" + (m.warm ? " warm" : "") }, h("span", { class: "dot" }), m.id)) : [h("span", { class: "muted", style: "font-size:13px" }, s ? "No models online yet" : "—")]));
-  $("#lServed").textContent = s ? fmt(s.served.completion_tokens) + " tokens generated for " + fmt(s.users) + (s.users === 1 ? " person" : " people") + " so far." : "";
-  $("#planFree").replaceChildren(...["All models on the cloud", "OpenAI-compatible API and keys", "Playground in the browser", s && s.rate_per_min ? s.rate_per_min + " requests per minute" : "Fair-use rate limit", "Prompt compression and answer cache"].map(t => h("li", {}, icon("check"), t)));
+  $("#lServed").textContent = s ? fmt(s.served.completion_tokens) + " tokens generated for " + fmt(s.users) + (s.users === 1 ? " user" : " users") + " so far." : "";
   document.querySelectorAll('[data-auth="signup"]').forEach(b => b.hidden = s && !s.signup);
 }
 
@@ -317,6 +345,7 @@ function authModal(mode) {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
       store.set("ec_session", j.token, true); TOKEN = j.token; USER = j.username; close(); enterConsole(m === "signup");
+      if (WANT_PLAN) { const want = WANT_PLAN; WANT_PLAN = null; billTab = want.startsWith("es_") ? "expertstream" : "cloud"; go("billing"); setTimeout(() => buy(want), 600); }
     } catch (er) { err.hidden = false; err.lastChild.textContent = er.message.charAt(0).toUpperCase() + er.message.slice(1); }
     go.disabled = false;
   });
@@ -342,11 +371,13 @@ $("#themeBtn").addEventListener("click", () => {
 (t => { if (t) document.documentElement.dataset.theme = t; })(store.get("ec_theme"));
 
 // ---------------------------------------------------------------- console navigation
-const VIEWS = [["home", "Home"], ["models", "Models"], ["playground", "Playground"], ["keys", "API keys"], ["compute", "Compute"], ["docs", "Docs"]];
+const VIEWS = [["home", "Home", "home"], ["models", "Models", "models"], ["playground", "Playground", "playground"], ["database", "Database", "db"],
+  ["keys", "API keys", "keys"], ["billing", "Plans & billing", "card"], ["expertstream", "ExpertStream", "stream"], ["compute", "Servers", "compute"], ["docs", "Docs", "docs"]];
+const MOBILE = { home: "Home", playground: "Chat", database: "Database", keys: "Keys", billing: "Plans" };
 let VIEW = "home";
-for (const [id, label] of VIEWS) {
-  $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id === "keys" ? "keys" : id), h("span", {}, label)));
-  if (id !== "docs") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label === "API keys" ? "Keys" : label));
+for (const [id, label, ic] of VIEWS) {
+  $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(ic), h("span", {}, label)));
+  if (MOBILE[id]) $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(ic), MOBILE[id]));
 }
 document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
 function go(id) {
@@ -357,6 +388,10 @@ function go(id) {
   try { history.replaceState(null, "", "#" + id); } catch {}
   if (id === "keys") loadKeys();
   if (id === "compute") loadCompute();
+  if (id === "database") loadDatabase();
+  if (id === "billing") renderBilling();
+  if (id === "expertstream") renderES();
+  closeApps();
   render();
 }
 function enterConsole(fresh) {
@@ -372,28 +407,32 @@ function render() {
   renderLanding();
   if (!TOKEN || !STATS) return;
   const s = STATS, a = ACCOUNT;
-  setStatus(s.nodes ? "ok" : "warn", s.nodes ? "Cloud live · " + s.nodes + (s.nodes === 1 ? " computer" : " computers") : "No computers online");
-  if (a) { USER = a.username; $("#whoSide").textContent = a.username; $("#hello").textContent = "Hi, " + a.username; $("#planBadge").textContent = a.plan.contributor ? "Contributor" : "Free plan"; }
+  setStatus(s.nodes ? "ok" : "warn", s.nodes ? "All systems running" : "AI servers starting");
+  if (a) { USER = a.username; $("#whoSide").textContent = a.username; $("#hello").textContent = "Hi, " + a.username; $("#planBadge").textContent = a.plan.name + " plan"; }
   renderModelSelect();
-  if (VIEW === "home") renderHome();
+  document.querySelectorAll('[data-nav="compute"]').forEach(b => b.hidden = !s.public_compute);
+  if (VIEW === "home") { renderHome(); renderPlanCard(); }
   if (VIEW === "models") renderModels();
+  if (VIEW === "docs") renderDocs();
+  if (VIEW === "billing" && !$("#billView").firstChild) renderBilling();
+  if (VIEW === "expertstream" && !$("#esView").firstChild) renderES();
 }
 function renderHome() {
   const s = STATS, u = (ACCOUNT && ACCOUNT.usage) || {};
   $("#uReq").textContent = fmt(u.requests); $("#uOut").textContent = fmt(u.completion_tokens); $("#uIn").textContent = fmt(u.prompt_tokens) + " prompt tokens sent";
-  $("#uSaved").textContent = fmt(u.tokens_saved); $("#uContrib").textContent = fmt(u.contributed_tokens);
-  const cells = [[fmt(s.nodes), "computers"], [fmt(s.cpu_cores), "CPU cores"], [s.ram_gb + " GB", "memory"], [(s.speed.avg_tps || 0).toFixed(1), "tokens/s"], [fmt(s.models.length), "models"], [fmt(s.users), "people"]];
+  $("#uSaved").textContent = fmt(u.tokens_saved); $("#uContrib").textContent = fmt(u.cache_hits);
+  const cells = [[fmt(s.nodes), "servers"], [fmt(s.cpu_cores), "CPU cores"], [s.ram_gb + " GB", "memory"], [(s.speed.avg_tps || 0).toFixed(1), "tokens/s"], [fmt(s.models.length), "models"], [fmt(s.users), "people"]];
   $("#cloudSpec").replaceChildren(...cells.map(([v, l]) => h("div", {}, h("b", {}, v), h("span", {}, l))));
   const pct = s.capacity ? s.busy / s.capacity * 100 : 0;
   $("#cloudLoad").replaceChildren(h("div", { class: "t" }, h("span", {}, "Busy right now"), h("b", {}, s.busy + " of " + s.capacity + " slots")), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" })));
-  $("#cloudNote").textContent = s.nodes ? fmt(s.served.completion_tokens) + " tokens generated on this cloud so far." : "No computers are online, so requests wait. Share one from the Compute page.";
+  $("#cloudNote").textContent = s.nodes ? fmt(s.served.completion_tokens) + " tokens generated on this cloud so far." : "The AI servers are starting; requests wait until one is ready.";
 }
 function renderModels() {
   const g = $("#modelGrid"), ms = STATS.models;
-  if (!ms.length) { g.replaceChildren(h("div", { class: "card", style: "grid-column:1/-1" }, emptyState("models", "No models online", "Models appear here as soon as a computer that has one joins the cloud."))); return; }
+  if (!ms.length) { g.replaceChildren(h("div", { class: "card", style: "grid-column:1/-1" }, emptyState("models", "No models online", "Models appear here as soon as a server starts them."))); return; }
   g.replaceChildren(...ms.map(m => h("div", { class: "card mcard" },
     h("div", { class: "row" }, h("div", { class: "nm" }, m.id), h("span", { class: "chip" + (m.warm ? " warm" : "") }, h("span", { class: "dot" }), m.warm ? "ready" : "loads on first use")),
-    h("div", { class: "muted", style: "font-size:13px" }, mb(m.size_mb) + " · on " + m.nodes + (m.nodes === 1 ? " computer" : " computers")),
+    h("div", { class: "muted", style: "font-size:13px" }, mb(m.size_mb) + " · " + (m.warm ? "ready now" : "starts on first request")),
     h("div", { class: "row", style: "justify-content:flex-start;gap:8px" }, h("button", { class: "btn sm primary", onclick: () => { $("#pModel").value = m.id; go("playground"); } }, "Try it"),
       h("button", { class: "btn sm", onclick: () => copy(m.id) }, "Copy name")))));
 }
@@ -449,24 +488,24 @@ async function loadCompute() {
     h("div", {}, h("div", { class: "nm" }, n.name), h("div", { class: "muted", style: "font-size:12px" }, [n.cpu_cores ? n.cpu_cores + " cores" : null, mb(n.ram_mb) + " RAM", n.models.length + (n.models.length === 1 ? " model" : " models")].filter(Boolean).join(" · "))),
     h("div", { class: "meta" }, n.served + " answers" + (n.tps ? " · " + n.tps.toFixed(1) + " tok/s" : "") + " · online " + dur(n.online_s)))))
     : emptyState("compute", "None of your computers are online", c.enabled ? "Run the command below on a computer and it appears here." : "");
-  const how = h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Share a computer")), h("div", { class: "bd" }));
+  const how = h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Add a server")), h("div", { class: "bd" }));
   const bd = how.lastChild;
-  if (!c.enabled) bd.append(h("p", { class: "muted", style: "margin:0" }, "This cloud does not take shared computers from users yet. The owner can turn it on in their dashboard."));
+  if (!c.enabled) bd.append(h("p", { class: "muted", style: "margin:0" }, "Adding your own servers is not open on this cloud."));
   else {
-    bd.append(h("p", { class: "muted", style: "margin:0 0 12px" }, "Any Linux computer, Android phone (Termux), Kaggle or Colab notebook can join. It downloads a model, then answers requests while it runs. Requests from other people are answered on it, so they pass through it."),
+    bd.append(h("p", { class: "muted", style: "margin:0 0 12px" }, "Any Linux machine or Android phone (Termux) can run as a server for this cloud. It downloads a model, then answers requests while it runs, including other users' requests."),
       h("button", { class: "btn primary", onclick: async e => {
         e.target.disabled = true;
         try { const r = await call("/account/compute", { method: "POST" });
           bd.querySelector(".joincmd")?.remove();
-          bd.append(h("div", { class: "joincmd" }, h("label", { class: "f", style: "margin-top:14px" }, "Run this on the computer (in a notebook, put ! in front):"), codeBlock(r.command),
-            h("p", { class: "note" }, "This command holds a key of yours: everything the computer generates is credited to you. Do not share it."))); }
+          bd.append(h("div", { class: "joincmd" }, h("label", { class: "f", style: "margin-top:14px" }, "Run this on the server (in a notebook, put ! in front):"), codeBlock(r.command),
+            h("p", { class: "note" }, "This command holds a key of yours: everything the server generates is credited to you. Do not share it."))); }
         catch (er) { toast(er.message, "bad"); }
         e.target.disabled = false; } }, "Get my join command"));
   }
   box.replaceChildren(h("div", { class: "grid kpis", style: "grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" },
-    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Your computers online"), h("div", { class: "v" }, fmt(c.nodes.length))),
-    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Tokens you contributed"), h("div", { class: "v" }, fmt(c.contributed)), h("div", { class: "s" }, c.contributed ? "you have Contributor perks" : "share a computer to get Contributor perks"))),
-    h("div", { class: "grid two" }, how, h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Your computers")), mine)));
+    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Your servers online"), h("div", { class: "v" }, fmt(c.nodes.length))),
+    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Tokens your servers generated"), h("div", { class: "v" }, fmt(c.contributed)))),
+    h("div", { class: "grid two" }, how, h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Your servers")), mine)));
 }
 
 // ---------------------------------------------------------------- docs
@@ -475,7 +514,8 @@ function renderDocs() {
   $("#docSnip").replaceChildren(snippetTabs("sk-expert-YOUR_KEY"));
   $("#quickSnip").replaceChildren(codeBlock(snippets("sk-expert-YOUR_KEY").curl));
   const r = STATS && STATS.rate_per_min;
-  $("#docLimits").textContent = (r ? "Free plan: " + r + " requests per minute per key. " : "") + "Contributors (people sharing a computer) have no limit and skip the queue. Long answers stream as they are written.";
+  const L = (ACCOUNT && ACCOUNT.plan.limits) || null;
+  $("#docLimits").textContent = L ? "Your plan: " + fmt(L.requests_per_day) + " AI requests a day, " + L.requests_per_min + " a minute, answers up to " + fmt(L.max_tokens) + " tokens, " + mb(L.db_mb) + " of database. Database calls are not counted as AI requests." : "Limits depend on your plan: see Plans & billing.";
 }
 
 // ---------------------------------------------------------------- playground
@@ -493,13 +533,13 @@ function renderChat() {
   const box = $("#msgs");
   if (!CHAT.length) {
     const s = h("div", { class: "sugg" }, ["Explain how a cloud works in two sentences", "Write a Python function that reverses a list", "Give me three ideas for a weekend project"].map(p => h("button", { type: "button", onclick: () => { $("#prompt").value = p; send(); } }, p)));
-    box.replaceChildren(h("div", { style: "margin:auto;text-align:center;max-width:480px" }, emptyState("spark", "Ask the cloud anything", "Your message goes to the best computer online. Each answer shows which one and how fast."), s));
+    box.replaceChildren(h("div", { style: "margin:auto;text-align:center;max-width:480px" }, emptyState("spark", "Ask the cloud anything", "Your message goes to the fastest free server. Each answer shows how fast it was."), s));
     return;
   }
   box.replaceChildren(...CHAT.map(m => {
     const txt = h("div", { class: "txt" + (m.error ? " err" : "") }, m.content);
     if (m.pending) txt.append(h("span", { class: "caret" }));
-    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? "computer " + x.node : null, x.model, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
+    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? "server " + x.node : null, x.model, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
       x.ttft_s != null ? "first word " + x.ttft_s.toFixed(2) + " s" : null, x.tps ? x.tps.toFixed(1) + " tok/s" : null, x.tokens ? x.tokens + " tokens" : null].filter(Boolean).map(t => h("span", { class: "chip" }, t))) : null;
     return h("div", { class: "msg " + m.role }, h("div", { class: "av" }, m.role === "user" ? "You" : icon("spark")), h("div", { class: "body" }, h("div", { class: "who" }, m.role === "user" ? "You" : "ExpertCloud"), txt, stats));
   }));
@@ -529,7 +569,7 @@ async function send() {
         for (const line of ev.split("\n")) {
           if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
           const j = JSON.parse(line.slice(6));
-          if (j.error) throw new Error(j.error.message || "the computer failed");
+          if (j.error) throw new Error(j.error.message || "the server failed");
           const d = j.choices && j.choices[0] && j.choices[0].delta;
           if (d && d.content) { if (first == null) first = (performance.now() - t0) / 1000; reply.content += d.content; renderChat(); }
           if (j.x_expertcloud) reply.stats = { ...j.x_expertcloud, model: j.model, tokens: j.usage && j.usage.completion_tokens, ttft_s: j.x_expertcloud.ttft_s ?? first };
@@ -539,7 +579,7 @@ async function send() {
     if (!reply.content) reply.content = "(empty answer)";
   } catch (e) {
     if (e.name === "AbortError") reply.content += reply.content ? " [stopped]" : "[stopped]";
-    else { reply.error = true; reply.content = /no online node|no node/i.test(e.message) ? "No computer with that model is online right now. Try again soon, or pick another model." : e.message; }
+    else { reply.error = true; reply.content = /no online node|no node/i.test(e.message) ? "That model is not available right now. Try again soon, or pick another model." : e.message; }
   } finally { reply.pending = false; ABORT = null; setSending(false); renderChat(); }
 }
 function autoGrow() { const t = $("#prompt"); t.style.height = "auto"; t.style.height = Math.min(200, t.scrollHeight + 2) + "px"; }
@@ -548,7 +588,210 @@ $("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shif
 $("#composer").addEventListener("submit", e => { e.preventDefault(); send(); });
 $("#clearChat").addEventListener("click", () => { if (ABORT) ABORT.abort(); CHAT.length = 0; renderChat(); });
 
+
+// ---------------------------------------------------------------- plans
+let PLANSDATA = null, planTab = "cloud", WANT_PLAN = null;
+const inr = n => "₹" + Number(n).toLocaleString("en-IN");
+const dateOf = t => new Date(t * 1000).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+async function loadPlans() { try { PLANSDATA = await call("/plans"); } catch {} renderLandingPlans(); }
+function planCards(product, button) {
+  const plans = PLANSDATA.products[product].plans;
+  return plans.map((p, i) => h("div", { class: "card pcard" + (i === 1 ? " pop" : "") + (button(p).current ? " cur" : "") },
+    i === 1 ? h("span", { class: "badge tagline" }, "Most popular") : null,
+    h("h3", {}, PLANSDATA.products[product].title + " " + p.name),
+    h("div", { class: "price" }, inr(p.price_inr), h("small", {}, " / month")),
+    h("ul", {}, p.features.map(f => h("li", {}, icon("check"), f))), button(p).el));
+}
+function productTabs(cur, onPick) {
+  return h("div", { class: "ptabs", role: "tablist" }, Object.entries(PLANSDATA.products).map(([k, v]) => h("button", { class: k === cur ? "on" : "", onclick: () => onPick(k) }, v.title)));
+}
+function renderLandingPlans() {
+  if (!PLANSDATA) return;
+  $("#planTabs").replaceChildren(productTabs(planTab, k => { planTab = k; renderLandingPlans(); }));
+  $("#planCards").replaceChildren(...planCards(planTab, p => ({ el: h("button", { class: "btn" + (p.price_inr ? " primary" : ""), style: "width:100%",
+    onclick: () => { WANT_PLAN = p.price_inr ? p.id : null; authModal("signup"); } }, p.price_inr ? "Choose " + p.name : "Start free") })));
+}
+function loadScript(src) {
+  return new Promise((ok, bad) => { if (document.querySelector('script[src="' + src + '"]')) return ok(); const e = h("script", { src }); e.onload = ok; e.onerror = () => bad(new Error("could not load the payment page: check your connection")); document.head.append(e); });
+}
+async function buy(planId) {
+  try {
+    const o = await call("/billing/checkout", { method: "POST", body: JSON.stringify({ plan: planId }) });
+    await loadScript("https://checkout.razorpay.com/v1/checkout.js");
+    const rz = new window.Razorpay({ key: o.key_id, amount: o.amount, currency: "INR", name: "ExpertCloud", description: o.description, order_id: o.order_id,
+      notes: { user: o.username }, theme: { color: "#7c6cff" },
+      handler: async r => {
+        try { await call("/billing/verify", { method: "POST", body: JSON.stringify({ order_id: r.razorpay_order_id, payment_id: r.razorpay_payment_id, signature: r.razorpay_signature }) });
+          toast("Payment received: your plan is on.", "ok"); }
+        catch (e) { toast("Paid, but not confirmed yet (" + e.message + "). It turns on by itself within a minute.", "bad"); }
+        await refresh(); renderBilling(); renderES(); } });
+    rz.on("payment.failed", e => toast("Payment failed: " + ((e.error && e.error.description) || "try again"), "bad"));
+    rz.open();
+  } catch (e) { if (e.message !== "signed out") toast(e.message, "bad"); }
+}
+function planButton(product) {
+  const mine = ACCOUNT && ACCOUNT.plans[product];
+  return p => {
+    const current = mine && mine.id === p.id;
+    if (current) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, p.price_inr ? "Current plan · until " + dateOf(mine.expires) : "Current plan") };
+    if (!p.price_inr) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Included") };
+    if (!PLANSDATA.payments) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Payments open soon") };
+    return { current, el: h("button", { class: "btn primary", style: "width:100%", onclick: () => buy(p.id) }, (mine && mine.price_inr ? "Switch to " : "Upgrade to ") + p.name + " · " + inr(p.price_inr)) };
+  };
+}
+let billTab = "cloud";
+async function renderBilling() {
+  if (!PLANSDATA || !ACCOUNT) return;
+  const box = $("#billView");
+  let pays = []; try { pays = (await call("/billing/payments")).payments; } catch {}
+  const mine = ACCOUNT.plans[billTab];
+  box.replaceChildren(
+    h("div", { class: "row", style: "justify-content:space-between;flex-wrap:wrap;margin-bottom:6px" }, productTabs(billTab, k => { billTab = k; renderBilling(); }),
+      h("span", { class: "muted", style: "font-size:13px" }, "Your " + PLANSDATA.products[billTab].title + " plan: ", h("b", {}, mine.name), mine.expires ? " · until " + dateOf(mine.expires) : "")),
+    h("div", { class: "plans3", style: "margin-bottom:16px" }, planCards(billTab, planButton(billTab))),
+    h("p", { class: "note", style: "margin:0 0 16px" }, "Plans last 30 days from payment. Paying again for the same plan adds 30 days; a different plan starts now. Prices include all charges shown at checkout."),
+    h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Payments")),
+      pays.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Date", "Plan", "Amount", "Status", "Payment id"].map(t => h("th", {}, t)))),
+        h("tbody", {}, pays.map(x => h("tr", {}, h("td", {}, dateOf(x.created)), h("td", {}, (plansFind(x.plan) || {}).label || x.plan), h("td", {}, inr(x.amount_paise / 100)),
+          h("td", {}, h("span", { class: "st " + (x.status === "paid" ? "on" : "off") }, x.status === "paid" ? "Paid" : "Not paid")), h("td", {}, h("code", {}, x.payment_id || "—")))))))
+        : emptyState("card", "No payments yet", "Upgrades you pay for show up here.")));
+}
+function plansFind(id) { for (const [k, v] of Object.entries(PLANSDATA.products)) for (const p of v.plans) if (p.id === id) return { ...p, label: v.title + " " + p.name }; return null; }
+function renderPlanCard() {
+  const a = ACCOUNT; if (!a) return;
+  const L = a.plan.limits || {}, used = a.today || 0, cap = L.requests_per_day || 0, dbq = (L.db_mb || 0) * 1048576;
+  const bar = (label, v, max, text) => { const pct = max ? Math.min(100, v / max * 100) : 0;
+    return h("div", { class: "bar", style: "margin:0" }, h("div", { class: "t" }, h("span", {}, label), h("b", {}, text)), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))); };
+  $("#planCard").replaceChildren(h("div", { class: "bd", style: "display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) auto;gap:18px;align-items:center" },
+    h("div", {}, h("div", { class: "muted", style: "font-size:12.5px" }, "Your plans"), h("div", { style: "font-weight:700;font-size:16px" }, "ExpertCloud " + a.plan.name),
+      h("div", { class: "muted", style: "font-size:12.5px" }, a.plan.expires ? "until " + dateOf(a.plan.expires) : "free, no end date", " · ExpertStream " + a.plans.expertstream.name)),
+    bar("AI requests today", used, cap, fmt(used) + " of " + fmt(cap)), bar("Database space", a.db_bytes || 0, dbq, mb((a.db_bytes || 0) / 1048576) + " of " + mb(L.db_mb)),
+    h("button", { class: "btn" + (a.plan.price_inr === 0 || a.plan.id === "cloud_free" ? " primary" : ""), onclick: () => go("billing") }, a.plan.id === "cloud_free" ? "Upgrade" : "Manage")));
+  if (matchMedia("(max-width: 860px)").matches) $("#planCard").firstChild.style.gridTemplateColumns = "1fr";
+}
+
+// ---------------------------------------------------------------- app switcher (like Google's apps grid)
+function closeApps() { document.querySelector(".apps-pop")?.remove(); }
+$("#appsBtn").append(icon("grid"));
+$("#appsBtn").addEventListener("click", e => {
+  e.stopPropagation();
+  if (document.querySelector(".apps-pop")) return closeApps();
+  const url = PLANSDATA && PLANSDATA.apps.expertstream.url;
+  const tile = (label, ic, bg, act) => h(act.href ? "a" : "button", act.href ? { href: act.href, target: "_blank", rel: "noopener" } : { onclick: act },
+    h("span", { class: "ai", style: "background:" + bg }, icon(ic)), label);
+  document.querySelector(".apps").append(h("div", { class: "apps-pop", role: "menu" },
+    tile("Console", "home", "linear-gradient(135deg,#7c6cff,#5ac8fa)", () => go("home")),
+    tile("ExpertStream", "stream", "linear-gradient(135deg,#f97316,#ec4899)", url ? { href: url } : () => go("expertstream")),
+    tile("Database", "db", "linear-gradient(135deg,#10b981,#06b6d4)", () => go("database")),
+    tile("Playground", "playground", "linear-gradient(135deg,#6366f1,#a855f7)", () => go("playground")),
+    tile("Models", "models", "linear-gradient(135deg,#0ea5e9,#6366f1)", () => go("models")),
+    tile("Billing", "card", "linear-gradient(135deg,#eab308,#f97316)", () => go("billing"))));
+});
+document.addEventListener("click", e => { if (!e.target.closest(".apps-pop")) closeApps(); });
+
+// ---------------------------------------------------------------- ExpertStream
+function renderES() {
+  if (!PLANSDATA || !ACCOUNT) return;
+  const p = ACCOUNT.plans.expertstream, url = PLANSDATA.apps.expertstream.url, t = PLANSDATA.products.expertstream.title;
+  $("#esView").replaceChildren(
+    h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "bd row", style: "gap:16px;flex-wrap:wrap" },
+      h("span", { class: "ai", style: "width:52px;height:52px;border-radius:14px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,#f97316,#ec4899)" }, icon("stream")),
+      h("div", { style: "flex:1;min-width:200px" }, h("div", { style: "font-weight:700;font-size:18px" }, t),
+        h("div", { class: "muted" }, "Your plan: ", h("b", {}, p.name), p.expires ? " · until " + dateOf(p.expires) : "", ". Same account as ExpertCloud: sign in to " + t + " with your ExpertCloud username.")),
+      url ? h("a", { class: "btn primary", href: url, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open " + t) : null)),
+    h("div", { class: "plans3", style: "margin-bottom:16px" }, planCards("expertstream", planButton("expertstream"))),
+    h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Your data in one place")), h("div", { class: "bd" },
+      h("p", { class: "muted", style: "margin:0 0 12px" }, t + " keeps its data in your ExpertCloud Database, so you can see and download it here, like photos in your drive."),
+      h("button", { class: "btn", onclick: () => go("database") }, icon("db"), "Open Database"))));
+}
+
+// ---------------------------------------------------------------- database
+let DB = { list: [], sel: null, coll: null, where: "", offset: 0, quota: 0, used: 0, maxdb: 1, extra: {} };
+async function loadDatabase() {
+  try { const r = await call("/db"); DB.list = r.databases; DB.quota = r.quota_bytes; DB.used = r.used_bytes; DB.maxdb = r.max_databases; }
+  catch (e) { if (e.message !== "signed out") toast("Database: " + e.message, "bad"); return; }
+  renderDatabase();
+}
+function renderDatabase() {
+  const pct = DB.quota ? DB.used / DB.quota * 100 : 0;
+  const name = h("input", { class: "input", placeholder: "new database, e.g. myapp", maxlength: "64", style: "height:34px" });
+  const tree = h("div", { class: "card dbtree" },
+    h("div", { class: "hd" }, h("h3", {}, "Databases"), h("span", { class: "sub" }, DB.list.length + " of " + DB.maxdb)),
+    h("div", { style: "padding:12px 16px;border-bottom:1px solid var(--line)" },
+      h("div", { class: "bar", style: "margin:0 0 10px" }, h("div", { class: "t" }, h("span", {}, "Space"), h("b", {}, mb(DB.used / 1048576) + " of " + mb(DB.quota / 1048576))),
+        h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))),
+      h("form", { class: "row", onsubmit: async e => { e.preventDefault(); try { await call("/db", { method: "POST", body: JSON.stringify({ name: name.value.trim() }) }); toast("Database created", "ok"); loadDatabase(); } catch (er) { toast(er.message, "bad"); } } },
+        name, h("button", { class: "btn sm primary" }, "Create"))),
+    ...(DB.list.length ? DB.list.map(d => h("div", { class: "db" },
+      h("div", { class: "dbn" }, icon("db"), h("span", { style: "flex:1" }, d.name), h("span", { class: "muted", style: "font-size:12px;font-weight:500" }, mb(d.bytes / 1048576)),
+        h("button", { class: "btn sm ghost icon", title: "Delete database", onclick: () => confirmDel("Delete database " + d.name + "?", "Every collection and document in it is deleted. This cannot be undone.", async () => { await call("/db/" + encodeURIComponent(d.name), { method: "DELETE" }); if (DB.sel === d.name) DB.coll = null; loadDatabase(); }) }, "×")),
+      [...d.collections, ...((DB.extra[d.name] || []).filter(c => !d.collections.some(x => x.name === c)).map(c => ({ name: c, docs: 0 })))].map(c =>
+        h("button", { class: "coll" + (DB.sel === d.name && DB.coll === c.name ? " on" : ""), onclick: () => openColl(d.name, c.name) }, h("span", {}, c.name), h("span", {}, fmt(c.docs)))),
+      h("button", { class: "coll", onclick: () => newColl(d.name) }, h("span", {}, "+ New collection"))))
+      : [h("div", { class: "empty", style: "padding:20px" }, "Create your first database above.")]));
+  const main = h("div", { id: "dbMain" });
+  $("#dbView").replaceChildren(h("div", { class: "dbcols" }, tree, main));
+  if (DB.coll) loadDocs(); else main.replaceChildren(h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Use it from your app")), h("div", { class: "bd" },
+    h("p", { class: "muted", style: "margin:0 0 10px" }, "Every database works over the API with an API key from your console. Documents are JSON; an \"id\" field picks the id."),
+    codeBlock('# add a document\ncurl -X POST ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" -d \'{"item": "tea", "status": "paid"}\'\n\n# import an export of another database (a JSON list)\ncurl -X POST ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" --data @export.json\n\n# find documents\ncurl -G ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  --data-urlencode \'where={"status": "paid"}\''))));
+}
+function newColl(db) {
+  const inp = h("input", { class: "input", placeholder: "e.g. users, orders, notes", maxlength: "64" });
+  modal("New collection in " + db, [h("p", { class: "muted", style: "margin:0 0 10px" }, "A collection holds documents of one kind."), inp], close => [h("button", { class: "btn", onclick: close }, "Cancel"),
+    h("button", { class: "btn primary", onclick: () => { const n = inp.value.trim(); if (!/^[A-Za-z0-9_-]{1,64}$/.test(n)) return toast("Use letters, digits, - or _", "bad"); (DB.extra[db] = DB.extra[db] || []).push(n); close(); openColl(db, n); } }, "Create")]);
+  setTimeout(() => inp.focus(), 50);
+}
+function openColl(db, coll) { DB.sel = db; DB.coll = coll; DB.offset = 0; DB.where = ""; renderDatabase(); }
+async function loadDocs() {
+  const main = $("#dbMain"), base = "/db/" + encodeURIComponent(DB.sel) + "/" + encodeURIComponent(DB.coll);
+  let r; try { r = await call(base + "?limit=25&offset=" + DB.offset + (DB.where ? "&where=" + encodeURIComponent(DB.where) : "")); }
+  catch (e) { toast(e.message, "bad"); r = { total: 0, docs: [] }; }
+  const filter = h("input", { class: "input", placeholder: 'filter, e.g. {"status": "paid"}', value: DB.where, style: "height:34px;font-family:var(--mono);font-size:12.5px" });
+  main.replaceChildren(h("div", { class: "card" },
+    h("div", { class: "hd", style: "flex-wrap:wrap" }, h("h3", {}, DB.sel + " / " + DB.coll), h("span", { class: "sub" }, fmt(r.total) + " documents"), h("div", { class: "sp" }),
+      h("button", { class: "btn sm primary", onclick: () => editDoc(base, null) }, "+ Document"), h("button", { class: "btn sm", onclick: () => importDocs(base) }, "Import JSON"),
+      h("button", { class: "btn sm", onclick: () => exportDocs(base) }, "Export"),
+      h("button", { class: "btn sm danger", onclick: () => confirmDel("Delete collection " + DB.coll + "?", "All " + r.total + " documents in it are deleted.", async () => { await call(base, { method: "DELETE" }); DB.coll = null; loadDatabase(); }) }, "Delete")),
+    h("form", { class: "row", style: "padding:12px 18px;border-bottom:1px solid var(--line)", onsubmit: e => { e.preventDefault(); const v = filter.value.trim(); if (v) { try { if (typeof JSON.parse(v) !== "object") throw 0; } catch { return toast("The filter must be a JSON object", "bad"); } } DB.where = v; DB.offset = 0; loadDocs(); } },
+      filter, h("button", { class: "btn sm" }, "Filter")),
+    r.docs.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "id"), h("th", {}, "data"), h("th", {}, "updated"), h("th", {}))),
+      h("tbody", {}, r.docs.map(d => h("tr", {}, h("td", {}, h("code", {}, d.id)), h("td", {}, h("div", { class: "json", title: JSON.stringify(d.data) }, JSON.stringify(d.data))), h("td", {}, ago(d.updated)),
+        h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => editDoc(base, d) }, "Edit"), " ",
+          h("button", { class: "btn sm danger", onclick: async () => { try { await call(base + "/" + encodeURIComponent(d.id), { method: "DELETE" }); toast("Deleted", "ok"); loadDocs(); } catch (e) { toast(e.message, "bad"); } } }, "Delete")))))))
+      : emptyState("db", DB.where ? "Nothing matches the filter" : "No documents yet", DB.where ? "Try another filter." : "Add one, or import a JSON export of another database."),
+    r.total > 25 ? h("div", { class: "row", style: "padding:12px 18px;justify-content:flex-end" }, h("span", { class: "muted", style: "font-size:12.5px" }, (DB.offset + 1) + "–" + Math.min(r.total, DB.offset + 25) + " of " + fmt(r.total)),
+      h("button", { class: "btn sm", disabled: DB.offset === 0, onclick: () => { DB.offset = Math.max(0, DB.offset - 25); loadDocs(); } }, "Previous"),
+      h("button", { class: "btn sm", disabled: DB.offset + 25 >= r.total, onclick: () => { DB.offset += 25; loadDocs(); } }, "Next")) : null));
+}
+function editDoc(base, d) {
+  const ta = h("textarea", { class: "input", rows: "12", spellcheck: "false", style: "font-family:var(--mono);font-size:12.5px" });
+  ta.value = JSON.stringify(d ? d.data : { name: "example", done: false }, null, 2);
+  modal(d ? "Edit " + d.id : "New document", [ta], close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+    let v; try { v = JSON.parse(ta.value); if (!v || typeof v !== "object" || Array.isArray(v)) throw 0; } catch { return toast("A document is a JSON object, like {\"name\": \"tea\"}", "bad"); }
+    try { await call(d ? base + "/" + encodeURIComponent(d.id) : base, { method: d ? "PUT" : "POST", body: JSON.stringify(v) }); close(); toast("Saved", "ok"); loadDocs(); refresh(); } catch (e) { toast(e.message, "bad"); } } }, "Save")]);
+}
+function importDocs(base) {
+  const ta = h("textarea", { class: "input", rows: "10", spellcheck: "false", placeholder: '[{"id": "1", "name": "Asha"}, {"id": "2", "name": "Ravi"}]', style: "font-family:var(--mono);font-size:12.5px" });
+  const file = h("input", { type: "file", accept: ".json,application/json", onchange: async e => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } });
+  modal("Import into " + DB.coll, [h("p", { class: "muted", style: "margin:0 0 10px" }, "Paste or pick a JSON export of your other database: a list of objects. Objects with an id replace the document with that id."), file, h("div", { style: "height:10px" }), ta],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+      let v; try { v = JSON.parse(ta.value); } catch { return toast("That is not valid JSON", "bad"); }
+      const list = Array.isArray(v) ? v : (v && typeof v === "object" ? (Object.values(v).every(x => x && typeof x === "object") ? Object.entries(v).map(([k, x]) => ({ id: k, ...x })) : [v]) : null);
+      if (!list) return toast("Expected a JSON list of objects", "bad");
+      try { let n = 0; for (let i = 0; i < list.length; i += 5000) n += (await call(base, { method: "POST", body: JSON.stringify(list.slice(i, i + 5000)) })).ids.length;
+        close(); toast("Imported " + fmt(n) + " documents", "ok"); loadDatabase(); refresh(); } catch (e) { toast(e.message, "bad"); } } }, "Import")]);
+}
+async function exportDocs(base) {
+  try { const all = []; for (let off = 0; ; off += 500) { const r = await call(base + "?limit=500&offset=" + off); all.push(...r.docs.map(d => ({ id: d.id, ...d.data }))); if (all.length >= r.total || !r.docs.length) break; }
+    const a = h("a", { href: URL.createObjectURL(new Blob([JSON.stringify(all, null, 2)], { type: "application/json" })), download: DB.sel + "-" + DB.coll + ".json" }); document.body.append(a); a.click(); a.remove();
+  } catch (e) { toast(e.message, "bad"); }
+}
+function confirmDel(title, text, fn) {
+  modal(title, h("p", { class: "muted", style: "margin:0" }, text), close => [h("button", { class: "btn", onclick: close }, "Cancel"),
+    h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => { close(); try { await fn(); toast("Deleted", "ok"); } catch (e) { toast(e.message, "bad"); } } }, "Delete")]);
+}
 // ---------------------------------------------------------------- start
+loadPlans();
 (function boot() {
   const saved = store.get("ec_session");
   if (saved) { TOKEN = saved; enterConsole(false); }

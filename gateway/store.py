@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE, pw TEXT NOT NULL, created REAL NOT NULL,
     console_hash TEXT, disabled INTEGER DEFAULT 0, last_login REAL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created REAL NOT NULL, last_used REAL);
+CREATE TABLE IF NOT EXISTS subscriptions (
+    user_id INTEGER NOT NULL, product TEXT NOT NULL, plan TEXT NOT NULL, started REAL NOT NULL, expires REAL, source TEXT,
+    PRIMARY KEY (user_id, product));
+CREATE TABLE IF NOT EXISTS payments (
+    order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount_paise INTEGER NOT NULL, status TEXT NOT NULL,
+    payment_id TEXT, created REAL NOT NULL, paid REAL);
+CREATE TABLE IF NOT EXISTS usage_daily (user_id INTEGER NOT NULL, day TEXT NOT NULL, requests INTEGER DEFAULT 0, tokens INTEGER DEFAULT 0,
+    PRIMARY KEY (user_id, day));
 CREATE TABLE IF NOT EXISTS nodes_seen (node_id TEXT PRIMARY KEY, name TEXT, owner_hash TEXT, first_seen REAL, last_seen REAL,
     tokens_generated INTEGER DEFAULT 0);
 """
@@ -181,6 +189,66 @@ class Store:
 
     def user_key_hashes(self, uid):
         return [r[0] for r in self.db.execute("SELECT hash FROM keys WHERE user_id=? AND revoked=0", (uid,))]
+
+    # ---- plans, payments, daily usage ----
+    def subscription(self, uid, product):
+        """(plan id, expires) of a live paid or granted plan, else None."""
+        row = self.db.execute("SELECT plan, expires FROM subscriptions WHERE user_id=? AND product=?", (uid, product)).fetchone()
+        if not row or (row[1] is not None and row[1] < time.time()): return None
+        return row
+
+    def set_subscription(self, uid, product, plan, days, source):
+        """Starts a plan, or extends it when the same plan is still live. days=None: never expires (granted by the owner)."""
+        now = time.time()
+        cur = self.subscription(uid, product)
+        base = cur[1] if cur and cur[0] == plan and cur[1] else now
+        expires = None if days is None else base + days * 86400
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO subscriptions(user_id, product, plan, started, expires, source) VALUES(?,?,?,?,?,?)",
+                            (uid, product, plan, now, expires, source))
+        return expires
+
+    def end_subscription(self, uid, product):
+        with self.lock:
+            self.db.execute("DELETE FROM subscriptions WHERE user_id=? AND product=?", (uid, product))
+
+    def new_payment(self, order_id, uid, plan, amount_paise):
+        with self.lock:
+            self.db.execute("INSERT INTO payments(order_id, user_id, plan, amount_paise, status, created) VALUES(?,?,?,?,?,?)",
+                            (order_id, uid, plan, amount_paise, "created", time.time()))
+
+    def payment(self, order_id):
+        row = self.db.execute("SELECT order_id, user_id, plan, amount_paise, status, payment_id FROM payments WHERE order_id=?", (order_id,)).fetchone()
+        return dict(zip(["order_id", "user_id", "plan", "amount_paise", "status", "payment_id"], row)) if row else None
+
+    def mark_paid(self, order_id, payment_id):
+        """True the first time an order is marked paid (so a payment never starts a plan twice)."""
+        with self.lock:
+            return self.db.execute("UPDATE payments SET status='paid', payment_id=?, paid=? WHERE order_id=? AND status != 'paid'",
+                                   (payment_id, time.time(), order_id)).rowcount == 1
+
+    def payments(self, uid=None, limit=200):
+        q = "SELECT p.order_id, u.username, p.plan, p.amount_paise, p.status, p.payment_id, p.created, p.paid FROM payments p JOIN users u ON u.id=p.user_id"
+        rows = self.db.execute(q + (" WHERE p.user_id=?" if uid else "") + " ORDER BY p.created DESC LIMIT ?", ((uid, limit) if uid else (limit,))).fetchall()
+        return [dict(zip(["order_id", "username", "plan", "amount_paise", "status", "payment_id", "created", "paid"], r)) for r in rows]
+
+    def count_request(self, uid, tokens=0):
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        with self.lock:
+            self.db.execute("INSERT INTO usage_daily(user_id, day, requests, tokens) VALUES(?,?,1,?) ON CONFLICT(user_id, day)"
+                            " DO UPDATE SET requests=requests+1, tokens=tokens+excluded.tokens", (uid, day, tokens))
+
+    def requests_today(self, uid):
+        row = self.db.execute("SELECT requests FROM usage_daily WHERE user_id=? AND day=?", (uid, time.strftime("%Y-%m-%d", time.gmtime()))).fetchone()
+        return row[0] if row else 0
+
+    def key_owner(self, h):
+        row = self.db.execute("SELECT user_id FROM keys WHERE hash=?", (h,)).fetchone()
+        return row[0] if row else None
+
+    def user_id(self, username):
+        row = self.db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
+        return row[0] if row else None
 
     # ---- contribute-to-use ledger ----
     def node_seen(self, node_id, name, owner_hash):

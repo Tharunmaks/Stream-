@@ -33,6 +33,7 @@ import secrets
 import socket
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,10 +41,17 @@ sys.path.insert(0, ROOT)
 from cloud.controller import ALIASES, Controller, Node  # noqa: E402
 from gateway.compress import compress_messages, est_tokens  # noqa: E402
 from gateway.store import Store, default_db, key_hash  # noqa: E402
+from gateway import billing, plans as plans_mod  # noqa: E402
+from gateway.database import DbError, DocStore  # noqa: E402
 
 OPTS = dict(open_signup=False, similar=0.0, rate_per_min=120, queue_timeout=120.0, host="127.0.0.1", port=8000)
 STARTED = time.time()
 app = FastAPI(title="ExpertStream OmniRoute Gateway", version="1.0")
+# Apps on other sites (the ExpertStream app, a user's web app) call the API from the browser. Auth is a bearer token, never a
+# cookie, so allowing any origin does not let one site act as a visitor of another.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["Authorization", "Content-Type", "x-api-key"])
+PLANS = plans_mod.PLANS
+DOCS = None
 STORE = None
 CTRL = None
 ADMIN = None
@@ -97,19 +105,40 @@ def token_hint(tok, want):
     return "unknown or revoked API key (Authorization: Bearer sk-expert-...)"
 
 
-def auth(request):
-    """(key hash or 'admin', None) or (None, error response)"""
+def user_plan(uid, product="cloud"):
+    sub = STORE.subscription(uid, product)
+    if sub:
+        _, p = plans_mod.find(PLANS, sub[0])
+        if p: return dict(p, expires=sub[1])
+    return dict(plans_mod.free_plan(PLANS, product), expires=None)
+
+
+def auth(request, count=False):
+    """(key hash or 'admin', None) or (None, error response). Sets request.state.uid and .plan for user accounts and their
+    keys. count=True also checks the plan's daily limit (chat requests; they are counted once answered)."""
+    request.state.uid, request.state.plan = None, None
     tok = bearer(request)
     if is_admin(tok): return "admin", None
     su = STORE.session_user(tok) if tok.startswith("ses-") else None
     h = su[2] if su else (STORE.check_key(tok) if tok else None)
     if not h: return None, err(401, "signed out: sign in again" if tok.startswith("ses-") else token_hint(tok, "key"), "authentication_error")
-    contributed = STORE.user_usage(su[0])["contributed_tokens"] if su else STORE.contribution(h)
-    if OPTS["rate_per_min"] > 0 and contributed == 0:
+    uid = su[0] if su else STORE.key_owner(h)
+    rate = OPTS["rate_per_min"]
+    if uid:
+        plan = user_plan(uid)
+        request.state.uid, request.state.plan = uid, plan
+        # the plan's per-minute limit is for AI requests; database and other API calls share a roomier one
+        rate = plan["limits"].get("requests_per_min", rate) if count else max(120, 2 * plan["limits"].get("requests_per_min", 0))
+        if count and STORE.requests_today(uid) >= plan["limits"].get("requests_per_day", 1 << 30):
+            return None, err(429, "you used today's %d requests on the %s plan: upgrade for more, or wait until midnight UTC"
+                             % (plan["limits"]["requests_per_day"], plan["name"]), "rate_limit_error")
+    contributed = STORE.user_usage(uid)["contributed_tokens"] if uid else STORE.contribution(h)
+    if rate > 0 and contributed == 0:
         now = time.time()
-        q = [t for t in RATE.get(h, []) if now - t < 60]
-        if len(q) >= OPTS["rate_per_min"]: return None, err(429, "rate limit: %d requests per minute (contributing a node lifts it)" % OPTS["rate_per_min"], "rate_limit_error")
-        q.append(now); RATE[h] = q
+        bucket = (h, count)
+        q = [t for t in RATE.get(bucket, []) if now - t < 60]
+        if len(q) >= rate: return None, err(429, "rate limit: %d %srequests per minute on your plan" % (rate, "AI " if count else ""), "rate_limit_error")
+        q.append(now); RATE[bucket] = q
     return h, None
 
 
@@ -157,7 +186,7 @@ def chunk(cid, model, created, delta=None, finish=None, usage=None, extra=None):
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
-    h, e = auth(request)
+    h, e = auth(request, count=True)
     if e: return e
     try:
         body = await request.json()
@@ -169,6 +198,10 @@ async def chat(request: Request):
     model = str(body.get("model") or "auto")
     params = {k: body.get(k) for k in ("max_tokens", "temperature", "top_p", "top_k", "seed", "stop") if body.get(k) is not None}
     if "max_completion_tokens" in body and "max_tokens" not in params: params["max_tokens"] = body["max_completion_tokens"]
+    plan = request.state.plan
+    if plan:   # the plan caps answer length
+        cap = int(plan["limits"].get("max_tokens") or 0)
+        if cap: params["max_tokens"] = min(int(params.get("max_tokens") or cap), cap)
     mode = str(body.get("compress") or request.headers.get("x-compress") or "safe").lower()
     if mode != "off":
         messages, before, after = compress_messages(messages, aggressive=mode == "aggressive")
@@ -193,6 +226,7 @@ async def chat(request: Request):
         if cached is not None:
             ms = (time.perf_counter() - t0) * 1000
             if acct: STORE.account(acct, saved=saved + cached.get("usage", {}).get("completion_tokens", 0), cache_hit=True)
+            if request.state.uid: STORE.count_request(request.state.uid)
             else: admin_use(saved=saved + cached.get("usage", {}).get("completion_tokens", 0), cache_hits=1)
             extra = dict(cache="hit", cache_ms=round(ms, 2), tokens_saved=saved, node=None)
             usage = dict(prompt_tokens=after, completion_tokens=0, total_tokens=after)
@@ -206,7 +240,8 @@ async def chat(request: Request):
             return {"id": cid, "object": "chat.completion", "created": created, "model": target, "usage": usage, "x_expertcloud": extra,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": cached["text"]}, "finish_reason": "stop"}]}
 
-    prio = 0 if (acct and STORE.contribution(acct) > 0) else 1   # contributors skip the queue
+    # queue order: 0 first (admin, Max plan, contributors), then Pro, then Free
+    prio = 0 if not acct or STORE.contribution(acct) > 0 else int(plan["limits"].get("priority", 1)) if plan else 1
     gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"])
 
     async def finish(text, info):
@@ -214,6 +249,7 @@ async def chat(request: Request):
         pt, ct = int(usage.get("prompt_tokens") or after), int(usage.get("completion_tokens") or est_tokens(text))
         usage = dict(prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct)
         if acct: STORE.account(acct, pt, ct, saved)
+        if request.state.uid: STORE.count_request(request.state.uid, ct)
         else: admin_use(completion_tokens=ct, saved=saved)
         if use_cache and text: STORE.cache_put(ck, info.get("model") or target, prompt_text(messages), dict(text=text, usage=usage))
         extra = dict(cache="miss" if use_cache else "off", tokens_saved=saved, node=info.get("node"), ttft_s=info.get("ttft"), tps=info.get("tps"))
@@ -385,8 +421,10 @@ async def account(request: Request):
     if not u: return err(401, "sign in first", "authentication_error")
     use = STORE.user_usage(u[0])
     row = STORE.db.execute("SELECT created FROM users WHERE id=?", (u[0],)).fetchone()
-    return dict(username=u[1], created=row[0], usage=use, plan=dict(name="Free", rate_per_min=OPTS["rate_per_min"],
-                contributor=use["contributed_tokens"] > 0))
+    cp = user_plan(u[0])
+    return dict(username=u[1], created=row[0], usage=use, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
+                plan=dict(id=cp["id"], name=cp["name"], expires=cp["expires"], limits=cp["limits"], contributor=use["contributed_tokens"] > 0),
+                plans={p: plan_view(u[0], p) for p in PLANS})
 
 
 @app.get("/account/keys")
@@ -399,7 +437,9 @@ async def account_keys(request: Request):
 async def account_new_key(request: Request):
     u = user_of(request)
     if not u: return err(401, "sign in first", "authentication_error")
-    if len([k for k in STORE.user_keys(u[0]) if not k["revoked"]]) >= 20: return err(400, "20 keys at most; revoke one first")
+    cap = int(user_plan(u[0])["limits"].get("api_keys", 20))
+    if len([k for k in STORE.user_keys(u[0]) if not k["revoked"]]) >= cap:
+        return err(402, "your plan allows %d API key%s: revoke one or upgrade" % (cap, "" if cap == 1 else "s"))
     b = await body_of(request)
     return {"key": STORE.new_key(str(b.get("label") or "my key")[:64], u[0])}
 
@@ -448,7 +488,9 @@ async def admin_users(request: Request):
     e = admin_only(request)
     if e: return e
     rows = STORE.db.execute("SELECT id, username, created, last_login, disabled FROM users ORDER BY created DESC LIMIT 500").fetchall()
-    return {"users": [dict(id=r[0], username=r[1], created=r[2], last_login=r[3], disabled=bool(r[4]), usage=STORE.user_usage(r[0])) for r in rows]}
+    return {"users": [dict(id=r[0], username=r[1], created=r[2], last_login=r[3], disabled=bool(r[4]), usage=STORE.user_usage(r[0]),
+                           today=STORE.requests_today(r[0]), plans={p: plan_view(r[0], p) for p in PLANS}) for r in rows],
+            "plans": PLANS}
 
 
 @app.post("/admin/settings")
@@ -459,6 +501,223 @@ async def admin_settings(request: Request):
     for name in ("signup", "public_compute"):
         if name in b: STORE.set_setting(name, "1" if b[name] else "0")
     return {"signup": setting_on("signup", True), "public_compute": setting_on("public_compute", False)}
+
+
+
+# ---------------------------------------------------------------------------------------------------------------- plans and billing
+def plan_view(uid, product):
+    p = user_plan(uid, product)
+    return dict(id=p["id"], name=p["name"], price_inr=p["price_inr"], expires=p["expires"], features=p["features"])
+
+
+def rzp_keys():
+    return dict(key_id=os.environ.get("RAZORPAY_KEY_ID") or STORE.setting("rzp_key_id") or "",
+                key_secret=os.environ.get("RAZORPAY_KEY_SECRET") or STORE.setting("rzp_key_secret") or "",
+                webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET") or STORE.setting("rzp_webhook_secret") or "")
+
+
+def apps_view():
+    return {"expertstream": {"title": PLANS.get("expertstream", {}).get("title", "ExpertStream"), "url": STORE.setting("expertstream_url") or ""}}
+
+
+@app.get("/plans")
+async def list_plans():
+    """Every plan of both products, in INR a month, and whether online payment is switched on."""
+    return {"currency": "INR", "period_days": plans_mod.PERIOD_DAYS, "products": PLANS, "payments": billing.configured(rzp_keys()), "apps": apps_view()}
+
+
+@app.get("/account/plans")
+async def account_plans(request: Request):
+    """The caller's plan in each product. For the ExpertStream app: sign the user in (POST /auth/login), then call this."""
+    h, e = auth(request)
+    if e: return e
+    uid = request.state.uid
+    if not uid: return err(403, "plans belong to user accounts", "permission_error")
+    return {p: plan_view(uid, p) for p in PLANS}
+
+
+def activate(order_id, payment_id):
+    pay = STORE.payment(order_id)
+    if not pay or not STORE.mark_paid(order_id, payment_id): return False
+    product, plan = plans_mod.find(PLANS, pay["plan"])
+    if not plan: return False
+    STORE.set_subscription(pay["user_id"], product, plan["id"], plans_mod.PERIOD_DAYS, "razorpay")
+    print("payment %s: %s for user %d" % (payment_id, plan["id"], pay["user_id"]), flush=True)
+    return True
+
+
+@app.post("/billing/checkout")
+async def checkout(request: Request):
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    product, plan = plans_mod.find(PLANS, str((await body_of(request)).get("plan") or ""))
+    if not plan or plan["price_inr"] <= 0: return err(400, "pick a paid plan")
+    keys = rzp_keys()
+    if not billing.configured(keys): return err(503, "online payment is not switched on yet: contact the owner", "server_error")
+    amount = int(plan["price_inr"] * 100)
+    try:
+        order = await billing.create_order(keys, amount, "u%d-%s" % (u[0], plan["id"]), {"user": u[1], "plan": plan["id"]})
+    except billing.PaymentError as ex:
+        return err(502, str(ex), "server_error")
+    STORE.new_payment(order["id"], u[0], plan["id"], amount)
+    return dict(order_id=order["id"], amount=amount, currency="INR", key_id=keys["key_id"], plan=plan["id"],
+                description="%s %s (30 days)" % (PLANS[product]["title"], plan["name"]), username=u[1])
+
+
+@app.post("/billing/verify")
+async def verify(request: Request):
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    b = await body_of(request)
+    order_id, payment_id = str(b.get("order_id") or ""), str(b.get("payment_id") or "")
+    pay = STORE.payment(order_id)
+    if not pay or pay["user_id"] != u[0]: return err(404, "no such order")
+    if not billing.payment_signature_ok(rzp_keys(), order_id, payment_id, b.get("signature")): return err(400, "the payment could not be verified")
+    activate(order_id, payment_id)   # False when the webhook was first: the plan is already on
+    product, _ = plans_mod.find(PLANS, pay["plan"])
+    return {"ok": True, "plan": plan_view(u[0], product)}
+
+
+@app.post("/billing/webhook")
+async def webhook(request: Request):
+    ev = billing.webhook_event(rzp_keys()["webhook_secret"], await request.body(), request.headers.get("x-razorpay-signature"))
+    if ev is None: return err(400, "bad signature")
+    pl = ev.get("payload") or {}
+    pay = ((pl.get("payment") or {}).get("entity")) or {}
+    order_id = pay.get("order_id") or ((pl.get("order") or {}).get("entity") or {}).get("id")
+    if ev.get("event") in ("payment.captured", "order.paid") and order_id and pay.get("id"): activate(order_id, pay["id"])
+    return {"ok": True}
+
+
+@app.get("/billing/payments")
+async def my_payments(request: Request):
+    u = user_of(request)
+    return {"payments": STORE.payments(u[0])} if u else err(401, "sign in first", "authentication_error")
+
+
+@app.get("/admin/billing")
+async def admin_billing(request: Request):
+    e = admin_only(request)
+    if e: return e
+    k = rzp_keys()
+    return dict(configured=billing.configured(k), key_id=k["key_id"], webhook_set=bool(k["webhook_secret"]), test_mode=k["key_id"].startswith("rzp_test_"),
+                webhook_url=str(request.base_url).rstrip("/") + "/billing/webhook", payments=STORE.payments(), apps=apps_view())
+
+
+@app.post("/admin/billing")
+async def admin_billing_set(request: Request):
+    e = admin_only(request)
+    if e: return e
+    b = await body_of(request)
+    for field, name in (("key_id", "rzp_key_id"), ("key_secret", "rzp_key_secret"), ("webhook_secret", "rzp_webhook_secret"), ("expertstream_url", "expertstream_url")):
+        if field in b: STORE.set_setting(name, str(b[field] or "").strip())
+    return {"ok": True, "configured": billing.configured(rzp_keys())}
+
+
+@app.post("/admin/users/{username}/plan")
+async def admin_set_plan(username: str, request: Request):
+    """Give a user a plan by hand (paid another way, a friend, a test): {"plan": "cloud_pro", "days": 30}; days null = no end;
+    {"plan": null, "product": "cloud"} ends it."""
+    e = admin_only(request)
+    if e: return e
+    uid = STORE.user_id(username)
+    if not uid: return err(404, "no such user")
+    b = await body_of(request)
+    if not b.get("plan"):
+        STORE.end_subscription(uid, str(b.get("product") or "cloud")); return {"ok": True}
+    product, plan = plans_mod.find(PLANS, str(b["plan"]))
+    if not plan: return err(400, "no such plan")
+    if plan["price_inr"] == 0: STORE.end_subscription(uid, product); return {"ok": True}
+    days = b.get("days", plans_mod.PERIOD_DAYS)
+    return {"ok": True, "expires": STORE.set_subscription(uid, product, plan["id"], None if days is None else float(days), "owner")}
+
+
+# ---------------------------------------------------------------------------------------------------------------- database
+def db_user(request):
+    """(user id, plan limits) or an error response."""
+    h, e = auth(request)
+    if e: return None, e
+    if not request.state.uid: return None, err(403, "the database belongs to user accounts: sign in, or use a key made in your console", "permission_error")
+    return (request.state.uid, request.state.plan["limits"]), None
+
+
+def db_call(fn):
+    try:
+        return fn()
+    except DbError as ex:
+        return err(ex.status, str(ex))
+
+
+@app.get("/db")
+async def db_list(request: Request):
+    u, e = db_user(request)
+    if e: return e
+    return dict(databases=DOCS.list_dbs(u[0]), used_bytes=DOCS.used_bytes(u[0]), quota_bytes=int(u[1].get("db_mb", 5)) << 20, max_databases=u[1].get("databases", 1))
+
+
+@app.post("/db")
+async def db_create(request: Request):
+    u, e = db_user(request)
+    if e: return e
+    name = str((await body_of(request)).get("name") or "")
+    return db_call(lambda: (DOCS.create_db(u[0], name, int(u[1].get("databases", 1))), {"ok": True, "name": name})[1])
+
+
+@app.delete("/db/{db}")
+async def db_drop(db: str, request: Request):
+    u, e = db_user(request)
+    return e or {"deleted": DOCS.drop_db(u[0], db)}
+
+
+@app.delete("/db/{db}/{coll}")
+async def db_drop_coll(db: str, coll: str, request: Request):
+    u, e = db_user(request)
+    return e or {"deleted": DOCS.drop_coll(u[0], db, coll)}
+
+
+@app.get("/db/{db}/{coll}")
+async def db_find(db: str, coll: str, request: Request, limit: int = 50, offset: int = 0, where: str = ""):
+    """Documents, newest first. where: a JSON object of top-level fields that must match, e.g. {"status": "paid"}."""
+    u, e = db_user(request)
+    if e: return e
+    try: w = json.loads(where) if where else {}
+    except ValueError: return err(400, "where must be a JSON object")
+    if not isinstance(w, dict): return err(400, "where must be a JSON object")
+    return db_call(lambda: DOCS.find(u[0], db, coll, w, limit, offset))
+
+
+@app.post("/db/{db}/{coll}")
+async def db_insert(db: str, coll: str, request: Request):
+    """One document (a JSON object) or many (a JSON list: an export of another database). An "id" field replaces that document."""
+    u, e = db_user(request)
+    if e: return e
+    try: b = await request.json()
+    except ValueError: return err(400, "body must be JSON")
+    docs = b if isinstance(b, list) else [b]
+    if len(docs) > 10000: return err(413, "10,000 documents at most per request")
+    return db_call(lambda: {"ids": DOCS.put_many(u[0], db, coll, docs, int(u[1].get("db_mb", 5)) << 20)})
+
+
+@app.get("/db/{db}/{coll}/{doc_id}")
+async def db_get(db: str, coll: str, doc_id: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: DOCS.get(u[0], db, coll, doc_id))
+
+
+@app.put("/db/{db}/{coll}/{doc_id}")
+async def db_put(db: str, coll: str, doc_id: str, request: Request):
+    u, e = db_user(request)
+    if e: return e
+    try: b = await request.json()
+    except ValueError: return err(400, "body must be JSON")
+    if not isinstance(b, dict): return err(400, "a document is a JSON object")
+    return db_call(lambda: {"id": DOCS.put_many(u[0], db, coll, [dict(b, id=doc_id)], int(u[1].get("db_mb", 5)) << 20)[0]})
+
+
+@app.delete("/db/{db}/{coll}/{doc_id}")
+async def db_delete(db: str, coll: str, doc_id: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: (DOCS.delete(u[0], db, coll, doc_id), {"ok": True})[1])
 
 # ---------------------------------------------------------------------------------------------------------------- admin
 def lan_ips():
@@ -585,8 +844,12 @@ async def health():
 
 def init(db_path, rotate=False):
     global STORE, CTRL, ADMIN, JOIN
+    global PLANS, DOCS
     STORE = Store(db_path)
     CTRL = Controller(STORE)
+    base = os.path.dirname(os.path.abspath(db_path))
+    PLANS = plans_mod.load(os.environ.get("EXPERTCLOUD_PLANS") or os.path.join(base, "plans.json"))
+    DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata.db"))
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))
         STORE.set_setting("join_token", "join-" + secrets.token_urlsafe(18))
