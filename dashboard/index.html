@@ -214,6 +214,10 @@ td.r, th.r { text-align: right; }
 .steps h4 { margin: 2px 0 8px; font-size: 14px; }
 .muted { color: var(--muted); }
 .note { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+.providers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 0 0 18px; }
+.prov { border: 1px solid var(--line); background: var(--panel2); border-radius: 12px; padding: 12px 14px; }
+.prov b { display: block; margin-bottom: 2px; } .prov .muted { font-size: 12.5px; }
+.prov .tag { display: inline-block; font-size: 11px; font-weight: 650; padding: 1px 8px; border-radius: 99px; margin-top: 6px; background: var(--accent-soft); color: var(--accent); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13px; margin: 0; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
 
@@ -387,6 +391,8 @@ td.r, th.r { text-align: right; }
       <section data-view="connect" hidden>
         <div class="banner warn" id="lanWarn" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
           <span>The gateway listens on <code id="bindHost">127.0.0.1</code>, so only this device can reach it. To add other phones or PCs, restart it with <code>--host 0.0.0.0</code>.</span></div>
+        <div class="card" style="margin-bottom:16px"><div class="hd"><h3>Free cloud computers</h3><span class="sub hide-sm">run your cloud on other people's machines, at no cost</span></div>
+          <div class="bd" id="freeCloud"></div></div>
         <div class="grid two">
           <div class="card"><div class="hd"><h3>Add a worker node</h3><span class="sub hide-sm">a phone or computer that runs models</span></div><div class="bd">
             <ol class="steps">
@@ -723,6 +729,7 @@ function revoke(k) {
 let connectSig = "";
 function renderConnect(L) {
   const c = L.connect || { join: L.join, lan: [] }, sig = JSON.stringify([c, L.options, L.open_signup]);
+  renderFreeCloud(c);
   if (sig === connectSig) return; connectSig = sig;
   $("#lanWarn").hidden = c.lan_reachable !== false; $("#bindHost").textContent = c.bind_host || "127.0.0.1";
   $("#cloneCmd").replaceChildren(codeBlock("git clone -b claude/expertstream-moe-android-oegt59 https://github.com/tharunmaks/stream- Stream-\ncd Stream- && make es_serve es_get\npip install websockets psutil"));
@@ -740,6 +747,40 @@ function renderConnect(L) {
     gi.append(h("dt", {}, k), h("dd", {}, v));
 }
 
+
+// ---------------------------------------------------------------- free cloud
+const RAW = "https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/deploy/join.sh";
+const PROVIDERS = [
+  ["Hugging Face Spaces", "2 CPUs, 16 GB RAM. Hosts the whole cloud with a public https address. Sleeps after 48 h without visits.", "Best home for the cloud"],
+  ["Kaggle notebooks", "4 CPUs, about 30 GB RAM, sessions up to 12 h. Needs a phone-verified account for internet.", "Strongest free node"],
+  ["Google Colab", "2 CPUs, about 12 GB RAM. Stops when the tab is closed or idle.", "Quick extra node"],
+  ["Oracle Cloud Always Free", "Up to 4 ARM cores and 24 GB RAM, on all the time. Asks for a card at sign-up.", "Always-on node"],
+];
+let freeSig = "", spaceFiles = null;
+function newToken() { const b = new Uint8Array(24); crypto.getRandomValues(b); return "adm-" + btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+async function renderFreeCloud(c) {
+  const sig = JSON.stringify([c.public, c.join_token, location.origin]); if (sig === freeSig) return; freeSig = sig;
+  const box = $("#freeCloud"), step = (title, ...body) => h("li", {}, h("h4", {}, title), ...body);
+  box.replaceChildren(h("div", { class: "providers" }, PROVIDERS.map(p => h("div", { class: "prov" }, h("b", {}, p[0]), h("div", { class: "muted" }, p[1]), h("span", { class: "tag" }, p[2])))));
+  if (!c.public) {
+    if (!spaceFiles) try { spaceFiles = await Promise.all(["Dockerfile", "README.md"].map(n => fetch("/deploy/huggingface/" + n).then(r => r.ok ? r.text() : Promise.reject()))); } catch { spaceFiles = null; }
+    const tok = newToken();
+    box.append(h("p", { class: "muted", style: "margin:0 0 14px" }, "Right now this cloud lives on this device, so it stops when the device sleeps. Put it on Hugging Face and it runs on their computers all day, for free, with a link that works from anywhere:"),
+      h("ol", { class: "steps" },
+        step("Create a free Space", h("p", { class: "muted", style: "margin:0" }, "Sign in at huggingface.co and open ", h("a", { href: "https://huggingface.co/new-space", target: "_blank", rel: "noopener" }, "huggingface.co/new-space"),
+          ". Name it ", h("code", {}, "expertcloud"), ", pick ", h("b", {}, "Docker"), " then ", h("b", {}, "Blank"), ", hardware ", h("b", {}, "CPU basic (free)"), ", and create it.")),
+        step("Add two files", h("p", { class: "muted", style: "margin:0 0 8px" }, "In the Space: Files, then + Add file, then Create a new file. Make a file named Dockerfile with this:"),
+          spaceFiles ? codeBlock(spaceFiles[0]) : h("p", {}, h("a", { href: "https://github.com/tharunmaks/stream-/tree/claude/expertstream-moe-android-oegt59/deploy/huggingface", target: "_blank" }, "Copy it from GitHub")),
+          h("p", { class: "muted", style: "margin:12px 0 8px" }, "Then edit README.md and replace everything in it with:"), spaceFiles ? codeBlock(spaceFiles[1]) : null),
+        step("Set your password", h("p", { class: "muted", style: "margin:0 0 8px" }, "Space Settings, then Variables and secrets, then New secret. Name: EXPERTCLOUD_ADMIN_TOKEN. Value (keep it somewhere safe):"), codeBlock(tok)),
+        step("Open your cloud", h("p", { class: "muted", style: "margin:0" }, "The first build takes about 10 minutes, then the model downloads. When the Space says Running, open ",
+          h("code", {}, "https://YOUR-NAME-expertcloud.hf.space"), " and sign in with that token. Its Connect page then shows how to add Kaggle or Colab as extra nodes."))));
+  } else {
+    box.append(h("p", { class: "muted", style: "margin:0 0 8px" }, "Add a free notebook as another computer: in Kaggle or Colab, make a new notebook, paste this in a cell and run it. Keep the notebook open."),
+      codeBlock("!curl -sL " + RAW + " | bash -s -- " + location.origin + " " + c.join_token),
+      h("p", { class: "note" }, "On any Linux machine (Oracle Cloud, GitHub Codespaces, a PC), run the same without the ! at the start."));
+  }
+}
 // ---------------------------------------------------------------- playground
 const CHAT = []; let ABORT = null, modelSig = "";
 function renderModelSelect(L) {

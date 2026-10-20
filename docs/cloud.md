@@ -73,6 +73,21 @@ cloud logs | stop
 **On a phone:** Android freezes background apps, which stops Termux. `cloud start` takes a Termux wake lock (install the
 Termux:API app and run `pkg install termux-api`), and once: Android Settings > Apps > Termux > Battery > Unrestricted.
 
+## Free cloud computers
+
+Your phone does not have to be the cloud. Host the gateway and a node on a free **Hugging Face Space** (Docker, CPU basic:
+2 CPUs, 16 GB RAM): create a Space with the Docker SDK, add `deploy/huggingface/Dockerfile` and `deploy/huggingface/README.md`,
+and set the secret `EXPERTCLOUD_ADMIN_TOKEN`. It builds the engine, downloads Qwen2.5 1.5B Instruct and serves the dashboard and
+API at `https://NAME-expertcloud.hf.space`. The dashboard's Connect page walks through it and generates the token.
+
+Add more free machines as nodes with one line (Kaggle and Colab notebooks: put `!` in front):
+```
+curl -sL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/deploy/join.sh | bash -s -- https://NAME-expertcloud.hf.space join-TOKEN
+```
+Free limits: Spaces sleep after 48 h without visits and forget downloads on restart (the model downloads again); Kaggle sessions
+last up to 12 h; Colab stops when its tab closes; Oracle Cloud Always Free (4 ARM cores, 24 GB) stays on. Any server can host
+the whole cloud with `deploy/cloud_start.sh`.
+
 ## Security
 
 * Prompts and answers pass through the nodes. Join only machines you trust, and put the gateway behind TLS (`wss://`, `https://`)

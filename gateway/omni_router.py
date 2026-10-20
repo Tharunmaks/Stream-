@@ -314,7 +314,7 @@ def join_command(request, host=None):
 def connect_info(request):
     """Join commands and API base URLs for this device and for other devices on the network."""
     lan = [dict(ip=ip, join=join_command(request, "%s:%d" % (ip, OPTS["port"])), api="http://%s:%d/v1" % (ip, OPTS["port"])) for ip in lan_ips()]
-    return dict(join=join_command(request), local_join="python3 cloud/worker_agent.py --master ws://127.0.0.1:%d --token %s" % (OPTS["port"], JOIN),
+    return dict(join=join_command(request), join_token=JOIN, public=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https", local_join="python3 cloud/worker_agent.py --master ws://127.0.0.1:%d --token %s" % (OPTS["port"], JOIN),
                 lan=lan, lan_reachable=OPTS["host"] not in ("127.0.0.1", "localhost", "::1"), bind_host=OPTS["host"], port=OPTS["port"])
 
 
@@ -380,6 +380,16 @@ async def dashboard():
     return FileResponse(os.path.join(ROOT, "dashboard", "index.html"), headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
+DEPLOY_FILES = {"Dockerfile": "deploy/huggingface/Dockerfile", "README.md": "deploy/huggingface/README.md"}
+
+
+@app.get("/deploy/huggingface/{name}")
+async def deploy_file(name: str):
+    """The two files of a Hugging Face Space that hosts this cloud for free (no secrets in them)."""
+    if name not in DEPLOY_FILES: return err(404, "no such file")
+    return FileResponse(os.path.join(ROOT, DEPLOY_FILES[name]), media_type="text/plain; charset=utf-8")
+
+
 @app.get("/health")
 async def health():
     return {"ok": True, "nodes": len(CTRL.online()), "models": [m["id"] for m in CTRL.models()]}
@@ -392,6 +402,8 @@ def init(db_path, rotate=False):
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))
         STORE.set_setting("join_token", "join-" + secrets.token_urlsafe(18))
+    for name, env in (("admin_token", "EXPERTCLOUD_ADMIN_TOKEN"), ("join_token", "EXPERTCLOUD_JOIN_TOKEN")):
+        if os.environ.get(env, "").strip(): STORE.set_setting(name, clean_token(os.environ[env]))   # fixed tokens for cloud hosts (secrets)
     ADMIN = STORE.setting("admin_token", lambda: "adm-" + secrets.token_urlsafe(24))
     JOIN = STORE.setting("join_token", lambda: "join-" + secrets.token_urlsafe(18))
     d = os.path.expanduser("~/.expertcloud"); os.makedirs(d, exist_ok=True)
@@ -403,7 +415,7 @@ def init(db_path, rotate=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to accept nodes and users from other machines")
-    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT") or 8000))
     ap.add_argument("--db", default=default_db())
     ap.add_argument("--open-signup", action="store_true", help="anyone may make a key with POST /keys")
     ap.add_argument("--similar-cache", type=float, default=0.0, help="reuse answers of prompts with at least this word overlap (0 = exact only)")
