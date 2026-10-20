@@ -260,7 +260,7 @@ static void write_rows(const char *feat, int d, int K, int nv) {   /* K: candida
 }
 
 static int init_engine(int argc, char **argv, int ctx) {
-    es_engine_opts o = {.gguf_fd = -1, .ctx = ctx, .cache_mb = (size_t)atol(arg_of(argc, argv, "-C", "1024")), .threads = atoi(arg_of(argc, argv, "-j", "0")),
+    es_engine_opts o = {.gguf_fd = -1, .ctx = ctx, .cache_mb = (size_t)atol(arg_of(argc, argv, "-C", "0")), .threads = atoi(arg_of(argc, argv, "-j", "0")),
                         .lookahead = 1, .warm = 1, .spec = -2};
     o.gguf = arg_of(argc, argv, "-g", NULL);
     if (!o.gguf) die("%s", "need -g MODEL.gguf");

@@ -532,6 +532,9 @@ static const es_gguf_tensor *expert_tensor(int l, int r) { return XTE ? XTE[(siz
 #include <sched.h>
 static int GIO_ON, LOOKAHEAD;
 static float SKIP_THR;
+/* cache-aware routing (ES_CACHE_ROUTE=beta, off by default): an expert already in RAM gets beta times the best selection score as
+ * a bonus, so it wins over an expert on storage that was only slightly better; the outputs keep their real router weights */
+static float CACHE_ROUTE; static unsigned long long STAT_ROUTE_SWAP;
 typedef struct { int slot, l, e; } gtask;
 static struct { pthread_mutex_t mu; pthread_cond_t cv, cv_done; gtask *dq, *pq; int dh, dn, ph, pn, cap, stop; pthread_t th[16]; int nth; } GQ;
 static unsigned long long STAT_PF_ISSUED, STAT_PF_USED, STAT_SKIPPED;
@@ -768,6 +771,20 @@ static int route(int l, float *r, int *sel, float *w) {
         }
         for (int g = 0; g < M.n_group; g++) if (!keep[g]) for (int e = g * per; e < (g + 1) * per; e++) selp[e] = -INFINITY;
     }
+#ifndef __EMSCRIPTEN__
+    int plain[MAXK], np_ = 0;
+    if (CACHE_ROUTE > 0 && !MAPPED && C.nslots) {
+        for (int j = 0; j < k; j++) {   /* the plain choice, to count how many picks the bonus changed */
+            int best = -1;
+            for (int e = 0; e < ne; e++) { int used = 0; for (int i = 0; i < j; i++) used |= plain[i] == e; if (!used && (best < 0 || selp[e] > selp[best])) best = e; }
+            plain[np_++] = best;
+        }
+        float mx = -INFINITY;
+        for (int e = 0; e < ne; e++) if (selp[e] > mx) mx = selp[e];
+        const float bonus = CACHE_ROUTE * fabsf(mx);
+        for (int e = 0; e < ne; e++) if (selp[e] > -INFINITY && es_cache_find(&C, l, e) >= 0) selp[e] += bonus;
+    }
+#endif
     float wsum = 0;
     for (int j = 0; j < k; j++) {
         int best = -1;
@@ -780,6 +797,9 @@ static int route(int l, float *r, int *sel, float *w) {
         w[j] = r[best];
         wsum += w[j];
     }
+#ifndef __EMSCRIPTEN__
+    for (int j = 0; j < np_; j++) { int in = 0; for (int i = 0; i < k; i++) in |= sel[i] == plain[j]; STAT_ROUTE_SWAP += !in; }
+#endif
     if (M.gating == GATE_SOFTMAX_CHOSEN) {
         float mx = -INFINITY, s = 0;
         for (int j = 0; j < k; j++) mx = w[j] > mx ? w[j] : mx;
@@ -2044,7 +2064,20 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         remote_init(o->gguf, RNOTE, sizeof RNOTE);
     }
 #endif
-    int nslots = any_moe ? (int)(o->cache_mb * 1048576ull / slot_bytes) : 0;
+    size_t cache_mb = o->cache_mb;
+    if (cache_mb == 0) {   /* auto: 60% of the RAM still free after loading the core, at most every expert, at least 256 MB */
+        double all_exp = 0;
+        for (uint64_t i = 0; i < G.n_tensors; i++) if (is_expert_tensor(G.t[i].name)) all_exp += (double)G.t[i].nbytes;
+        long avail = -1;
+#ifndef __EMSCRIPTEN__
+        avail = mem_available_mb();
+#endif
+        double mb = avail > 0 ? 0.6 * avail : 1024;
+        if (core_mapped && !MAPPED) mb -= M.core_bytes / 1048576.0 * 0.6;   /* a mapped core lives in the same free RAM */
+        if (mb > all_exp / 1048576.0 * 1.05 + 64) mb = all_exp / 1048576.0 * 1.05 + 64;
+        cache_mb = mb < 256 ? 256 : (size_t)mb;
+    }
+    int nslots = any_moe ? (int)(cache_mb * 1048576ull / slot_bytes) : 0;
     if (any_moe && nslots < 2 * M.n_used + 2) nslots = 2 * M.n_used + 2;
     if (MAPPED) nslots = BMAX * M.n_used * 2;   /* only bookkeeping: experts are used where they lie in the mapping */
     if (any_moe && MAPPED) { if (es_cache_init(&C, nslots, 64, M.n_layer, M.n_exp, 1.0 * M.n_layer)) ERR("out of memory"); }
@@ -2054,6 +2087,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         const char *ev;
         if ((ev = getenv("ES_SIM_FLASH_MBPS")) && atof(ev) > 0) SIM_S_PER_BYTE = 1.0 / (atof(ev) * 1e6);
         SKIP_THR = (ev = getenv("ES_SKIP")) ? (float)atof(ev) : o->skip_thr;
+        CACHE_ROUTE = (ev = getenv("ES_CACHE_ROUTE")) ? (float)atof(ev) : o->cache_route;
         LOOKAHEAD = (ev = getenv("ES_LOOKAHEAD")) ? atoi(ev) : o->lookahead;
         int nio = (ev = getenv("ES_IOTHREADS")) ? atoi(ev) : (o->io_threads > 0 ? o->io_threads : 4);
         if (!PACK && !MAPPED && nio > 0 && !getenv("ES_SYNC_IO")) {

@@ -70,19 +70,19 @@ static void usage(void) {
     fprintf(stderr,
             "usage: es_chat (-m PACKDIR | -g FILE.gguf) [-p PROMPT] [-n max_tokens=256] [-r raw]\n"
             "               [-t temperature=0.7 (0 = greedy)] [-k top_k=40] [-P top_p=0.9]\n"
-            "               [-c context=2048] [-C cache_mb=1024] [-j threads=auto (fast cores)] [-s seed]\n"
+            "               [-c context=2048] [-C cache_mb=auto: 60%% of free RAM] [-j threads=auto (fast cores)] [-s seed]\n"
             "               [-T routing_trace.txt] [-q quiet] [-J JSON-lines protocol for es_serve]\n"
-            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on]\n               Graft: [-A my.esgraft  a graft trained with es_graft] [-Z my.esadapt  an adapter trained with es_graft zo]\n");
+            "               Lookahead: [-L 1 predict next layer (default on)] [-E 0.15 skip weak experts] [-W 1 warm start (default on)] [-i 4 readers]\n               Speed: [-S N Turbo draft length, 0 = off, default on] [-R 0.2 prefer experts already in RAM (streamed models)]\n               Graft: [-A my.esgraft  a graft trained with es_graft] [-Z my.esadapt  an adapter trained with es_graft zo]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
-    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 1024, .threads = 0, .lookahead = 1, .warm = 1};
+    es_engine_opts o = {.gguf_fd = -1, .ctx = 2048, .cache_mb = 0, .threads = 0, .lookahead = 1, .warm = 1};
     const char *prompt = NULL, *dump_ids = NULL, *dump_path = NULL, *graft = NULL, *adapter = NULL;
     int max_new = 256, raw = 0, top_k = 40, opt;
     float temp = 0.7f, top_p = 0.9f;
     uint64_t seed = 42;
-    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:S:A:Z:")) != -1) {
+    while ((opt = getopt(argc, argv, "m:g:p:n:rt:k:P:c:C:j:s:T:qI:D:JhE:L:W:i:S:A:Z:R:")) != -1) {
         switch (opt) {
         case 'm': o.pack = optarg; break;
         case 'g': o.gguf = optarg; break;
@@ -108,6 +108,7 @@ int main(int argc, char **argv) {
         case 'S': o.spec = atoi(optarg); if (o.spec == 0) o.spec = -2; break;   /* Turbo: longest guess per step, -S 0 = off */
         case 'A': graft = optarg; break;                     /* a graft trained with es_graft */
         case 'Z': adapter = optarg; break;                   /* an adapter trained with es_graft zo */
+        case 'R': o.cache_route = (float)atof(optarg); break;   /* cache-aware routing */
         default: usage();
         }
     }

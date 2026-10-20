@@ -19,7 +19,7 @@ typedef struct {
     int         gguf_fd;     /* >= 0: GGUF handle already open via es_gguf_pread hook */
     uint64_t    gguf_size;   /* size for gguf_fd */
     int         ctx;         /* context length in tokens */
-    size_t      cache_mb;    /* expert cache size */
+    size_t      cache_mb;    /* expert cache size (0 = auto: 60% of the free RAM) */
     int         threads;     /* compute threads (pinned to the fastest cores) */
     const char *trace_path;  /* optional routing trace file */
     /* ExpertStream Lookahead (native engine, GGUF experts) */
@@ -27,6 +27,7 @@ typedef struct {
     int         lookahead;   /* 1 = predict the next layer's experts and load them while computing */
     int         warm;        /* 1 = preload the experts this model used most last time */
     int         io_threads;  /* parallel expert readers (0 = 4) */
+    float       cache_route; /* prefer experts already in RAM when nearly as good (bonus = this x best score; 0 = off, 0.2 measured) */
     int         spec;        /* Turbo: guess up to this many next tokens from the text so far and check them together (-1 = default 7, 0 = off) */
 } es_engine_opts;
 
