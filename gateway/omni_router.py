@@ -423,6 +423,8 @@ async def account(request: Request):
     row = STORE.db.execute("SELECT created FROM users WHERE id=?", (u[0],)).fetchone()
     cp = user_plan(u[0])
     return dict(username=u[1], created=row[0], usage=use, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
+                storage=dict(quota_bytes=quota(u[0], cp["limits"]), plan_bytes=int(cp["limits"].get("db_mb", 1024)) << 20, extra_gb=STORE.extra_gb(u[0]),
+                             addons=STORE.storage_addons(u[0]), price_inr_per_gb=plans_mod.STORAGE["price_inr_per_gb"]),
                 plan=dict(id=cp["id"], name=cp["name"], expires=cp["expires"], limits=cp["limits"], contributor=use["contributed_tokens"] > 0),
                 plans={p: plan_view(u[0], p) for p in PLANS})
 
@@ -489,7 +491,8 @@ async def admin_users(request: Request):
     if e: return e
     rows = STORE.db.execute("SELECT id, username, created, last_login, disabled FROM users ORDER BY created DESC LIMIT 500").fetchall()
     return {"users": [dict(id=r[0], username=r[1], created=r[2], last_login=r[3], disabled=bool(r[4]), usage=STORE.user_usage(r[0]),
-                           today=STORE.requests_today(r[0]), plans={p: plan_view(r[0], p) for p in PLANS}) for r in rows],
+                           today=STORE.requests_today(r[0]), plans={p: plan_view(r[0], p) for p in PLANS},
+                           db_bytes=DOCS.used_bytes(r[0]), extra_gb=STORE.extra_gb(r[0])) for r in rows],
             "plans": PLANS}
 
 
@@ -523,7 +526,8 @@ def apps_view():
 @app.get("/plans")
 async def list_plans():
     """Every plan of both products, in INR a month, and whether online payment is switched on."""
-    return {"currency": "INR", "period_days": plans_mod.PERIOD_DAYS, "products": PLANS, "payments": billing.configured(rzp_keys()), "apps": apps_view()}
+    return {"currency": "INR", "period_days": plans_mod.PERIOD_DAYS, "products": PLANS, "storage": plans_mod.STORAGE,
+            "payments": billing.configured(rzp_keys()), "apps": apps_view()}
 
 
 @app.get("/account/plans")
@@ -539,6 +543,10 @@ async def account_plans(request: Request):
 def activate(order_id, payment_id):
     pay = STORE.payment(order_id)
     if not pay or not STORE.mark_paid(order_id, payment_id): return False
+    if pay["plan"].startswith("storage:"):   # extra database space for 30 days
+        STORE.add_storage(pay["user_id"], int(pay["plan"].split(":", 1)[1]), plans_mod.PERIOD_DAYS, order_id)
+        print("payment %s: %s for user %d" % (payment_id, pay["plan"], pay["user_id"]), flush=True)
+        return True
     product, plan = plans_mod.find(PLANS, pay["plan"])
     if not plan: return False
     STORE.set_subscription(pay["user_id"], product, plan["id"], plans_mod.PERIOD_DAYS, "razorpay")
@@ -550,18 +558,26 @@ def activate(order_id, payment_id):
 async def checkout(request: Request):
     u = user_of(request)
     if not u: return err(401, "sign in first", "authentication_error")
-    product, plan = plans_mod.find(PLANS, str((await body_of(request)).get("plan") or ""))
-    if not plan or plan["price_inr"] <= 0: return err(400, "pick a paid plan")
+    b = await body_of(request)
+    st = plans_mod.STORAGE
+    if b.get("storage_gb") is not None:
+        try: gb = int(b["storage_gb"])
+        except (TypeError, ValueError): return err(400, "storage_gb must be a whole number")
+        if not st["min_gb"] <= gb <= st["max_gb"]: return err(400, "buy between %d and %d GB" % (st["min_gb"], st["max_gb"]))
+        item, price, desc = "storage:%d" % gb, gb * st["price_inr_per_gb"], "%d GB extra database space (30 days)" % gb
+    else:
+        product, plan = plans_mod.find(PLANS, str(b.get("plan") or ""))
+        if not plan or plan["price_inr"] <= 0: return err(400, "pick a paid plan")
+        item, price, desc = plan["id"], plan["price_inr"], "%s %s (30 days)" % (PLANS[product]["title"], plan["name"])
     keys = rzp_keys()
     if not billing.configured(keys): return err(503, "online payment is not switched on yet: contact the owner", "server_error")
-    amount = int(plan["price_inr"] * 100)
+    amount = int(price * 100)
     try:
-        order = await billing.create_order(keys, amount, "u%d-%s" % (u[0], plan["id"]), {"user": u[1], "plan": plan["id"]})
+        order = await billing.create_order(keys, amount, "u%d-%s" % (u[0], item.replace(":", "-")), {"user": u[1], "item": item})
     except billing.PaymentError as ex:
         return err(502, str(ex), "server_error")
-    STORE.new_payment(order["id"], u[0], plan["id"], amount)
-    return dict(order_id=order["id"], amount=amount, currency="INR", key_id=keys["key_id"], plan=plan["id"],
-                description="%s %s (30 days)" % (PLANS[product]["title"], plan["name"]), username=u[1])
+    STORE.new_payment(order["id"], u[0], item, amount)
+    return dict(order_id=order["id"], amount=amount, currency="INR", key_id=keys["key_id"], plan=item, description=desc, username=u[1])
 
 
 @app.post("/billing/verify")
@@ -574,6 +590,7 @@ async def verify(request: Request):
     if not pay or pay["user_id"] != u[0]: return err(404, "no such order")
     if not billing.payment_signature_ok(rzp_keys(), order_id, payment_id, b.get("signature")): return err(400, "the payment could not be verified")
     activate(order_id, payment_id)   # False when the webhook was first: the plan is already on
+    if pay["plan"].startswith("storage:"): return {"ok": True, "extra_gb": STORE.extra_gb(u[0])}
     product, _ = plans_mod.find(PLANS, pay["plan"])
     return {"ok": True, "plan": plan_view(u[0], product)}
 
@@ -614,6 +631,21 @@ async def admin_billing_set(request: Request):
     return {"ok": True, "configured": billing.configured(rzp_keys())}
 
 
+@app.post("/admin/users/{username}/storage")
+async def admin_add_storage(username: str, request: Request):
+    """Give a user extra database space by hand: {"gb": 10, "days": 30}."""
+    e = admin_only(request)
+    if e: return e
+    uid = STORE.user_id(username)
+    if not uid: return err(404, "no such user")
+    b = await body_of(request)
+    try: gb, days = int(b.get("gb")), float(b.get("days") or plans_mod.PERIOD_DAYS)
+    except (TypeError, ValueError): return err(400, "gb must be a whole number")
+    if gb < 1 or days <= 0: return err(400, "gb and days must be positive")
+    STORE.add_storage(uid, gb, days, "owner")
+    return {"ok": True, "extra_gb": STORE.extra_gb(uid)}
+
+
 @app.post("/admin/users/{username}/plan")
 async def admin_set_plan(username: str, request: Request):
     """Give a user a plan by hand (paid another way, a friend, a test): {"plan": "cloud_pro", "days": 30}; days null = no end;
@@ -633,12 +665,18 @@ async def admin_set_plan(username: str, request: Request):
 
 
 # ---------------------------------------------------------------------------------------------------------------- database
+def quota(uid, limits):
+    """Database space of a user: the plan's, plus extra space bought, in bytes."""
+    return (int(limits.get("db_mb", 1024)) << 20) + (int(STORE.extra_gb(uid)) << 30)
+
+
 def db_user(request):
-    """(user id, plan limits) or an error response."""
+    """(user id, plan limits, quota bytes) or an error response."""
     h, e = auth(request)
     if e: return None, e
     if not request.state.uid: return None, err(403, "the database belongs to user accounts: sign in, or use a key made in your console", "permission_error")
-    return (request.state.uid, request.state.plan["limits"]), None
+    lim = request.state.plan["limits"]
+    return (request.state.uid, lim, quota(request.state.uid, lim)), None
 
 
 def db_call(fn):
@@ -648,11 +686,21 @@ def db_call(fn):
         return err(ex.status, str(ex))
 
 
+def jarg(text, what, kind=dict):
+    if not text: return kind()
+    try: v = json.loads(text)
+    except ValueError: raise DbError(400, "%s must be JSON" % what)
+    if not isinstance(v, kind): raise DbError(400, "%s must be a JSON %s" % (what, "object" if kind is dict else "list"))
+    return v
+
+
 @app.get("/db")
 async def db_list(request: Request):
     u, e = db_user(request)
     if e: return e
-    return dict(databases=DOCS.list_dbs(u[0]), used_bytes=DOCS.used_bytes(u[0]), quota_bytes=int(u[1].get("db_mb", 5)) << 20, max_databases=u[1].get("databases", 1))
+    return dict(databases=DOCS.list_dbs(u[0]), used_bytes=DOCS.used_bytes(u[0]), quota_bytes=u[2], plan_bytes=int(u[1].get("db_mb", 1024)) << 20,
+                extra_gb=STORE.extra_gb(u[0]), max_databases=u[1].get("databases", 1), max_indexes=u[1].get("indexes", 5),
+                max_snapshots=u[1].get("snapshots", 1), price_inr_per_gb=plans_mod.STORAGE["price_inr_per_gb"])
 
 
 @app.post("/db")
@@ -669,21 +717,101 @@ async def db_drop(db: str, request: Request):
     return e or {"deleted": DOCS.drop_db(u[0], db)}
 
 
+# database-level actions first, so their names are never taken for collections (collection names cannot start with _)
+@app.post("/db/{db}/_batch")
+async def db_batch(db: str, request: Request):
+    """A transaction: {"ops": [{"op": "put"|"patch"|"delete", "collection": ..., "doc"|"id"|"changes": ...}, ...]}: all, or none."""
+    u, e = db_user(request)
+    if e: return e
+    b = await body_of(request)
+    return db_call(lambda: {"results": DOCS.batch(u[0], db, b.get("ops"), u[2])})
+
+
+@app.get("/db/{db}/_snapshots")
+async def db_snapshots(db: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: {"snapshots": DOCS.snapshots(u[0], db), "max": u[1].get("snapshots", 1)})
+
+
+@app.post("/db/{db}/_snapshots")
+async def db_snapshot(db: str, request: Request):
+    u, e = db_user(request)
+    if e: return e
+    label = (await body_of(request)).get("label")
+    return db_call(lambda: DOCS.snapshot(u[0], db, label, u[2], int(u[1].get("snapshots", 1))))
+
+
+@app.post("/db/{db}/_snapshots/{sid}/restore")
+async def db_restore(db: str, sid: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: DOCS.restore(u[0], db, sid))
+
+
+@app.delete("/db/{db}/_snapshots/{sid}")
+async def db_snapshot_drop(db: str, sid: str, request: Request):
+    u, e = db_user(request)
+    return e or {"deleted": DOCS.drop_snapshot(u[0], db, sid)}
+
+
+@app.get("/db/{db}/_export")
+async def db_export(db: str, request: Request):
+    """The whole database as one SQLite file (table docs: coll, id, data JSON)."""
+    u, e = db_user(request)
+    if e: return e
+    try: path = DOCS.export_file(u[0], db)
+    except DbError as ex: return err(ex.status, str(ex))
+    from starlette.background import BackgroundTask
+    return FileResponse(path, filename=db + ".sqlite", media_type="application/vnd.sqlite3", background=BackgroundTask(os.remove, path))
+
+
 @app.delete("/db/{db}/{coll}")
 async def db_drop_coll(db: str, coll: str, request: Request):
     u, e = db_user(request)
-    return e or {"deleted": DOCS.drop_coll(u[0], db, coll)}
+    return e or db_call(lambda: {"deleted": DOCS.drop_coll(u[0], db, coll)})
 
 
 @app.get("/db/{db}/{coll}")
-async def db_find(db: str, coll: str, request: Request, limit: int = 50, offset: int = 0, where: str = ""):
-    """Documents, newest first. where: a JSON object of top-level fields that must match, e.g. {"status": "paid"}."""
+async def db_find(db: str, coll: str, request: Request, limit: int = 50, offset: int = 0, where: str = "", sort: str = "", fields: str = "",
+                  search: str = ""):
+    """Documents. where: a JSON filter, e.g. {"status": "paid", "total": {"$gte": 100}, "tags": {"$contains": "new"}};
+    sort: fields separated by commas, - for descending (e.g. -total,name); fields: the fields to return; search: text anywhere."""
     u, e = db_user(request)
     if e: return e
-    try: w = json.loads(where) if where else {}
-    except ValueError: return err(400, "where must be a JSON object")
-    if not isinstance(w, dict): return err(400, "where must be a JSON object")
-    return db_call(lambda: DOCS.find(u[0], db, coll, w, limit, offset))
+    return db_call(lambda: DOCS.find(u[0], db, coll, jarg(where, "where"), limit, offset, [x for x in sort.split(",") if x],
+                                     [x for x in fields.split(",") if x], search))
+
+
+@app.post("/db/{db}/{coll}/_query")
+async def db_query(db: str, coll: str, request: Request):
+    """The same as GET, with the query in the body: {"where", "sort": [...], "fields": [...], "search", "limit", "offset", "explain"}."""
+    u, e = db_user(request)
+    if e: return e
+    b = await body_of(request)
+
+    def run():
+        if b.get("explain"): return {"plan": DOCS.explain(u[0], db, coll, b.get("where") or {})}
+        return DOCS.find(u[0], db, coll, b.get("where") or {}, b.get("limit", 50), b.get("offset", 0), b.get("sort") or [], b.get("fields") or [], b.get("search"))
+    return db_call(run)
+
+
+@app.get("/db/{db}/{coll}/_indexes")
+async def db_indexes(db: str, coll: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: {"indexes": DOCS.indexes(u[0], db, coll), "max_per_database": u[1].get("indexes", 5)})
+
+
+@app.post("/db/{db}/{coll}/_indexes")
+async def db_index_create(db: str, coll: str, request: Request):
+    u, e = db_user(request)
+    if e: return e
+    field = str((await body_of(request)).get("field") or "")
+    return db_call(lambda: (DOCS.create_index(u[0], db, coll, field, int(u[1].get("indexes", 5))), {"ok": True, "field": field})[1])
+
+
+@app.delete("/db/{db}/{coll}/_indexes/{field}")
+async def db_index_drop(db: str, coll: str, field: str, request: Request):
+    u, e = db_user(request)
+    return e or db_call(lambda: {"deleted": DOCS.drop_index(u[0], db, coll, field)})
 
 
 @app.post("/db/{db}/{coll}")
@@ -695,7 +823,7 @@ async def db_insert(db: str, coll: str, request: Request):
     except ValueError: return err(400, "body must be JSON")
     docs = b if isinstance(b, list) else [b]
     if len(docs) > 10000: return err(413, "10,000 documents at most per request")
-    return db_call(lambda: {"ids": DOCS.put_many(u[0], db, coll, docs, int(u[1].get("db_mb", 5)) << 20)})
+    return db_call(lambda: {"ids": DOCS.put_many(u[0], db, coll, docs, u[2])})
 
 
 @app.get("/db/{db}/{coll}/{doc_id}")
@@ -711,13 +839,23 @@ async def db_put(db: str, coll: str, doc_id: str, request: Request):
     try: b = await request.json()
     except ValueError: return err(400, "body must be JSON")
     if not isinstance(b, dict): return err(400, "a document is a JSON object")
-    return db_call(lambda: {"id": DOCS.put_many(u[0], db, coll, [dict(b, id=doc_id)], int(u[1].get("db_mb", 5)) << 20)[0]})
+    return db_call(lambda: {"id": DOCS.put_many(u[0], db, coll, [dict(b, id=doc_id)], u[2])[0]})
+
+
+@app.patch("/db/{db}/{coll}/{doc_id}")
+async def db_patch(db: str, coll: str, doc_id: str, request: Request):
+    """Change part of a document: {"status": "paid", "address.city": "Pune", "$inc": {"stock": -1}, "$push": {"tags": "new"}, "$unset": ["tmp"]}"""
+    u, e = db_user(request)
+    if e: return e
+    b = await body_of(request)
+    return db_call(lambda: DOCS.patch(u[0], db, coll, doc_id, b, u[2]))
 
 
 @app.delete("/db/{db}/{coll}/{doc_id}")
 async def db_delete(db: str, coll: str, doc_id: str, request: Request):
     u, e = db_user(request)
     return e or db_call(lambda: (DOCS.delete(u[0], db, coll, doc_id), {"ok": True})[1])
+
 
 # ---------------------------------------------------------------------------------------------------------------- admin
 def lan_ips():
@@ -849,7 +987,7 @@ def init(db_path, rotate=False):
     CTRL = Controller(STORE)
     base = os.path.dirname(os.path.abspath(db_path))
     PLANS = plans_mod.load(os.environ.get("EXPERTCLOUD_PLANS") or os.path.join(base, "plans.json"))
-    DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata.db"))
+    DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata"), legacy=os.path.join(base, "clouddata.db"))
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))
         STORE.set_setting("join_token", "join-" + secrets.token_urlsafe(18))

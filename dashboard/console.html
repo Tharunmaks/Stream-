@@ -68,14 +68,14 @@
 .apps-pop button:hover, .apps-pop a:hover { background: var(--panel2); }
 .apps-pop .ai { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; color: #fff; }
 .apps-pop .ai svg { width: 22px; height: 22px; }
-.dbcols { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+.dbcols { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
 .dbtree .db { border-bottom: 1px solid var(--line); padding: 12px 16px; }
 .dbtree .db:last-child { border-bottom: 0; }
 .dbtree .dbn { display: flex; align-items: center; gap: 8px; font-weight: 650; }
 .dbtree .coll { display: flex; justify-content: space-between; gap: 8px; width: 100%; border: 0; background: none; color: var(--muted); padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 13px; text-align: left; }
 .dbtree .coll:hover { background: var(--panel2); color: var(--text); } .dbtree .coll.on { background: var(--accent-soft); color: var(--text); }
-.json { font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 860px) { .plans3 { grid-template-columns: 1fr; } .dbcols { grid-template-columns: 1fr; } }
+.json { font-family: var(--mono); font-size: 12px; color: var(--muted); max-width: min(520px, 40vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 860px) { .plans3 { grid-template-columns: 1fr; } .dbcols { grid-template-columns: minmax(0, 1fr); } }
 /* ---------- auth ---------- */
 .seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--bg2); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 18px; }
 .seg button { border: 0; background: none; height: 34px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
@@ -614,17 +614,18 @@ function renderLandingPlans() {
 function loadScript(src) {
   return new Promise((ok, bad) => { if (document.querySelector('script[src="' + src + '"]')) return ok(); const e = h("script", { src }); e.onload = ok; e.onerror = () => bad(new Error("could not load the payment page: check your connection")); document.head.append(e); });
 }
-async function buy(planId) {
+const gbs = b => b >= 2 ** 40 ? +(b / 2 ** 40).toFixed(2) + " TB" : b >= 2 ** 30 ? +(b / 2 ** 30).toFixed(1) + " GB" : b >= 2 ** 20 ? +(b / 2 ** 20).toFixed(1) + " MB" : Math.round(b / 1024) + " KB";
+async function buy(item) {   /* a plan id, or {storage_gb: N} */
   try {
-    const o = await call("/billing/checkout", { method: "POST", body: JSON.stringify({ plan: planId }) });
+    const o = await call("/billing/checkout", { method: "POST", body: JSON.stringify(typeof item === "object" ? item : { plan: item }) });
     await loadScript("https://checkout.razorpay.com/v1/checkout.js");
     const rz = new window.Razorpay({ key: o.key_id, amount: o.amount, currency: "INR", name: "ExpertCloud", description: o.description, order_id: o.order_id,
       notes: { user: o.username }, theme: { color: "#7c6cff" },
       handler: async r => {
         try { await call("/billing/verify", { method: "POST", body: JSON.stringify({ order_id: r.razorpay_order_id, payment_id: r.razorpay_payment_id, signature: r.razorpay_signature }) });
-          toast("Payment received: your plan is on.", "ok"); }
+          toast(typeof item === "object" ? "Payment received: your extra space is ready." : "Payment received: your plan is on.", "ok"); }
         catch (e) { toast("Paid, but not confirmed yet (" + e.message + "). It turns on by itself within a minute.", "bad"); }
-        await refresh(); renderBilling(); renderES(); } });
+        await refresh(); renderBilling(); renderES(); if (VIEW === "database") loadDatabase(); } });
     rz.on("payment.failed", e => toast("Payment failed: " + ((e.error && e.error.description) || "try again"), "bad"));
     rz.open();
   } catch (e) { if (e.message !== "signed out") toast(e.message, "bad"); }
@@ -650,22 +651,44 @@ async function renderBilling() {
       h("span", { class: "muted", style: "font-size:13px" }, "Your " + PLANSDATA.products[billTab].title + " plan: ", h("b", {}, mine.name), mine.expires ? " · until " + dateOf(mine.expires) : "")),
     h("div", { class: "plans3", style: "margin-bottom:16px" }, planCards(billTab, planButton(billTab))),
     h("p", { class: "note", style: "margin:0 0 16px" }, "Plans last 30 days from payment. Paying again for the same plan adds 30 days; a different plan starts now. Prices include all charges shown at checkout."),
+    billTab === "cloud" ? storageCard() : null,
     h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Payments")),
       pays.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Date", "Plan", "Amount", "Status", "Payment id"].map(t => h("th", {}, t)))),
         h("tbody", {}, pays.map(x => h("tr", {}, h("td", {}, dateOf(x.created)), h("td", {}, (plansFind(x.plan) || {}).label || x.plan), h("td", {}, inr(x.amount_paise / 100)),
           h("td", {}, h("span", { class: "st " + (x.status === "paid" ? "on" : "off") }, x.status === "paid" ? "Paid" : "Not paid")), h("td", {}, h("code", {}, x.payment_id || "—")))))))
         : emptyState("card", "No payments yet", "Upgrades you pay for show up here.")));
 }
-function plansFind(id) { for (const [k, v] of Object.entries(PLANSDATA.products)) for (const p of v.plans) if (p.id === id) return { ...p, label: v.title + " " + p.name }; return null; }
+function storageCard() {
+  const st = ACCOUNT.storage || {}, used = ACCOUNT.db_bytes || 0, pct = st.quota_bytes ? Math.min(100, used / st.quota_bytes * 100) : 0;
+  return h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "hd" }, h("h3", {}, "Database space"), h("span", { class: "sub" }, inr(st.price_inr_per_gb || 30) + " per extra GB a month")),
+    h("div", { class: "bd" },
+      h("div", { class: "bar" }, h("div", { class: "t" }, h("span", {}, "Used"), h("b", {}, gbs(used) + " of " + gbs(st.quota_bytes || 0))), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))),
+      h("p", { class: "muted", style: "margin:0 0 12px;font-size:13px" }, "Your plan includes " + gbs(st.plan_bytes || 0) + (st.extra_gb ? ", plus " + st.extra_gb + " GB extra" : "") + "."),
+      (st.addons || []).length ? h("ul", { class: "list", style: "margin:0 -18px 12px;border-top:1px solid var(--line)" }, st.addons.map(x => h("li", {}, h("span", { class: "nm" }, x.gb + " GB extra"), h("span", { class: "meta" }, "until " + dateOf(x.expires))))) : null,
+      h("button", { class: "btn primary", onclick: buyStorage }, "Buy more space")));
+}
+function buyStorage() {
+  const per = (ACCOUNT && ACCOUNT.storage && ACCOUNT.storage.price_inr_per_gb) || 30;
+  const inp = h("input", { class: "input", type: "number", min: "1", max: "100000", value: "10", style: "font-size:18px;font-weight:600" });
+  const total = h("div", { style: "font-size:26px;font-weight:750;margin:10px 0 2px" }), note = h("p", { class: "note", style: "margin:0" });
+  const upd = () => { const n = Math.max(0, Math.floor(+inp.value || 0)); total.textContent = inr(n * per); note.textContent = n + " GB × " + inr(per) + " for 30 days, added on top of your plan."; };
+  inp.addEventListener("input", upd); upd();
+  modal("Buy database space", [h("label", { class: "f" }, "Extra space (GB)"), inp, total, note,
+    h("div", { class: "chips", style: "margin-top:12px" }, [10, 50, 100, 500, 1000].map(n => h("button", { class: "chip", style: "cursor:pointer", onclick: () => { inp.value = n; upd(); } }, n >= 1000 ? n / 1000 + " TB" : n + " GB")))],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", disabled: PLANSDATA && !PLANSDATA.payments, onclick: () => {
+      const n = Math.floor(+inp.value || 0); if (n < 1) return toast("Pick at least 1 GB", "bad"); close(); buy({ storage_gb: n }); } }, PLANSDATA && !PLANSDATA.payments ? "Payments open soon" : "Pay")]);
+}
+function plansFind(id) {
+  if (String(id).startsWith("storage:")) return { label: id.split(":")[1] + " GB extra space" }; for (const [k, v] of Object.entries(PLANSDATA.products)) for (const p of v.plans) if (p.id === id) return { ...p, label: v.title + " " + p.name }; return null; }
 function renderPlanCard() {
   const a = ACCOUNT; if (!a) return;
-  const L = a.plan.limits || {}, used = a.today || 0, cap = L.requests_per_day || 0, dbq = (L.db_mb || 0) * 1048576;
+  const L = a.plan.limits || {}, used = a.today || 0, cap = L.requests_per_day || 0, dbq = (a.storage && a.storage.quota_bytes) || (L.db_mb || 0) * 1048576;
   const bar = (label, v, max, text) => { const pct = max ? Math.min(100, v / max * 100) : 0;
     return h("div", { class: "bar", style: "margin:0" }, h("div", { class: "t" }, h("span", {}, label), h("b", {}, text)), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))); };
   $("#planCard").replaceChildren(h("div", { class: "bd", style: "display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) auto;gap:18px;align-items:center" },
     h("div", {}, h("div", { class: "muted", style: "font-size:12.5px" }, "Your plans"), h("div", { style: "font-weight:700;font-size:16px" }, "ExpertCloud " + a.plan.name),
       h("div", { class: "muted", style: "font-size:12.5px" }, a.plan.expires ? "until " + dateOf(a.plan.expires) : "free, no end date", " · ExpertStream " + a.plans.expertstream.name)),
-    bar("AI requests today", used, cap, fmt(used) + " of " + fmt(cap)), bar("Database space", a.db_bytes || 0, dbq, mb((a.db_bytes || 0) / 1048576) + " of " + mb(L.db_mb)),
+    bar("AI requests today", used, cap, fmt(used) + " of " + fmt(cap)), bar("Database space", a.db_bytes || 0, dbq, gbs(a.db_bytes || 0) + " of " + gbs(dbq)),
     h("button", { class: "btn" + (a.plan.price_inr === 0 || a.plan.id === "cloud_free" ? " primary" : ""), onclick: () => go("billing") }, a.plan.id === "cloud_free" ? "Upgrade" : "Manage")));
   if (matchMedia("(max-width: 860px)").matches) $("#planCard").firstChild.style.gridTemplateColumns = "1fr";
 }
@@ -706,9 +729,9 @@ function renderES() {
 }
 
 // ---------------------------------------------------------------- database
-let DB = { list: [], sel: null, coll: null, where: "", offset: 0, quota: 0, used: 0, maxdb: 1, extra: {} };
+let DB = { list: [], sel: null, coll: null, where: "", sort: "", search: "", offset: 0, quota: 0, used: 0, maxdb: 1, extra: {} };
 async function loadDatabase() {
-  try { const r = await call("/db"); DB.list = r.databases; DB.quota = r.quota_bytes; DB.used = r.used_bytes; DB.maxdb = r.max_databases; }
+  try { const r = await call("/db"); DB.list = r.databases; DB.quota = r.quota_bytes; DB.used = r.used_bytes; DB.maxdb = r.max_databases; DB.info = r; }
   catch (e) { if (e.message !== "signed out") toast("Database: " + e.message, "bad"); return; }
   renderDatabase();
 }
@@ -718,12 +741,14 @@ function renderDatabase() {
   const tree = h("div", { class: "card dbtree" },
     h("div", { class: "hd" }, h("h3", {}, "Databases"), h("span", { class: "sub" }, DB.list.length + " of " + DB.maxdb)),
     h("div", { style: "padding:12px 16px;border-bottom:1px solid var(--line)" },
-      h("div", { class: "bar", style: "margin:0 0 10px" }, h("div", { class: "t" }, h("span", {}, "Space"), h("b", {}, mb(DB.used / 1048576) + " of " + mb(DB.quota / 1048576))),
+      h("div", { class: "bar", style: "margin:0 0 6px" }, h("div", { class: "t" }, h("span", {}, "Space"), h("b", {}, gbs(DB.used) + " of " + gbs(DB.quota))),
         h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))),
+      h("button", { class: "btn sm", style: "width:100%;margin-bottom:10px", onclick: buyStorage }, "Buy more space · " + inr((DB.info && DB.info.price_inr_per_gb) || 30) + "/GB"),
       h("form", { class: "row", onsubmit: async e => { e.preventDefault(); try { await call("/db", { method: "POST", body: JSON.stringify({ name: name.value.trim() }) }); toast("Database created", "ok"); loadDatabase(); } catch (er) { toast(er.message, "bad"); } } },
         name, h("button", { class: "btn sm primary" }, "Create"))),
     ...(DB.list.length ? DB.list.map(d => h("div", { class: "db" },
-      h("div", { class: "dbn" }, icon("db"), h("span", { style: "flex:1" }, d.name), h("span", { class: "muted", style: "font-size:12px;font-weight:500" }, mb(d.bytes / 1048576)),
+      h("div", { class: "dbn" }, icon("db"), h("span", { style: "flex:1" }, d.name), h("span", { class: "muted", style: "font-size:12px;font-weight:500" }, gbs(d.bytes)),
+        h("button", { class: "btn sm ghost", title: "Backups and download", onclick: () => backups(d.name) }, "Backups"),
         h("button", { class: "btn sm ghost icon", title: "Delete database", onclick: () => confirmDel("Delete database " + d.name + "?", "Every collection and document in it is deleted. This cannot be undone.", async () => { await call("/db/" + encodeURIComponent(d.name), { method: "DELETE" }); if (DB.sel === d.name) DB.coll = null; loadDatabase(); }) }, "×")),
       [...d.collections, ...((DB.extra[d.name] || []).filter(c => !d.collections.some(x => x.name === c)).map(c => ({ name: c, docs: 0 })))].map(c =>
         h("button", { class: "coll" + (DB.sel === d.name && DB.coll === c.name ? " on" : ""), onclick: () => openColl(d.name, c.name) }, h("span", {}, c.name), h("span", {}, fmt(c.docs)))),
@@ -732,7 +757,9 @@ function renderDatabase() {
   const main = h("div", { id: "dbMain" });
   $("#dbView").replaceChildren(h("div", { class: "dbcols" }, tree, main));
   if (DB.coll) loadDocs(); else main.replaceChildren(h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Use it from your app")), h("div", { class: "bd" },
-    h("p", { class: "muted", style: "margin:0 0 10px" }, "Every database works over the API with an API key from your console. Documents are JSON; an \"id\" field picks the id."),
+    h("p", { class: "muted", style: "margin:0 0 10px" }, "Every database works over the API with an API key from your console: documents are JSON; queries, partial updates, indexes, transactions and backups all have an endpoint."),
+    codeBlock('# query: ranges, nested fields, lists, sort, chosen fields\ncurl -X POST ' + ORIGIN + '/db/myapp/orders/_query -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" -d \'{"where": {"total": {"$gte": 100}, "address.city": "Pune", "tags": {"$contains": "new"}}, "sort": ["-total"], "fields": ["total", "item"]}\'\n\n# change part of a document\ncurl -X PATCH ' + ORIGIN + '/db/myapp/stock/tea -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" -d \'{"$inc": {"count": -1}, "status": "low"}\'\n\n# several changes, all or nothing\ncurl -X POST ' + ORIGIN + '/db/myapp/_batch -H "Authorization: Bearer sk-expert-YOUR_KEY" -H "Content-Type: application/json" \\\n  -d \'{"ops": [{"op": "put", "collection": "orders", "doc": {"id": "o1", "item": "tea"}}, {"op": "patch", "collection": "stock", "id": "tea", "changes": {"$inc": {"count": -1}}}]}\''),
+    h("div", { style: "height:10px" }),
     codeBlock('# add a document\ncurl -X POST ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" -d \'{"item": "tea", "status": "paid"}\'\n\n# import an export of another database (a JSON list)\ncurl -X POST ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  -H "Content-Type: application/json" --data @export.json\n\n# find documents\ncurl -G ' + ORIGIN + '/db/myapp/orders -H "Authorization: Bearer sk-expert-YOUR_KEY" \\\n  --data-urlencode \'where={"status": "paid"}\''))));
 }
 function newColl(db) {
@@ -744,16 +771,18 @@ function newColl(db) {
 function openColl(db, coll) { DB.sel = db; DB.coll = coll; DB.offset = 0; DB.where = ""; renderDatabase(); }
 async function loadDocs() {
   const main = $("#dbMain"), base = "/db/" + encodeURIComponent(DB.sel) + "/" + encodeURIComponent(DB.coll);
-  let r; try { r = await call(base + "?limit=25&offset=" + DB.offset + (DB.where ? "&where=" + encodeURIComponent(DB.where) : "")); }
+  let r; try { r = await call(base + "/_query", { method: "POST", body: JSON.stringify({ where: DB.where ? JSON.parse(DB.where) : {}, sort: DB.sort.split(",").map(x => x.trim()).filter(Boolean), search: DB.search || undefined, limit: 25, offset: DB.offset }) }); }
   catch (e) { toast(e.message, "bad"); r = { total: 0, docs: [] }; }
-  const filter = h("input", { class: "input", placeholder: 'filter, e.g. {"status": "paid"}', value: DB.where, style: "height:34px;font-family:var(--mono);font-size:12.5px" });
+  const filter = h("input", { class: "input", placeholder: 'filter, e.g. {"status": "paid", "total": {"$gte": 100}}', value: DB.where, style: "height:34px;font-family:var(--mono);font-size:12.5px;flex:3" });
+  const sortIn = h("input", { class: "input", placeholder: "sort, e.g. -total", value: DB.sort, style: "height:34px;font-family:var(--mono);font-size:12.5px;flex:1;min-width:90px" });
+  const searchIn = h("input", { class: "input", placeholder: "search text", value: DB.search, style: "height:34px;flex:1;min-width:90px" });
   main.replaceChildren(h("div", { class: "card" },
     h("div", { class: "hd", style: "flex-wrap:wrap" }, h("h3", {}, DB.sel + " / " + DB.coll), h("span", { class: "sub" }, fmt(r.total) + " documents"), h("div", { class: "sp" }),
       h("button", { class: "btn sm primary", onclick: () => editDoc(base, null) }, "+ Document"), h("button", { class: "btn sm", onclick: () => importDocs(base) }, "Import JSON"),
-      h("button", { class: "btn sm", onclick: () => exportDocs(base) }, "Export"),
+      h("button", { class: "btn sm", onclick: () => exportDocs(base) }, "Export"), h("button", { class: "btn sm", onclick: () => indexes(base) }, "Indexes"),
       h("button", { class: "btn sm danger", onclick: () => confirmDel("Delete collection " + DB.coll + "?", "All " + r.total + " documents in it are deleted.", async () => { await call(base, { method: "DELETE" }); DB.coll = null; loadDatabase(); }) }, "Delete")),
-    h("form", { class: "row", style: "padding:12px 18px;border-bottom:1px solid var(--line)", onsubmit: e => { e.preventDefault(); const v = filter.value.trim(); if (v) { try { if (typeof JSON.parse(v) !== "object") throw 0; } catch { return toast("The filter must be a JSON object", "bad"); } } DB.where = v; DB.offset = 0; loadDocs(); } },
-      filter, h("button", { class: "btn sm" }, "Filter")),
+    h("form", { class: "row", style: "padding:12px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap", onsubmit: e => { e.preventDefault(); const v = filter.value.trim(); if (v) { try { if (typeof JSON.parse(v) !== "object") throw 0; } catch { return toast("The filter must be a JSON object", "bad"); } } DB.where = v; DB.sort = sortIn.value.trim(); DB.search = searchIn.value.trim(); DB.offset = 0; loadDocs(); } },
+      filter, sortIn, searchIn, h("button", { class: "btn sm" }, "Find")),
     r.docs.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "id"), h("th", {}, "data"), h("th", {}, "updated"), h("th", {}))),
       h("tbody", {}, r.docs.map(d => h("tr", {}, h("td", {}, h("code", {}, d.id)), h("td", {}, h("div", { class: "json", title: JSON.stringify(d.data) }, JSON.stringify(d.data))), h("td", {}, ago(d.updated)),
         h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => editDoc(base, d) }, "Edit"), " ",
@@ -786,9 +815,42 @@ async function exportDocs(base) {
     const a = h("a", { href: URL.createObjectURL(new Blob([JSON.stringify(all, null, 2)], { type: "application/json" })), download: DB.sel + "-" + DB.coll + ".json" }); document.body.append(a); a.click(); a.remove();
   } catch (e) { toast(e.message, "bad"); }
 }
-function confirmDel(title, text, fn) {
+async function indexes(base) {
+  let r; try { r = await call(base + "/_indexes"); } catch (e) { return toast(e.message, "bad"); }
+  const inp = h("input", { class: "input", placeholder: "field, e.g. status or address.city", style: "height:34px" });
+  const list = h("ul", { class: "list", style: "margin:0 -20px 12px" }, r.indexes.length ? r.indexes.map(x => h("li", {}, h("code", { class: "nm" }, x.field), h("span", { class: "meta" },
+    h("button", { class: "btn sm danger", onclick: async () => { try { await call(base + "/_indexes/" + encodeURIComponent(x.field), { method: "DELETE" }); document.querySelector(".modal-bg")?.remove(); indexes(base); } catch (e) { toast(e.message, "bad"); } } }, "Remove"))))
+    : [h("li", { class: "muted" }, "No indexes yet.")]);
+  modal("Indexes on " + DB.coll, [h("p", { class: "muted", style: "margin:0 0 12px" }, "An index makes filters and sorts on that field fast, even with millions of documents. Up to " + r.max_per_database + " per database on your plan."), list,
+    h("form", { class: "row", onsubmit: async e => { e.preventDefault(); try { await call(base + "/_indexes", { method: "POST", body: JSON.stringify({ field: inp.value.trim() }) }); toast("Index created", "ok"); document.querySelector(".modal-bg")?.remove(); indexes(base); } catch (er) { toast(er.message, "bad"); } } }, inp, h("button", { class: "btn sm primary" }, "Add index"))],
+    close => [h("button", { class: "btn", onclick: close }, "Done")]);
+}
+async function backups(db) {
+  const base = "/db/" + encodeURIComponent(db);
+  let r; try { r = await call(base + "/_snapshots"); } catch (e) { return toast(e.message, "bad"); }
+  const reopen = () => { document.querySelector(".modal-bg")?.remove(); backups(db); };
+  const list = r.snapshots.length ? h("ul", { class: "list", style: "margin:0 -20px 12px" }, r.snapshots.map(x => h("li", {},
+    h("div", {}, h("div", { class: "nm" }, x.label || "Snapshot"), h("div", { class: "muted", style: "font-size:12px" }, new Date(x.created * 1000).toLocaleString("en-IN") + " · " + gbs(x.bytes))),
+    h("span", { class: "meta" }, h("button", { class: "btn sm", onclick: () => { document.querySelector(".modal-bg")?.remove(); confirmDel("Restore " + db + " to this snapshot?", "Everything changed since " + new Date(x.created * 1000).toLocaleString("en-IN") + " is replaced. Take a new snapshot first if you may need it.",
+      async () => { await call(base + "/_snapshots/" + x.id + "/restore", { method: "POST" }); toast("Restored", "ok"); loadDatabase(); }, "Restore"); } }, "Restore"), " ",
+      h("button", { class: "btn sm danger", onclick: async () => { try { await call(base + "/_snapshots/" + x.id, { method: "DELETE" }); reopen(); } catch (e) { toast(e.message, "bad"); } } }, "Delete")))))
+    : h("p", { class: "muted" }, "No snapshots yet.");
+  const label = h("input", { class: "input", placeholder: "label, e.g. before import", style: "height:34px" });
+  modal("Backups of " + db, [h("p", { class: "muted", style: "margin:0 0 12px" }, "A snapshot is a copy of the whole database you can go back to. Your plan keeps " + r.max + " per database; they count toward your space."), list,
+    h("form", { class: "row", onsubmit: async e => { e.preventDefault(); try { await call(base + "/_snapshots", { method: "POST", body: JSON.stringify({ label: label.value.trim() }) }); toast("Snapshot taken", "ok"); reopen(); loadDatabase(); } catch (er) { toast(er.message, "bad"); } } }, label, h("button", { class: "btn sm primary" }, "Take snapshot")),
+    h("button", { class: "btn", style: "margin-top:12px;width:100%", onclick: () => downloadDb(db) }, "Download the whole database (SQLite file)")],
+    close => [h("button", { class: "btn", onclick: close }, "Done")]);
+}
+async function downloadDb(db) {
+  try {
+    const r = await fetch("/db/" + encodeURIComponent(db) + "/_export", { headers: { "Authorization": "Bearer " + TOKEN } });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const a = h("a", { href: URL.createObjectURL(await r.blob()), download: db + ".sqlite" }); document.body.append(a); a.click(); a.remove();
+  } catch (e) { toast("Download failed: " + e.message, "bad"); }
+}
+function confirmDel(title, text, fn, verb) {
   modal(title, h("p", { class: "muted", style: "margin:0" }, text), close => [h("button", { class: "btn", onclick: close }, "Cancel"),
-    h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => { close(); try { await fn(); toast("Deleted", "ok"); } catch (e) { toast(e.message, "bad"); } } }, "Delete")]);
+    h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => { close(); try { await fn(); if (!verb) toast("Deleted", "ok"); } catch (e) { toast(e.message, "bad"); } } }, verb || "Delete")]);
 }
 // ---------------------------------------------------------------- start
 loadPlans();

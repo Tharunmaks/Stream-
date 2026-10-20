@@ -78,9 +78,12 @@ and sign-ins to 10 failures per 10 minutes.
 
 | ExpertCloud | Price | Limits |
 |---|---|---|
-| Free | ₹0 | 25 AI requests/day, 5/min, answers ≤256 tokens, 1 API key, 5 MB database |
-| Pro | ₹1,700 | 2,000/day, 60/min, ≤4,096 tokens, 10 keys, 1 GB database (10 databases), faster queue |
-| Max | ₹4,000 | 10,000/day, 200/min, ≤8,192 tokens, 50 keys, 10 GB database (50 databases), front of the queue |
+| Free | ₹0 | 25 AI requests/day, 5/min, answers ≤256 tokens, 1 API key, **1 GB database** (3 databases, 1 backup each) |
+| Pro | ₹1,700 | 2,000/day, 60/min, ≤4,096 tokens, 10 keys, **50 GB database** (50 databases, 10 backups each), faster queue |
+| Max | ₹4,000 | 10,000/day, 200/min, ≤8,192 tokens, 50 keys, **1 TB database** (500 databases, 50 backups each), front of the queue |
+
+**Extra database space**: ₹30 per GB a month on top of any plan, bought in the console (Plans & billing, or Database > Buy more
+space) and paid with Razorpay; the owner can also give space by hand (Users > Give space). Price in `plans.json`: `{"storage": {"price_inr_per_gb": 30}}`.
 
 | ExpertStream | Price |
 |---|---|
@@ -95,9 +98,23 @@ ExpertStream plans are sold here; the ExpertStream app applies its own features 
 `payment.captured`, `order.paid`). Every payment is checked by its Razorpay signature; a plan lasts 30 days, paying again extends
 it, and one payment never counts twice. The owner can also give plans by hand (Users > Change plan).
 
-**Database**: each user gets document databases (collections of JSON documents), in the console and over the API with their
-session or API key: `GET/POST /db`, `GET/POST /db/{db}/{collection}` (POST takes one object or a list: an import of another
-database), `GET/PUT/DELETE /db/{db}/{collection}/{id}`, filters with `?where={"field": value}`. Space and count follow the plan.
+**Database**: every database is its own SQLite file (`clouddata/u<user>/<name>.db`), so users never share a file and each
+database has its own indexes and backups. In the console (Database) and over the API with a session or an API key:
+
+| What | API |
+|---|---|
+| databases | `GET/POST /db`, `DELETE /db/{db}` |
+| add or import documents (one object or a list) | `POST /db/{db}/{collection}` |
+| read, replace, delete one | `GET/PUT/DELETE /db/{db}/{collection}/{id}` |
+| change part of one: fields, nested fields, `$inc`, `$push`, `$unset` | `PATCH /db/{db}/{collection}/{id}` |
+| query: `$eq $ne $gt $gte $lt $lte $in $nin $exists $contains $startsWith`, `$or`, nested `a.b` fields, sort, chosen fields, text search | `POST /db/{db}/{collection}/_query` or `GET` with `?where=&sort=&fields=&search=` |
+| indexes on any field (filters and sorts use them) | `GET/POST /db/{db}/{collection}/_indexes`, `DELETE .../_indexes/{field}` |
+| transactions: puts, patches and deletes over collections, all or nothing | `POST /db/{db}/_batch` |
+| snapshots and restore | `GET/POST /db/{db}/_snapshots`, `POST .../{id}/restore`, `DELETE .../{id}` |
+| the whole database as one SQLite file | `GET /db/{db}/_export` |
+
+Space counts document bytes and snapshot files against plan + extra space. Honest limits: one gateway machine holds all the data
+(its disk is the real ceiling, and it is not replicated across machines the way AWS stores data); back up the `clouddata` folder.
 
 **Connecting the ExpertStream app** (one account for both, like Drive and Photos): the app signs users in with
 `POST /auth/login {username, password}` (or sends them to sign up at `/`), reads `GET /account/plans` for their ExpertStream plan

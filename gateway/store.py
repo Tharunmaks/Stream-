@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 CREATE TABLE IF NOT EXISTS payments (
     order_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount_paise INTEGER NOT NULL, status TEXT NOT NULL,
     payment_id TEXT, created REAL NOT NULL, paid REAL);
+CREATE TABLE IF NOT EXISTS storage_addons (user_id INTEGER NOT NULL, gb INTEGER NOT NULL, started REAL NOT NULL, expires REAL NOT NULL,
+    order_id TEXT);
 CREATE TABLE IF NOT EXISTS usage_daily (user_id INTEGER NOT NULL, day TEXT NOT NULL, requests INTEGER DEFAULT 0, tokens INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, day));
 CREATE TABLE IF NOT EXISTS nodes_seen (node_id TEXT PRIMARY KEY, name TEXT, owner_hash TEXT, first_seen REAL, last_seen REAL,
@@ -231,6 +233,18 @@ class Store:
         q = "SELECT p.order_id, u.username, p.plan, p.amount_paise, p.status, p.payment_id, p.created, p.paid FROM payments p JOIN users u ON u.id=p.user_id"
         rows = self.db.execute(q + (" WHERE p.user_id=?" if uid else "") + " ORDER BY p.created DESC LIMIT ?", ((uid, limit) if uid else (limit,))).fetchall()
         return [dict(zip(["order_id", "username", "plan", "amount_paise", "status", "payment_id", "created", "paid"], r)) for r in rows]
+
+    def add_storage(self, uid, gb, days, order_id=None):
+        now = time.time()
+        with self.lock:
+            self.db.execute("INSERT INTO storage_addons(user_id, gb, started, expires, order_id) VALUES(?,?,?,?,?)", (uid, int(gb), now, now + days * 86400, order_id))
+
+    def extra_gb(self, uid):
+        return self.db.execute("SELECT COALESCE(SUM(gb),0) FROM storage_addons WHERE user_id=? AND expires>?", (uid, time.time())).fetchone()[0]
+
+    def storage_addons(self, uid):
+        rows = self.db.execute("SELECT gb, started, expires FROM storage_addons WHERE user_id=? AND expires>? ORDER BY expires", (uid, time.time())).fetchall()
+        return [dict(gb=g, started=s, expires=e) for g, s, e in rows]
 
     def count_request(self, uid, tokens=0):
         day = time.strftime("%Y-%m-%d", time.gmtime())

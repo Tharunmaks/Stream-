@@ -126,7 +126,7 @@
       <!-- Users -->
       <section data-view="users" hidden>
         <div class="card"><div class="hd"><h3>Users</h3><span class="sub" id="usersSub"></span><div class="sp"></div><input class="input" id="userSearch" placeholder="Search" style="max-width:180px;height:32px"></div>
-          <div class="tbl-wrap"><table><thead><tr><th>User</th><th>Joined</th><th>Last sign-in</th><th>ExpertCloud</th><th>ExpertStream</th><th class="r">Today</th><th class="r">Requests</th><th class="r">Tokens</th><th></th></tr></thead>
+          <div class="tbl-wrap"><table><thead><tr><th>User</th><th>Joined</th><th>Last sign-in</th><th>ExpertCloud</th><th>ExpertStream</th><th class="r">Database</th><th class="r">Today</th><th class="r">Requests</th><th class="r">Tokens</th><th></th></tr></thead>
           <tbody id="userRows"></tbody></table></div><div id="usersEmpty" hidden></div></div>
       </section>
 
@@ -437,11 +437,20 @@ function renderUsers() {
   const paid = USERS.filter(u => u.plans.cloud.price_inr || u.plans.expertstream.price_inr).length;
   $("#usersSub").textContent = USERS.length + " users · " + paid + " paying";
   $("#userRows").replaceChildren(...rows.map(u => h("tr", {}, h("td", {}, h("b", {}, u.username)), h("td", {}, day(u.created)), h("td", {}, u.last_login ? ago(u.last_login) : "—"),
-    h("td", {}, planChip(u.plans.cloud)), h("td", {}, planChip(u.plans.expertstream)), h("td", { class: "r" }, fmt(u.today)), h("td", { class: "r" }, fmt(u.usage.requests)),
-    h("td", { class: "r" }, fmt(u.usage.completion_tokens)), h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => changePlan(u) }, "Change plan")))));
+    h("td", {}, planChip(u.plans.cloud)), h("td", {}, planChip(u.plans.expertstream)),
+    h("td", { class: "r" }, mb((u.db_bytes || 0) / 1048576) + (u.extra_gb ? " · +" + u.extra_gb + " GB" : "")), h("td", { class: "r" }, fmt(u.today)), h("td", { class: "r" }, fmt(u.usage.requests)),
+    h("td", { class: "r" }, fmt(u.usage.completion_tokens)), h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => changePlan(u) }, "Change plan"), " ", h("button", { class: "btn sm", onclick: () => giveSpace(u) }, "Give space")))));
   const em = $("#usersEmpty"); em.hidden = rows.length > 0; em.replaceChildren(emptyState("users", "No users yet", "People who sign up on your public page show up here."));
 }
 $("#userSearch").addEventListener("input", renderUsers);
+function giveSpace(u) {
+  const gb = h("input", { class: "input", type: "number", min: "1", value: "10" }), days = h("input", { class: "input", type: "number", min: "1", value: "30" });
+  modal("Extra database space for " + u.username, [h("p", { class: "muted", style: "margin:0 0 12px" }, "For people who paid another way, or as a gift. People buy it themselves in their console at ₹30 per GB a month."),
+    h("div", { class: "field" }, h("label", { class: "f" }, "GB"), gb), h("div", { class: "field" }, h("label", { class: "f" }, "Days"), days)],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+      try { await api("/admin/users/" + encodeURIComponent(u.username) + "/storage", { method: "POST", body: JSON.stringify({ gb: +gb.value, days: +days.value }) }); close(); toast("Space added", "ok"); loadUsers(); }
+      catch (e) { toast(e.message, "bad"); } } }, "Give")]);
+}
 function changePlan(u) {
   const sel = h("select", { class: "input" }, Object.entries(PLANLIST).map(([k, v]) => h("optgroup", { label: v.title }, v.plans.map(p => h("option", { value: p.id }, v.title + " " + p.name + " · " + inr(p.price_inr) + "/month")))));
   sel.value = u.plans.cloud.id;
