@@ -59,6 +59,19 @@ are spread over two one-slot nodes.
 * **The engine is CPU-only.** GPU memory is reported for scheduling, not used.
 * Token Killer savings depend on the prompt: tidy prompts save little; duplicated or padded ones save a lot.
 
+## Easiest way: one command
+
+```
+scripts/expertcloud.sh start      # gateway + a node on this device, in the background; prints the sign-in link
+scripts/expertcloud.sh status | link | logs | stop
+```
+Options: `--lan` (let other devices connect), `--models DIR`, `--port N`, `--name NAME`, `--rotate` (new tokens).
+
+**Keeping it running on a phone.** Android freezes background apps, and Termux with them, so the node drops when you switch to the
+browser. `start` takes a Termux wake lock (needs the Termux:API app: `pkg install termux-api`) and detaches both processes from the
+terminal. Also, once: Android Settings > Apps > Termux > Battery > Unrestricted, and pull down Termux's notification to check it
+shows "wake lock held". Changing browser tabs never affects the server; only Android suspending Termux does.
+
 ## Security
 
 * Prompts and answers pass through the nodes. Join only machines you trust, and put the gateway behind TLS (`wss://`, `https://`)
