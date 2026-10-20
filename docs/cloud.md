@@ -27,7 +27,7 @@ Stream-/
 ```sh
 make es_serve es_get                                   # the native engine, on every machine
 pip install -r requirements-cloud.txt
-python3 gateway/omni_router.py --host 0.0.0.0          # prints the admin token and the join command; dashboard at http://HOST:8000/
+python3 gateway/omni_router.py --host 0.0.0.0          # prints a sign-in link for the dashboard, the admin token and the join command
 # on each machine that should serve (models in ~/models, or deploy them from the dashboard/MCP):
 python3 cloud/worker_agent.py --master ws://HOST:8000 --token JOIN_TOKEN [--key sk-expert-...] [--slots 2]
 # any OpenAI client:
@@ -65,5 +65,11 @@ are spread over two one-slot nodes.
   when it is on the internet.
 * Nodes need the join token; the admin API needs the admin token (both in `~/.expertcloud/`, mode 600). Keys are made by the admin
   unless the gateway runs with `--open-signup`.
+* Signing in: open the link the gateway prints (`http://127.0.0.1:8000/dashboard#token=adm-...`); the page removes the token from
+  the address bar. Or paste the token from `cat ~/.expertcloud/admin_token`. The `join-` token is for nodes and `sk-expert-` keys
+  are for the API; neither signs in, and the gateway says so. Tokens are accepted with or without `Bearer `, and with stray
+  quotes or spaces from copying.
+* Leaked a token? Restart with `--rotate-tokens`: the old admin and join tokens stop working (nodes must rejoin with the new one;
+  API keys stay valid).
 * A node only accepts two commands: answer a chat with a model already on it, and download a `.gguf` from Hugging Face. It runs no
   other commands. The engine listens on 127.0.0.1 only.

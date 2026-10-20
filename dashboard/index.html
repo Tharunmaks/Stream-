@@ -2,157 +2,836 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ExpertCloud Control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>ExpertCloud</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c6cff'/%3E%3Cpath d='M9 22l7-12 7 12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
-  :root { --bg:#0b0f14; --panel:#121821; --line:#1f2a36; --text:#e6edf3; --dim:#8b98a5; --accent:#4cc38a; --warn:#e5a50a; --bad:#e5534b; --blue:#539bf5; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:16px; border-bottom:1px solid var(--line); }
-  h1 { margin:0; font-size:18px; letter-spacing:.2px; } h1 span { color:var(--accent); }
-  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); }
-  main { padding:16px; display:grid; gap:16px; max-width:1200px; margin:0 auto; }
-  .row { display:grid; gap:16px; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
-  .big { font-size:28px; font-weight:650; font-variant-numeric:tabular-nums; } .dim { color:var(--dim); } .small { font-size:12px; }
-  input, button { font:inherit; color:var(--text); background:#0e141b; border:1px solid var(--line); border-radius:7px; padding:8px 10px; }
-  input { width:100%; } button { cursor:pointer; background:#1a2430; white-space:nowrap; } button.primary { background:var(--accent); color:#06120b; border-color:var(--accent); font-weight:600; }
-  button:focus-visible, input:focus-visible { outline:2px solid var(--blue); outline-offset:1px; }
-  .flex { display:flex; gap:8px; align-items:center; } .grow { flex:1; min-width:0; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px; }
-  .cmd { background:#0e141b; border:1px solid var(--line); border-radius:7px; padding:8px 10px; overflow-x:auto; white-space:nowrap; }
-  .bar { height:7px; background:#0e141b; border-radius:4px; overflow:hidden; margin:3px 0 8px; } .bar > i { display:block; height:100%; background:var(--accent); }
-  .bar.warn > i { background:var(--warn); } .bar.bad > i { background:var(--bad); }
-  .nodes { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); }
-  .badge { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11.5px; border:1px solid var(--line); margin:2px 4px 0 0; }
-  .badge.warm { border-color:var(--accent); color:var(--accent); }
-  .ok { color:var(--accent); } .err { color:var(--bad); }
-  table { width:100%; border-collapse:collapse; font-size:12.5px; } td, th { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); }
-  th { color:var(--dim); font-weight:500; } .tablewrap { overflow-x:auto; }
-  svg text { fill:var(--text); }
+:root {
+  --bg: #0b0d12; --bg2: #10131a; --panel: #141821; --panel2: #1a1f2b; --line: #252b39; --line2: #313849;
+  --text: #e8ebf2; --muted: #9099ad; --faint: #646d82;
+  --accent: #7c6cff; --accent2: #5ac8fa; --accent-ink: #fff; --accent-soft: rgba(124,108,255,.14);
+  --ok: #34d399; --ok-soft: rgba(52,211,153,.13); --warn: #fbbf24; --warn-soft: rgba(251,191,36,.13);
+  --bad: #f87171; --bad-soft: rgba(248,113,113,.13);
+  --radius: 14px; --shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 10px 30px -12px rgba(0,0,0,.6);
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f5f6fa; --bg2: #eef0f6; --panel: #ffffff; --panel2: #f6f7fb; --line: #e3e6ee; --line2: #d4d8e3;
+    --text: #141821; --muted: #5b6478; --faint: #8b93a5; --accent-soft: rgba(124,108,255,.10);
+    --ok: #059669; --warn: #b45309; --bad: #dc2626;
+    --shadow: 0 1px 2px rgba(20,24,33,.05), 0 8px 24px -14px rgba(20,24,33,.18);
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f5f6fa; --bg2: #eef0f6; --panel: #ffffff; --panel2: #f6f7fb; --line: #e3e6ee; --line2: #d4d8e3;
+  --text: #141821; --muted: #5b6478; --faint: #8b93a5; --accent-soft: rgba(124,108,255,.10);
+  --ok: #059669; --warn: #b45309; --bad: #dc2626;
+  --shadow: 0 1px 2px rgba(20,24,33,.05), 0 8px 24px -14px rgba(20,24,33,.18);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent2); }
+code, .mono { font-family: var(--mono); font-size: 12.5px; }
+[hidden] { display: none !important; }
+svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- controls ---------- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 14px; border-radius: 10px;
+  border: 1px solid var(--line2); background: var(--panel2); cursor: pointer; font-weight: 550; white-space: nowrap; transition: .15s; }
+.btn:hover { border-color: var(--faint); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.primary { background: linear-gradient(135deg, var(--accent), #9b6cff); border-color: transparent; color: var(--accent-ink); box-shadow: 0 6px 20px -8px var(--accent); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger { color: var(--bad); }
+.btn.danger:hover { background: var(--bad-soft); border-color: var(--bad); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.btn.ghost:hover { color: var(--text); background: var(--panel2); }
+.btn.sm { height: 30px; padding: 0 10px; font-size: 12.5px; border-radius: 8px; }
+.btn.icon { width: 38px; padding: 0; }
+.btn.sm.icon { width: 30px; }
+.input, select.input, textarea.input { width: 100%; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line2);
+  background: var(--bg2); outline: none; transition: .15s; }
+textarea.input { height: auto; padding: 10px 12px; resize: vertical; line-height: 1.5; }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+label.f { display: block; font-size: 12px; color: var(--muted); margin: 0 0 6px; font-weight: 550; }
+.field { margin-bottom: 14px; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- sign in ---------- */
+#login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px;
+  background: radial-gradient(900px 500px at 15% -10%, rgba(124,108,255,.22), transparent 60%), radial-gradient(700px 400px at 110% 110%, rgba(90,200,250,.14), transparent 60%), var(--bg); }
+.login-card { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; box-shadow: var(--shadow); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; }
+.logo { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent2)); display: grid; place-items: center; color: #fff; flex: none; }
+.logo svg { width: 18px; height: 18px; stroke: #fff; fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.login-card h1 { font-size: 22px; margin: 22px 0 4px; letter-spacing: -.02em; }
+.login-card p.sub { color: var(--muted); margin: 0 0 22px; }
+.pw { position: relative; }
+.pw .input { padding-right: 46px; font-family: var(--mono); }
+.pw .btn { position: absolute; right: 4px; top: 4px; height: 32px; width: 36px; }
+.err { display: flex; gap: 8px; align-items: flex-start; background: var(--bad-soft); color: var(--bad); border: 1px solid rgba(248,113,113,.3);
+  padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 14px; }
+.check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin: 2px 0 16px; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+details.help { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; color: var(--muted); font-size: 13px; }
+details.help summary { cursor: pointer; color: var(--text); font-weight: 550; }
+details.help ol { padding-left: 18px; margin: 10px 0 0; }
+details.help li { margin-bottom: 8px; }
+
+/* ---------- shell ---------- */
+#app { display: grid; grid-template-columns: 232px 1fr; min-height: 100%; }
+.side { position: sticky; top: 0; height: 100vh; border-right: 1px solid var(--line); background: var(--bg2); padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; }
+.side .brand { padding: 4px 8px 18px; }
+.nav { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; color: var(--muted); cursor: pointer; border: 0; background: none; width: 100%; text-align: left; font-weight: 550; }
+.nav:hover { color: var(--text); background: var(--panel); }
+.nav.on { color: var(--text); background: var(--accent-soft); }
+.nav.on svg { color: var(--accent); }
+.nav .count { margin-left: auto; font-size: 11px; color: var(--muted); background: var(--panel2); border: 1px solid var(--line); padding: 0 7px; border-radius: 99px; }
+.side .grow { flex: 1; }
+.side-foot { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+main { min-width: 0; }
+.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 14px 28px; background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+.top h2 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
+.top .sp { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); background: var(--panel); color: var(--muted); white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+.pill.ok { color: var(--ok); border-color: rgba(52,211,153,.3); background: var(--ok-soft); } .pill.ok .dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.2); animation: pulse 2s infinite; }
+.pill.bad { color: var(--bad); border-color: rgba(248,113,113,.3); background: var(--bad-soft); } .pill.bad .dot { background: var(--bad); }
+.pill.warn { color: var(--warn); border-color: rgba(251,191,36,.3); background: var(--warn-soft); } .pill.warn .dot { background: var(--warn); }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(52,211,153,0); } }
+.page { padding: 24px 28px 40px; max-width: 1320px; }
+.banner { display: flex; gap: 10px; align-items: center; padding: 12px 14px; border-radius: 12px; margin-bottom: 18px; border: 1px solid; font-size: 13.5px; }
+.banner.bad { background: var(--bad-soft); border-color: rgba(248,113,113,.35); color: var(--bad); }
+.banner.warn { background: var(--warn-soft); border-color: rgba(251,191,36,.35); color: var(--warn); }
+
+/* ---------- cards ---------- */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); min-width: 0; }
+.card > .hd { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.card > .hd h3 { margin: 0; font-size: 14px; font-weight: 650; white-space: nowrap; }
+.card > .hd .sub { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.card > .hd .sp { flex: 1; }
+.card > .bd { padding: 18px; }
+.grid { display: grid; gap: 16px; }
+.kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; }
+.kpi { padding: 16px 18px; position: relative; overflow: hidden; }
+.kpi .l { color: var(--muted); font-size: 12.5px; font-weight: 550; display: flex; align-items: center; gap: 6px; }
+.kpi .v { font-size: 28px; font-weight: 700; letter-spacing: -.03em; margin-top: 6px; font-variant-numeric: tabular-nums; line-height: 1.1; position: relative; }
+.kpi .v small { font-size: 13px; font-weight: 550; color: var(--muted); letter-spacing: 0; margin-left: 4px; }
+.kpi .s { color: var(--faint); font-size: 12px; margin-top: 4px; position: relative; }
+.kpi.hero { grid-column: span 2; grid-row: span 2; padding-bottom: 46px; background: linear-gradient(140deg, rgba(124,108,255,.16), rgba(90,200,250,.06) 60%, transparent), var(--panel); }
+.kpi.hero .v { font-size: 44px; margin-top: 10px; }
+@media (min-width: 1001px) { .kpi.hero .spark { height: 50%; } }
+.spark { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; height: 42px; pointer-events: none; }
+.two { grid-template-columns: 1.4fr 1fr; }
+.empty { text-align: center; padding: 34px 18px; color: var(--muted); }
+.empty .ic { width: 46px; height: 46px; margin: 0 auto 12px; border-radius: 14px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.empty h4 { margin: 0 0 4px; color: var(--text); font-size: 15px; }
+.empty p { margin: 0 0 14px; }
+.list { list-style: none; margin: 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 10px; padding: 11px 18px; border-bottom: 1px solid var(--line); }
+.list li:last-child { border-bottom: 0; }
+.list .nm { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .meta { color: var(--muted); font-size: 12.5px; margin-left: auto; white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 99px; font-size: 12px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .dot { width: 6px; height: 6px; }
+.chip.warm { color: var(--ok); border-color: rgba(52,211,153,.3); } .chip.warm .dot { background: var(--ok); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---------- nodes ---------- */
+.nodes { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.node .hd .nm { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .id { color: var(--faint); font-family: var(--mono); font-size: 11.5px; }
+.spec { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.spec div { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+.spec b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spec span { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar { margin-bottom: 10px; }
+.bar .t { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.bar .t b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar .track { height: 6px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--line); overflow: hidden; }
+.bar .fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .5s; }
+.bar .fill.hot { background: linear-gradient(90deg, var(--warn), var(--bad)); }
+.deploy { margin-top: 14px; border-top: 1px dashed var(--line2); padding-top: 14px; }
+.deploy summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 13px; list-style: none; display: flex; align-items: center; gap: 6px; }
+.deploy summary::-webkit-details-marker { display: none; }
+.deploy[open] summary { color: var(--text); margin-bottom: 12px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > .input { flex: 1; min-width: 0; }
+
+/* ---------- playground ---------- */
+.pg { display: grid; grid-template-columns: 1fr 300px; gap: 16px; height: calc(100vh - 66px - 64px); min-height: 520px; }
+.chat { display: flex; flex-direction: column; min-height: 0; }
+.msgs { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.msg { display: flex; gap: 12px; max-width: 860px; }
+.msg .av { width: 30px; height: 30px; border-radius: 9px; flex: none; display: grid; place-items: center; font-size: 10.5px; font-weight: 700; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
+.msg.assistant .av { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: 0; }
+.msg .body { min-width: 0; flex: 1; }
+.msg .who { font-size: 12px; font-weight: 650; color: var(--muted); margin-bottom: 3px; }
+.msg .txt { white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
+.msg.user .txt { background: var(--panel2); border: 1px solid var(--line); padding: 10px 13px; border-radius: 12px; display: inline-block; }
+.msg .txt.err { color: var(--bad); }
+.msg .stats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.caret { display: inline-block; width: 8px; height: 16px; background: var(--accent); vertical-align: text-bottom; animation: blink 1s steps(2) infinite; border-radius: 2px; }
+@keyframes blink { 50% { opacity: 0; } }
+.composer { border-top: 1px solid var(--line); padding: 12px; display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; max-height: 200px; min-height: 42px; resize: none; }
+.rv { display: flex; justify-content: space-between; }
+.rv span { color: var(--text); font-family: var(--mono); font-size: 12px; }
+.sugg { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 6px; }
+.sugg button { border: 1px solid var(--line2); background: var(--panel2); padding: 7px 12px; border-radius: 99px; cursor: pointer; color: var(--muted); font-size: 13px; }
+.sugg button:hover { color: var(--text); border-color: var(--accent); }
+
+/* ---------- tables ---------- */
+.tbl-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; background: var(--panel2); }
+td { padding: 11px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--panel2); }
+td.r, th.r { text-align: right; }
+.st { font-size: 11.5px; font-weight: 650; padding: 2px 8px; border-radius: 99px; }
+.st.on { color: var(--ok); background: var(--ok-soft); } .st.off { color: var(--bad); background: var(--bad-soft); }
+
+/* ---------- code ---------- */
+.code { position: relative; background: #0a0c11; color: #d8dcea; border: 1px solid var(--line); border-radius: 11px; padding: 12px 48px 12px 14px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; margin: 0; }
+.code .btn { position: absolute; top: 7px; right: 7px; background: #1a1f2b; border-color: #313849; color: #c9cede; }
+.tabs { display: flex; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; background: none; padding: 8px 12px; cursor: pointer; color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs button.on { color: var(--text); border-color: var(--accent); }
+.steps { counter-reset: s; list-style: none; padding: 0; margin: 0; }
+.steps li { counter-increment: s; position: relative; padding-left: 38px; margin-bottom: 18px; }
+.steps li:last-child { margin-bottom: 0; }
+.steps li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 700; font-size: 12.5px; }
+.steps h4 { margin: 2px 0 8px; font-size: 14px; }
+.muted { color: var(--muted); }
+.note { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13px; margin: 0; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* ---------- overlays ---------- */
+.modal-bg { position: fixed; inset: 0; background: rgba(5,7,12,.6); backdrop-filter: blur(4px); display: grid; place-items: center; padding: 16px; z-index: 50; animation: fade .15s; }
+.modal { width: 100%; max-width: 560px; max-height: calc(100vh - 32px); overflow: auto; background: var(--panel); border: 1px solid var(--line2); border-radius: 18px; box-shadow: 0 30px 80px -20px rgba(0,0,0,.7); animation: pop .18s; }
+.modal .hd { padding: 18px 20px 0; } .modal .hd h3 { margin: 0; font-size: 17px; }
+.modal .bd { padding: 14px 20px 20px; }
+.modal .ft { display: flex; justify-content: flex-end; gap: 8px; padding: 0 20px 20px; }
+.keybox { display: flex; gap: 8px; align-items: center; background: var(--ok-soft); border: 1px solid rgba(52,211,153,.35); border-radius: 12px; padding: 10px 10px 10px 14px; margin: 6px 0 16px; }
+.keybox code { flex: 1; word-break: break-all; color: var(--text); font-size: 13px; }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; max-width: calc(100vw - 32px); }
+.toast { background: var(--panel); border: 1px solid var(--line2); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 10px; box-shadow: var(--shadow); font-size: 13px; animation: pop .2s; max-width: 380px; }
+.toast.ok { border-left-color: var(--ok); } .toast.bad { border-left-color: var(--bad); }
+.mnav, .mobile-only { display: none; }
+
+/* ---------- small screens ---------- */
+@media (max-width: 1000px) {
+  .two { grid-template-columns: 1fr; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .kpi.hero { grid-row: auto; }
+  .pg { grid-template-columns: 1fr; height: auto; }
+  .pg .chat { height: calc(100vh - 230px); min-height: 420px; }
+}
+@media (max-width: 760px) {
+  #app { grid-template-columns: 1fr; }
+  .side { display: none; }
+  .mobile-only { display: inline-flex; }
+  .top { padding: 12px 16px; }
+  .page { padding: 16px 16px calc(84px + env(safe-area-inset-bottom)); }
+  .kpis { gap: 10px; }
+  .kpi { padding: 13px 14px; } .kpi .v { font-size: 22px; } .kpi.hero .v { font-size: 32px; }
+  .nodes { grid-template-columns: 1fr; }
+  .mnav { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; background: color-mix(in srgb, var(--bg2) 92%, transparent); backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px); border-top: 1px solid var(--line); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); }
+  .mnav button { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; background: none; border: 0; color: var(--faint); font-size: 10.5px; font-weight: 600; padding: 4px 0; cursor: pointer; }
+  .mnav button.on { color: var(--accent); }
+  .pg .chat { height: calc(100vh - 210px - env(safe-area-inset-bottom)); }
+  .hide-sm { display: none; }
+  #toasts { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .keys-tbl thead { display: none; }
+  .keys-tbl tr { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .keys-tbl tr:last-child { border-bottom: 0; }
+  .keys-tbl td { padding: 0; border: 0; text-align: left !important; white-space: normal; }
+  .keys-tbl tbody tr:hover td { background: none; }
+  .keys-tbl td[data-l]::before { content: attr(data-l); display: block; color: var(--muted); font-size: 11px; font-weight: 600; }
+  .keys-tbl td.k { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+  .keys-tbl td.k code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .keys-tbl td.act { display: none; }
+  #keySearch { max-width: 130px !important; }
+}
+@media (min-width: 761px) { .keys-tbl .k .st, .keys-tbl .k .btn { display: none; } }
 </style>
 </head>
 <body>
-<header>
-  <h1>Expert<span>Cloud</span> Control</h1>
-  <div class="flex" style="min-width:min(100%,420px)">
-    <input id="token" type="password" placeholder="Admin token (printed by the gateway, ~/.expertcloud/admin_token)" aria-label="Admin token">
-    <button id="save">Connect</button>
-  </div>
-</header>
-<main>
-  <div id="status" class="small dim">Not connected.</div>
-  <div class="row">
-    <div class="card"><h2>Speed</h2>
-      <svg viewBox="0 0 200 120" width="100%" style="max-width:260px" role="img" aria-label="tokens per second">
-        <path d="M20 105 A80 80 0 0 1 180 105" stroke="#1f2a36" stroke-width="14" fill="none" stroke-linecap="round"/>
-        <path id="gauge" d="M20 105 A80 80 0 0 1 180 105" stroke="#4cc38a" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="0 252"/>
-        <text id="tps" x="100" y="92" text-anchor="middle" font-size="28" font-weight="650">0</text>
-        <text x="100" y="112" text-anchor="middle" font-size="11" fill="#8b98a5">tokens / s generating (last minute)</text>
-      </svg>
-      <div class="small dim" id="speedline"></div>
-    </div>
-    <div class="card"><h2>Token Killer &amp; cache</h2>
-      <div class="big" id="saved">0</div><div class="dim small">prompt tokens saved</div>
-      <div style="margin-top:10px" class="flex"><div class="grow"><div class="big" id="hits" style="font-size:20px">0</div><div class="dim small">cache hits</div></div>
-      <div class="grow"><div class="big" id="reqs" style="font-size:20px">0</div><div class="dim small">requests</div></div></div>
-    </div>
-    <div class="card"><h2>Cloud</h2>
-      <div class="big" id="nnodes">0</div><div class="dim small">nodes online</div>
-      <div style="margin-top:10px" class="small" id="models"></div>
-    </div>
-  </div>
-  <div class="row">
-    <div class="card"><h2>Free API key</h2>
-      <div class="flex"><input id="label" placeholder="Label (optional)" aria-label="Key label"><button class="primary" id="mkkey">Generate</button></div>
-      <div id="keyout" style="margin-top:10px; display:none">
-        <div class="flex"><div class="cmd mono grow" id="key"></div><button id="copykey">Copy</button></div>
-        <div class="small dim" style="margin-top:6px">Shown once. OpenAI base URL: <code id="baseurl"></code></div>
+
+<!-- ======================================================= sign in -->
+<section id="login" hidden>
+  <form class="login-card" id="loginForm" autocomplete="off">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M5 17l7-11 7 11"/><path d="M8.5 12.5h7"/></svg></div>ExpertCloud</div>
+    <h1>Sign in to your cloud</h1>
+    <p class="sub">Paste the admin token your gateway printed when it started.</p>
+    <div class="err" id="loginErr" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg><span></span></div>
+    <div class="field">
+      <label class="f" for="tok">Admin token</label>
+      <div class="pw">
+        <input class="input" id="tok" type="password" placeholder="adm-…" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off">
+        <button class="btn ghost" type="button" id="tokEye" aria-label="Show token"><svg class="i" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
       </div>
     </div>
-    <div class="card"><h2>Add a machine</h2>
-      <div class="small dim" style="margin-bottom:6px">Run in the ExpertStream folder on the new PC, laptop or Raspberry Pi (Python 3 with psutil, websockets, httpx; <code>make es_serve es_get</code>):</div>
-      <div class="flex"><div class="cmd mono grow" id="join">connect first</div><button id="copyjoin">Copy</button></div>
-      <div class="small dim" style="margin-top:6px">Add <code>--key sk-expert-...</code> to credit its work to your key (contributors get priority). Prompts pass through the nodes: join only machines you trust.</div>
+    <label class="check"><input type="checkbox" id="remember" checked> Keep me signed in on this device</label>
+    <button class="btn primary" style="width:100%;height:44px" id="loginBtn">Sign in</button>
+    <details class="help">
+      <summary>Where do I find the token?</summary>
+      <ol>
+        <li>The gateway prints a link that signs you in by itself: <code>…/dashboard#token=adm-…</code>. Open that link.</li>
+        <li>Or, on the machine running the gateway: <pre class="code" style="margin-top:6px">cat ~/.expertcloud/admin_token</pre></li>
+        <li>Tokens starting with <code>join-</code> are for worker nodes, and <code>sk-expert-</code> keys are for the API; neither signs in here.</li>
+        <li>Lost it, or shared it by accident? Restart the gateway with <code>--rotate-tokens</code> to make new ones.</li>
+      </ol>
+    </details>
+  </form>
+</section>
+
+<!-- ======================================================= app -->
+<div id="app" hidden>
+  <aside class="side">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M5 17l7-11 7 11"/><path d="M8.5 12.5h7"/></svg></div>ExpertCloud</div>
+    <div id="sideNav"></div>
+    <div class="grow"></div>
+    <div class="side-foot">
+      <button class="nav" id="themeBtn"><svg class="i" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><span>Theme</span></button>
+      <button class="nav" id="logoutBtn"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg><span>Sign out</span></button>
     </div>
-  </div>
-  <div class="card"><h2>Nodes</h2><div class="nodes" id="nodes"><div class="dim">No nodes yet.</div></div></div>
-  <div class="card"><h2>Keys</h2><div class="tablewrap"><table><thead><tr><th>Key</th><th>Label</th><th>Requests</th><th>Tokens out</th><th>Saved</th><th>Contributed</th><th></th></tr></thead><tbody id="keys"></tbody></table></div></div>
-</main>
+  </aside>
+  <main>
+    <header class="top">
+      <h2 id="title">Overview</h2>
+      <div class="sp"></div>
+      <span class="pill hide-sm" id="uptime" hidden></span>
+      <span class="pill" id="status"><span class="dot"></span><span>Connecting</span></span>
+      <button class="btn ghost icon mobile-only" id="logoutTop" aria-label="Sign out"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg></button>
+    </header>
+    <div class="page">
+      <div class="banner bad" id="offline" hidden><svg class="i" viewBox="0 0 24 24"><path d="M12 9v4M12 17v.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span>The gateway is not answering. Is <code>python3 gateway/omni_router.py</code> still running?</span></div>
+
+      <!-- Overview -->
+      <section data-view="overview">
+        <div class="grid kpis">
+          <div class="card kpi hero"><div class="l">Generation speed · last minute</div><div class="v" id="kTps">0<small>tok/s</small></div>
+            <div class="s" id="kTpsSub">waiting for answers</div><svg class="spark" id="spark" viewBox="0 0 300 42" preserveAspectRatio="none"></svg></div>
+          <div class="card kpi"><div class="l">Nodes online</div><div class="v" id="kNodes">0</div><div class="s" id="kNodesSub">—</div></div>
+          <div class="card kpi"><div class="l">Requests served</div><div class="v" id="kReq">0</div><div class="s" id="kReqSub">—</div></div>
+          <div class="card kpi"><div class="l">Tokens saved</div><div class="v" id="kSaved">0</div><div class="s">by Token Killer and the cache</div></div>
+          <div class="card kpi"><div class="l">Cache hits</div><div class="v" id="kCache">0</div><div class="s" id="kCacheSub">—</div></div>
+        </div>
+        <div class="grid two">
+          <div class="card"><div class="hd"><h3>Nodes</h3><span class="sub" id="ovNodesSub"></span><div class="sp"></div><button class="btn sm" data-go="nodes">Manage</button></div><div id="ovNodes"></div></div>
+          <div class="card"><div class="hd"><h3>Models</h3><div class="sp"></div><button class="btn sm" data-go="playground">Try one</button></div><div id="ovModels"></div></div>
+        </div>
+      </section>
+
+      <!-- Playground -->
+      <section data-view="playground" hidden>
+        <div class="pg">
+          <div class="card chat">
+            <div class="msgs" id="msgs"></div>
+            <form class="composer" id="composer">
+              <textarea class="input" id="prompt" rows="1" placeholder="Message the cloud…"></textarea>
+              <button class="btn primary icon" id="sendBtn" aria-label="Send"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+            </form>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>Settings</h3><div class="sp"></div><button class="btn sm ghost" id="clearChat">Clear chat</button></div>
+            <div class="bd">
+              <div class="field"><label class="f" for="pModel">Model</label><select class="input" id="pModel"></select></div>
+              <div class="field"><label class="f" for="pSys">System prompt</label><textarea class="input" id="pSys" rows="3" placeholder="Optional"></textarea></div>
+              <div class="field"><label class="f rv" for="pTemp">Temperature <span id="pTempV">0.7</span></label><input type="range" id="pTemp" min="0" max="2" step="0.05" value="0.7"></div>
+              <div class="field"><label class="f rv" for="pMax">Max tokens <span id="pMaxV">512</span></label><input type="range" id="pMax" min="16" max="4096" step="16" value="512"></div>
+              <div class="field"><label class="f" for="pCompress">Token Killer</label>
+                <select class="input" id="pCompress"><option value="safe">Safe: whitespace and repeats</option><option value="aggressive">Aggressive: also filler words</option><option value="off">Off</option></select></div>
+              <div class="field" style="margin:0"><label class="f" for="pCache">Cache</label>
+                <select class="input" id="pCache"><option value="">Exact repeats at temperature 0</option><option value="similar">Also similar prompts</option><option value="off">Off</option></select></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Nodes -->
+      <section data-view="nodes" hidden>
+        <div class="grid nodes" id="nodeGrid"></div>
+        <div class="card" id="nodesEmpty" hidden></div>
+      </section>
+
+      <!-- Keys -->
+      <section data-view="keys" hidden>
+        <div class="card" style="margin-bottom:16px"><div class="bd">
+          <form class="row" id="keyForm" style="flex-wrap:wrap">
+            <input class="input" id="keyLabel" placeholder="Label, e.g. my-laptop" maxlength="64" style="min-width:200px">
+            <button class="btn primary"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New API key</button>
+          </form>
+          <p class="note">Keys are free and work with any OpenAI-compatible app. The full key is shown once; only a hash is stored.</p>
+        </div></div>
+        <div class="card"><div class="hd"><h3>API keys</h3><span class="sub" id="keysSub"></span><div class="sp"></div><input class="input" id="keySearch" placeholder="Search" style="max-width:180px;height:32px"></div>
+          <div class="tbl-wrap"><table class="keys-tbl"><thead><tr><th>Key</th><th>Label</th><th>Created</th><th class="r">Requests</th><th class="r">Tokens out</th><th class="r">Saved</th><th class="r">Contributed</th><th>Status</th><th></th></tr></thead>
+          <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
+      </section>
+
+      <!-- Connect -->
+      <section data-view="connect" hidden>
+        <div class="banner warn" id="lanWarn" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
+          <span>The gateway listens on <code id="bindHost">127.0.0.1</code>, so only this device can reach it. To add other phones or PCs, restart it with <code>--host 0.0.0.0</code>.</span></div>
+        <div class="grid two">
+          <div class="card"><div class="hd"><h3>Add a worker node</h3><span class="sub hide-sm">a phone or computer that runs models</span></div><div class="bd">
+            <ol class="steps">
+              <li><h4>Get the code on the device</h4><div id="cloneCmd"></div>
+                <p class="note">On Termux, use <code>pkg install python-psutil</code> instead of pip for psutil, or skip it.</p></li>
+              <li><h4>Join this cloud</h4><div id="joinCmds"></div></li>
+              <li><h4>Add models</h4><p class="muted" style="margin:0">Copy GGUF files into <code>~/models</code> on the node, or deploy one from the Nodes page once it is online.</p></li>
+            </ol>
+          </div></div>
+          <div class="grid" style="align-content:start">
+            <div class="card"><div class="hd"><h3>Use the API</h3><span class="sub">OpenAI-compatible</span></div><div class="bd">
+              <dl class="kv" style="margin-bottom:14px"><dt>Base URL</dt><dd id="baseUrl"></dd><dt>Models</dt><dd>auto · expertstream-fast · expertstream-coder</dd></dl>
+              <div id="apiSnip"></div>
+            </div></div>
+            <div class="card"><div class="hd"><h3>Agents (MCP)</h3></div><div class="bd">
+              <p class="muted" style="margin:0 0 10px">Let Claude Code or any MCP client list nodes, deploy models, make keys and run prompts.</p>
+              <div id="mcpCmd"></div>
+            </div></div>
+            <div class="card"><div class="hd"><h3>Gateway</h3></div><div class="bd"><dl class="kv" id="gwInfo"></dl></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <nav class="mnav" id="mobNav"></nav>
+</div>
+<div id="toasts"></div>
+
 <script>
-const $ = id => document.getElementById(id);
-let TOKEN = '';
-try { TOKEN = localStorage.getItem('expertcloud_admin') || ''; } catch (e) {}
-$('token').value = TOKEN;
-function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
-function fmt(n) { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n)); }
+"use strict";
+// ---------------------------------------------------------------- helpers
+const $ = (s, r = document) => r.querySelector(s);
+function h(tag, attrs, ...kids) {   // DOM builder; text always goes in as text nodes, never as HTML
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "style") e.style.cssText = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+const ICONS = {
+  overview: '<path d="M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 3v6h8V3z"/>',
+  playground: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  nodes: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  keys: '<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3M16 7l3 3M14 9l2 2"/>',
+  connect: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
+  check: '<path d="M5 12l5 5L20 7"/>', cloud: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 1 0 6 16.9"/><path d="M12 13v8M9 18l3 3 3-3"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>', send: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  spark: '<path d="M12 3l1.9 5.8L20 10l-6.1 1.2L12 17l-1.9-5.8L4 10l6.1-1.2z"/>',
+};
+function icon(name) { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "i"); s.innerHTML = ICONS[name]; return s; }
+const fmt = n => n == null || isNaN(n) ? "—" : Math.abs(n) >= 1e9 ? (n / 1e9).toFixed(1) + "B" : Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(1) + "M" : Math.abs(n) >= 1e4 ? (n / 1e3).toFixed(1) + "k" : Math.round(n).toLocaleString();
+const mb = v => v == null || isNaN(v) ? "—" : v >= 1024 ? (v / 1024).toFixed(v >= 10240 ? 0 : 1) + " GB" : Math.round(v) + " MB";
+function ago(t) { const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; }
+function dur(s) { s = Math.round(s || 0); return s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : s < 86400 ? Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m" : Math.floor(s / 86400) + "d " + Math.floor(s % 86400 / 3600) + "h"; }
+function toast(msg, kind = "") { const t = h("div", { class: "toast " + kind, role: "status" }, msg); $("#toasts").append(t); setTimeout(() => t.remove(), 4200); }
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const ta = h("textarea", { style: "position:fixed;opacity:0" }); ta.value = text; document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+  if (btn) { btn.replaceChildren(icon("check")); setTimeout(() => btn.replaceChildren(icon("copy")), 1400); } else toast("Copied", "ok");
+}
+function codeBlock(text) { const b = h("button", { class: "btn sm icon", type: "button", "aria-label": "Copy", onclick: () => copy(text, b) }, icon("copy")); return h("pre", { class: "code" }, text, b); }
+function emptyState(ic, title, text, action) { return h("div", { class: "empty" }, h("div", { class: "ic" }, icon(ic)), h("h4", {}, title), h("p", {}, text), action || null); }
+const store = {   // storage can be blocked (private windows); the page works without it
+  get(k) { try { return localStorage.getItem(k) ?? sessionStorage.getItem(k); } catch { return null; } },
+  set(k, v, keep) { try { (keep ? localStorage : sessionStorage).setItem(k, v); (keep ? sessionStorage : localStorage).removeItem(k); } catch {} },
+  del(k) { try { localStorage.removeItem(k); sessionStorage.removeItem(k); } catch {} },
+};
+
+// ---------------------------------------------------------------- auth
+let TOKEN = "";
+const EDGE = /^[\s"'`<>‘’“”«»]+|[\s"'`<>‘’“”«»]+$/g;
+const cleanToken = t => (t || "").replace(EDGE, "").replace(/^bearer\s+/i, "").replace(EDGE, "");
+class AuthError extends Error {}
 async function api(path, opts = {}) {
-  const r = await fetch(path, Object.assign({}, opts, { headers: Object.assign({ 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }, opts.headers || {}) }));
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  const r = await fetch(path, { ...opts, headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  if (r.status === 401) { let m = "You were signed out."; try { m = (await r.json()).error.message; } catch {} throw new AuthError(m); }
+  let j = null; try { j = await r.json(); } catch {}
+  if (!r.ok) throw new Error((j && j.error && (j.error.message || j.error)) || "HTTP " + r.status);
   return j;
 }
-function bar(label, frac, text) {
-  const wrap = el('div'); const top = el('div', '', 'flex small');
-  top.appendChild(el('span', label, 'grow dim')); top.appendChild(el('span', text));
-  const b = el('div', '', 'bar' + (frac > 0.9 ? ' bad' : frac > 0.7 ? ' warn' : '')); const i = el('i'); i.style.width = Math.max(0, Math.min(100, frac * 100)) + '%'; b.appendChild(i);
-  wrap.appendChild(top); wrap.appendChild(b); return wrap;
+function showLogin(msg) {
+  stopPolling(); $("#app").hidden = true; $("#login").hidden = false;
+  const e = $("#loginErr"); e.hidden = !msg; if (msg) e.querySelector("span").textContent = msg.charAt(0).toUpperCase() + msg.slice(1);
+  setTimeout(() => $("#tok").focus(), 50);
+}
+async function signIn(raw, keep) {
+  const tok = cleanToken(raw);
+  if (!tok) return showLogin("Paste your admin token first.");
+  const btn = $("#loginBtn"); btn.disabled = true; btn.replaceChildren(h("span", { class: "spin" }), "Checking");
+  try {
+    const r = await fetch("/auth/check", { headers: { "Authorization": "Bearer " + tok } });
+    let j = {}; try { j = await r.json(); } catch {}
+    if (r.status === 404) { TOKEN = tok; await api("/admin/live"); }   // a gateway from before /auth/check
+    else if (!r.ok) throw new AuthError((j.error && j.error.message) || "That token was refused.");
+    else if (j.role !== "admin") throw new AuthError(j.hint || "That is an API key, not the admin token.");
+    TOKEN = tok; store.set("ec_token", tok, keep);
+    $("#login").hidden = true; $("#app").hidden = false; $("#tok").value = "";
+    startApp();
+  } catch (e) {
+    TOKEN = "";
+    showLogin(e instanceof AuthError ? e.message : "Cannot reach the gateway at " + location.host + ". Is it running?");
+  } finally { btn.disabled = false; btn.replaceChildren("Sign in"); }
+}
+$("#loginForm").addEventListener("submit", e => { e.preventDefault(); signIn($("#tok").value, $("#remember").checked); });
+$("#tokEye").addEventListener("click", () => { const i = $("#tok"); i.type = i.type === "password" ? "text" : "password"; });
+function signOut() { store.del("ec_token"); TOKEN = ""; showLogin(""); }
+$("#logoutBtn").addEventListener("click", signOut); $("#logoutTop").addEventListener("click", signOut);
+
+// ---------------------------------------------------------------- theme
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; }
+applyTheme(store.get("ec_theme"));
+$("#themeBtn").addEventListener("click", () => {
+  const cur = document.documentElement.dataset.theme, dark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark"; applyTheme(t); store.set("ec_theme", t, true);
+});
+
+// ---------------------------------------------------------------- navigation
+const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["keys", "API keys"], ["connect", "Connect"]];
+let VIEW = "overview";
+for (const [id, label] of VIEWS) {
+  $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id), h("span", {}, label), id === "nodes" ? h("span", { class: "count", id: "navNodes" }, "0") : null));
+  $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label === "API keys" ? "Keys" : label));
+}
+document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
+function go(id) {
+  VIEW = id;
+  document.querySelectorAll("[data-nav]").forEach(b => b.classList.toggle("on", b.dataset.nav === id));
+  document.querySelectorAll("[data-view]").forEach(s => s.hidden = s.dataset.view !== id);
+  $("#title").textContent = VIEWS.find(v => v[0] === id)[1];
+  try { history.replaceState(null, "", "#" + id); } catch {}
+  if (id === "keys") loadKeys();
+  if (id === "playground" && matchMedia("(min-width: 761px)").matches) setTimeout(() => $("#prompt").focus(), 30);
+  render();
+}
+
+// ---------------------------------------------------------------- live data
+let LIVE = null, timer = null, polling = false, failures = 0;
+const TPS = [];
+function stopPolling() { clearTimeout(timer); timer = null; polling = false; }
+async function poll() {
+  clearTimeout(timer); polling = true;
+  try {
+    LIVE = await api("/admin/live"); failures = 0;
+    TPS.push(LIVE.speed.avg_tps || 0); if (TPS.length > 90) TPS.shift();
+    $("#offline").hidden = true; render();
+  } catch (e) {
+    if (e instanceof AuthError) { store.del("ec_token"); return showLogin(e.message); }
+    failures++; $("#offline").hidden = failures < 2; setStatus("bad", "Offline");
+  }
+  if (polling) timer = setTimeout(poll, document.hidden ? 10000 : 2000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && polling) poll(); });
+function setStatus(kind, text) { const s = $("#status"); s.className = "pill " + kind; s.lastChild.textContent = text; }
+
+function render() {
+  if (!LIVE) return;
+  const L = LIVE, nodes = L.nodes || [];
+  const busy = nodes.reduce((a, n) => a + (n.active || 0), 0), cap = nodes.reduce((a, n) => a + (n.capacity || 0), 0);
+  setStatus(nodes.length ? "ok" : "warn", nodes.length ? "Live · " + nodes.length + (nodes.length === 1 ? " node" : " nodes") : "No nodes");
+  const up = $("#uptime"); up.hidden = L.uptime_s == null; up.textContent = "Up " + dur(L.uptime_s);
+  $("#navNodes").textContent = nodes.length;
+  renderModelSelect(L);
+  if (VIEW === "overview") renderOverview(L, nodes, busy, cap);
+  if (VIEW === "nodes") renderNodes(nodes);
+  if (VIEW === "connect") renderConnect(L);
+}
+
+function renderOverview(L, nodes, busy, cap) {
+  const sp = L.speed || {}, t = L.totals || {}, c = L.cache || {};
+  $("#kTps").replaceChildren((sp.avg_tps || 0).toFixed(1), h("small", {}, "tok/s"));
+  $("#kTpsSub").textContent = sp.answers_last_minute ? fmt(sp.tokens_last_minute) + " tokens in " + sp.answers_last_minute + (sp.answers_last_minute === 1 ? " answer" : " answers") + (sp.cluster_tps ? " · " + sp.cluster_tps.toFixed(1) + " tok/s right now" : "") : "no answers in the last minute";
+  drawSpark();
+  $("#kNodes").textContent = nodes.length;
+  $("#kNodesSub").textContent = nodes.length ? busy + " of " + cap + " slots busy" : "add one from Connect";
+  $("#kReq").textContent = fmt(t.requests);
+  $("#kReqSub").textContent = fmt(t.completion_tokens) + " tokens generated";
+  $("#kSaved").textContent = fmt(t.tokens_saved);
+  $("#kCache").textContent = fmt(t.cache_hits);
+  $("#kCacheSub").textContent = fmt(c.entries) + " answers stored";
+  $("#ovNodesSub").textContent = nodes.length ? busy + "/" + cap + " busy" : "";
+  const on = $("#ovNodes");
+  if (!nodes.length) on.replaceChildren(emptyState("nodes", "No nodes online", "A node is any phone or computer that runs models for this cloud.", h("button", { class: "btn primary", "data-go": "connect" }, "Add a node")));
+  else on.replaceChildren(h("ul", { class: "list" }, nodes.map(n => {
+    const l = n.load || {}, c = n.caps || {};
+    return h("li", {}, h("span", { class: "dot", style: "background:" + (n.active ? "var(--warn)" : "var(--ok)") }),
+      h("div", { style: "min-width:0" }, h("div", { class: "nm" }, n.name), h("div", { class: "muted", style: "font-size:12px" }, [c.os, c.arch, c.cpu_cores ? c.cpu_cores + " cores" : null, mb(c.ram_mb) + " RAM"].filter(Boolean).join(" · "))),
+      h("div", { class: "meta" }, n.active + "/" + n.capacity + " busy" + (n.tps ? " · " + n.tps.toFixed(1) + " tok/s" : "") + (l.cpu_pct != null ? " · CPU " + Math.round(l.cpu_pct) + "%" : "")));
+  })));
+  const om = $("#ovModels"), ms = L.models || [];
+  if (!ms.length) om.replaceChildren(emptyState("cloud", "No models yet", "Put GGUF files in ~/models on a node, or deploy one from the Nodes page.", nodes.length ? h("button", { class: "btn", "data-go": "nodes" }, "Deploy a model") : null));
+  else om.replaceChildren(h("ul", { class: "list" }, ms.map(m => h("li", {}, h("div", { class: "nm", title: m.id }, m.id),
+    h("div", { class: "meta" }, h("span", { class: "chip" + (m.warm_nodes ? " warm" : "") }, h("span", { class: "dot" }), m.warm_nodes ? "warm" : "cold"), "  ", mb(m.size_mb), " · ", m.nodes + (m.nodes === 1 ? " node" : " nodes"))))));
+}
+function drawSpark() {
+  const s = $("#spark"), max = Math.max(1, ...TPS), n = TPS.length;
+  if (n < 2) { s.replaceChildren(); return; }
+  const d = "M" + TPS.map((v, i) => ((i / (n - 1)) * 300).toFixed(1) + "," + (40 - (v / max) * 34).toFixed(1)).join("L");
+  s.innerHTML = '<defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7c6cff" stop-opacity=".3"/><stop offset="1" stop-color="#7c6cff" stop-opacity="0"/></linearGradient></defs>'
+    + '<path d="' + d + 'L300,42L0,42Z" fill="url(#sg)"/><path d="' + d + '" fill="none" stroke="#7c6cff" stroke-width="2" vector-effect="non-scaling-stroke"/>';
+}
+
+// ---------------------------------------------------------------- nodes (one card per node id, updated in place so a deploy form survives refreshes)
+const CARDS = new Map();
+function bar(label) {
+  const fill = h("div", { class: "fill" }), val = h("b", {});
+  return { el: h("div", { class: "bar" }, h("div", { class: "t" }, h("span", {}, label), val), h("div", { class: "track" }, fill)),
+           set(p, text) { fill.style.width = Math.max(0, Math.min(100, p)) + "%"; fill.classList.toggle("hot", p > 85); val.textContent = text; } };
+}
+function specCell() { const b = h("b", {}), s = h("span", {}); return { el: h("div", {}, b, s), set(v, l) { b.textContent = v; s.textContent = l; b.title = v; s.title = l; } }; }
+function nodeCard(n) {
+  const ui = { name: h("div", { class: "nm" }), id: h("div", { class: "id" }), pill: h("span", { class: "pill" }, h("span", { class: "dot" }), h("span", {})),
+    specs: [0, 1, 2, 3, 4, 5].map(specCell), cpu: bar("CPU"), ram: bar("Memory"), slots: bar("Requests in flight"),
+    models: h("div", { class: "chips" }), stats: h("div", { class: "muted", style: "font-size:12px;margin-top:12px" }) };
+  const repo = h("input", { class: "input", placeholder: "Repo, e.g. unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF", autocapitalize: "off", spellcheck: "false" });
+  const file = h("input", { class: "input", placeholder: "File, e.g. Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf", autocapitalize: "off", spellcheck: "false" });
+  const btn = h("button", { class: "btn primary" }, "Deploy");
+  const form = h("form", {}, h("div", { class: "field" }, repo), h("div", { class: "row" }, file, btn));
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    if (!repo.value.trim() || !file.value.trim()) return toast("Give both the repo and the file name", "bad");
+    btn.disabled = true; btn.replaceChildren(h("span", { class: "spin" }), "Downloading");
+    toast("Deploying " + file.value.trim() + " to " + ui.name.textContent + ". Big models take a while.");
+    try {
+      const r = await api("/admin/deploy", { method: "POST", body: JSON.stringify({ node_id: n.id, repo: repo.value.trim(), file: file.value.trim() }) });
+      if (r.ok) { toast("Ready on " + ui.name.textContent + (r.message ? ": " + r.message : ""), "ok"); file.value = ""; } else toast("Deploy failed: " + (r.message || "unknown error"), "bad");
+    } catch (er) { if (er instanceof AuthError) return showLogin(er.message); toast("Deploy failed: " + er.message, "bad"); }
+    finally { btn.disabled = false; btn.replaceChildren("Deploy"); }
+  });
+  const el = h("div", { class: "card node" },
+    h("div", { class: "hd" }, h("div", { style: "min-width:0;flex:1" }, ui.name, ui.id), ui.pill),
+    h("div", { class: "bd" }, h("div", { class: "spec" }, ui.specs.map(s => s.el)), ui.cpu.el, ui.ram.el, ui.slots.el,
+      h("label", { class: "f", style: "margin-top:14px" }, "Models"), ui.models, ui.stats,
+      h("details", { class: "deploy" }, h("summary", {}, icon("cloud"), "Deploy a model from Hugging Face"), form,
+        h("p", { class: "note" }, "Only the model's core is downloaded now; experts stream in on first use."))));
+  return { el, ui };
 }
 function renderNodes(nodes) {
-  const box = $('nodes'); box.replaceChildren();
-  if (!nodes.length) { box.appendChild(el('div', 'No nodes online. Run the join command on a machine.', 'dim')); return; }
+  const grid = $("#nodeGrid"), seen = new Set();
   for (const n of nodes) {
-    const c = n.caps || {}, l = n.load || {}, card = el('div', '', 'card');
-    const head = el('div', '', 'flex'); head.appendChild(el('strong', n.name, 'grow')); head.appendChild(el('span', l.ping_ms != null ? l.ping_ms + ' ms' : '', 'small dim'));
-    card.appendChild(head);
-    card.appendChild(el('div', `${c.cpu_cores || '?'} cores · ${fmt(c.ram_mb)} MB RAM · ${c.gpu ? c.gpu + ' ' + fmt(c.vram_mb) + ' MB' : 'no GPU'} · disk ${c.disk_read_mbps || '?'} MB/s · ${c.os || ''} ${c.arch || ''}`, 'small dim'));
-    card.appendChild(el('div', '', '')).style.height = '8px';
-    card.appendChild(bar('CPU', (l.cpu_pct || 0) / 100, Math.round(l.cpu_pct || 0) + '%'));
-    const ramUsed = (l.ram_mb || c.ram_mb || 0) - (l.ram_free_mb || 0);
-    card.appendChild(bar('RAM', ramUsed / Math.max(1, l.ram_mb || c.ram_mb || 1), fmt(ramUsed) + ' / ' + fmt(l.ram_mb || c.ram_mb) + ' MB'));
-    card.appendChild(bar('Slots', n.active / Math.max(1, n.capacity), n.active + ' / ' + n.capacity));
-    card.appendChild(el('div', `served ${n.served} · ${n.tps ? n.tps.toFixed(1) + ' tok/s' : '–'} · first token ${n.ttft_s != null ? n.ttft_s.toFixed(2) + ' s' : '–'}`, 'small'));
-    const ms = el('div'); for (const m of n.models || []) { const b = el('span', m.name + (m.warm ? ' · warm' : ''), 'badge' + (m.warm ? ' warm' : '')); ms.appendChild(b); }
-    if (!(n.models || []).length) ms.appendChild(el('span', 'no models (deploy one with the MCP tool or POST /admin/deploy)', 'small dim'));
-    card.appendChild(ms);
-    const id = el('div', n.id, 'small dim mono'); id.style.marginTop = '6px'; card.appendChild(id);
-    box.appendChild(card);
+    seen.add(n.id);
+    let c = CARDS.get(n.id); if (!c) { c = nodeCard(n); CARDS.set(n.id, c); }
+    if (c.el.parentNode !== grid) grid.append(c.el);
+    const u = c.ui, cp = n.caps || {}, l = n.load || {};
+    u.name.textContent = n.name; u.id.textContent = n.id.length > 22 ? n.id.slice(0, 22) + "…" : n.id;
+    const busy = n.active > 0; u.pill.className = "pill " + (busy ? "warn" : "ok"); u.pill.lastChild.textContent = busy ? "Working" : "Idle";
+    u.specs[0].set(cp.cpu_cores || "—", "CPU cores");
+    u.specs[1].set(mb(cp.ram_mb), "RAM");
+    u.specs[2].set(cp.gpu ? mb(cp.vram_mb) : "None", cp.gpu || "GPU");
+    u.specs[3].set(cp.disk_read_mbps ? Math.round(cp.disk_read_mbps) : "—", "MB/s disk");
+    u.specs[4].set(n.tps ? n.tps.toFixed(1) : "—", "tok/s");
+    u.specs[5].set(n.ttft_s != null ? n.ttft_s.toFixed(2) + " s" : "—", "first token");
+    u.cpu.set(l.cpu_pct || 0, Math.round(l.cpu_pct || 0) + "%");
+    const tot = l.ram_mb || cp.ram_mb || 0, free = l.ram_free_mb || 0;
+    u.ram.set(tot ? (1 - free / tot) * 100 : 0, mb(tot - free) + " of " + mb(tot));
+    u.slots.set(n.capacity ? n.active / n.capacity * 100 : 0, n.active + " of " + n.capacity);
+    const ms = n.models || [];
+    u.models.replaceChildren(...(ms.length ? ms.map(m => h("span", { class: "chip" + (m.warm ? " warm" : ""), title: (m.warm ? "loaded" : "on disk") + " · " + m.name }, h("span", { class: "dot" }), m.name + " · " + mb(m.size_mb)))
+      : [h("span", { class: "muted", style: "font-size:13px" }, "No models yet: deploy one below.")]));
+    u.stats.textContent = ["online " + dur(n.online_s), n.served + (n.served === 1 ? " answer" : " answers"), n.failures ? n.failures + " failures" : null,
+      n.ping_ms != null ? "ping " + Math.round(n.ping_ms) + " ms" : null, cp.disk_free_mb ? mb(cp.disk_free_mb) + " disk free" : null, [cp.os, cp.arch].filter(Boolean).join(" "), cp.cpu_threads ? cp.cpu_threads + " threads" : null].filter(Boolean).join(" · ");
   }
+  for (const [id, c] of CARDS) if (!seen.has(id)) { c.el.remove(); CARDS.delete(id); }
+  const em = $("#nodesEmpty"); em.hidden = nodes.length > 0;
+  if (!nodes.length && !em.firstChild) em.append(emptyState("nodes", "No nodes online yet", "Run the join command on any phone or computer and it shows up here within seconds.", h("button", { class: "btn primary", "data-go": "connect" }, "Show the join command")));
 }
-async function refreshKeys() {
-  const j = await api('/admin/keys'); const tb = $('keys'); tb.replaceChildren();
-  for (const k of j.keys) {
-    const tr = el('tr'); for (const v of [k.prefix + '…', k.label || '', fmt(k.requests), fmt(k.completion_tokens), fmt(k.tokens_saved), fmt(k.contributed_tokens)]) tr.appendChild(el('td', v));
-    const td = el('td'); if (!k.revoked) { const b = el('button', 'Revoke'); b.onclick = async () => { await api('/admin/keys/' + encodeURIComponent(k.prefix), { method: 'DELETE' }); refreshKeys(); }; td.appendChild(b); } else td.textContent = 'revoked';
-    tr.appendChild(td); tb.appendChild(tr);
+
+// ---------------------------------------------------------------- keys
+let KEYS = [];
+async function loadKeys() {
+  try { KEYS = (await api("/admin/keys")).keys || []; renderKeys(); }
+  catch (e) { if (e instanceof AuthError) return showLogin(e.message); toast("Could not load keys: " + e.message, "bad"); }
+}
+function renderKeys() {
+  const q = $("#keySearch").value.trim().toLowerCase();
+  const rows = KEYS.filter(k => !q || (k.prefix + " " + (k.label || "")).toLowerCase().includes(q));
+  $("#keysSub").textContent = KEYS.filter(k => !k.revoked).length + " active";
+  const st = k => h("span", { class: "st " + (k.revoked ? "off" : "on") }, k.revoked ? "Revoked" : "Active");
+  const rv = k => k.revoked ? null : h("button", { class: "btn sm danger", onclick: () => revoke(k) }, "Revoke");
+  $("#keyRows").replaceChildren(...rows.map(k => h("tr", {},
+    h("td", { class: "k" }, h("code", {}, k.prefix + "…"), st(k), rv(k)), h("td", { "data-l": "Label" }, k.label || h("span", { class: "muted" }, "—")),
+    h("td", { "data-l": "Created", title: new Date(k.created * 1000).toLocaleString() }, ago(k.created)),
+    h("td", { class: "r", "data-l": "Requests" }, fmt(k.requests)), h("td", { class: "r", "data-l": "Tokens out" }, fmt(k.completion_tokens)),
+    h("td", { class: "r", "data-l": "Saved" }, fmt(k.tokens_saved)), h("td", { class: "r", "data-l": "Contributed" }, fmt(k.contributed_tokens)),
+    h("td", { class: "act" }, st(k)), h("td", { class: "r act" }, rv(k)))));
+  const em = $("#keysEmpty"); em.hidden = rows.length > 0;
+  em.replaceChildren(KEYS.length ? h("div", { class: "empty" }, "No key matches “" + q + "”.") : emptyState("keys", "No API keys yet", "Make one above and use it from any OpenAI-compatible app."));
+}
+$("#keySearch").addEventListener("input", renderKeys);
+$("#keyForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { const r = await api("/admin/keys", { method: "POST", body: JSON.stringify({ label: $("#keyLabel").value.trim() }) }); $("#keyLabel").value = ""; showKey(r.key); loadKeys(); }
+  catch (er) { if (er instanceof AuthError) return showLogin(er.message); toast("Could not make a key: " + er.message, "bad"); }
+});
+function snippets(key) {
+  const base = location.origin + "/v1";
+  return {
+    curl: `curl ${base}/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello!"}]}'`,
+    Python: `from openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key="${key}")\nr = client.chat.completions.create(model="auto", messages=[{"role": "user", "content": "Hello!"}])\nprint(r.choices[0].message.content)`,
+    JavaScript: `import OpenAI from "openai";\n\nconst client = new OpenAI({ baseURL: "${base}", apiKey: "${key}" });\nconst r = await client.chat.completions.create({ model: "auto", messages: [{ role: "user", content: "Hello!" }] });\nconsole.log(r.choices[0].message.content);`,
+  };
+}
+function snippetTabs(key) {
+  const sn = snippets(key), box = h("div", {}), tabs = h("div", { class: "tabs" });
+  const pick = name => { tabs.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === name)); box.replaceChildren(codeBlock(sn[name])); };
+  for (const name of Object.keys(sn)) tabs.append(h("button", { type: "button", onclick: () => pick(name) }, name));
+  pick("curl"); return h("div", {}, tabs, box);
+}
+function modal(title, body, foot) {
+  const bg = h("div", { class: "modal-bg" }), close = () => { bg.remove(); document.removeEventListener("keydown", esc); };
+  const esc = e => { if (e.key === "Escape") close(); };
+  bg.append(h("div", { class: "modal", role: "dialog", "aria-modal": "true" }, h("div", { class: "hd" }, h("h3", {}, title)), h("div", { class: "bd" }, body), h("div", { class: "ft" }, foot(close))));
+  bg.addEventListener("click", e => { if (e.target === bg) close(); }); document.addEventListener("keydown", esc); document.body.append(bg);
+}
+function showKey(key) {
+  const b = h("button", { class: "btn sm icon", type: "button", "aria-label": "Copy key", onclick: () => copy(key, b) }, icon("copy"));
+  modal("Your new API key", [h("p", { class: "muted", style: "margin:0" }, "Copy it now: it is not shown again."), h("div", { class: "keybox" }, h("code", {}, key), b), snippetTabs(key)],
+    close => [h("button", { class: "btn primary", onclick: close }, "Done")]);
+}
+function revoke(k) {
+  modal("Revoke " + k.prefix + "…?", h("p", { class: "muted", style: "margin:0" }, "Apps using this key" + (k.label ? " (" + k.label + ")" : "") + " stop working at once. This cannot be undone."),
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => {
+      close();
+      try { await api("/admin/keys/" + encodeURIComponent(k.prefix), { method: "DELETE" }); toast("Key revoked", "ok"); loadKeys(); }
+      catch (e) { if (e instanceof AuthError) return showLogin(e.message); toast("Could not revoke: " + e.message, "bad"); } } }, "Revoke key")]);
+}
+
+// ---------------------------------------------------------------- connect
+let connectSig = "";
+function renderConnect(L) {
+  const c = L.connect || { join: L.join, lan: [] }, sig = JSON.stringify([c, L.options, L.open_signup]);
+  if (sig === connectSig) return; connectSig = sig;
+  $("#lanWarn").hidden = c.lan_reachable !== false; $("#bindHost").textContent = c.bind_host || "127.0.0.1";
+  $("#cloneCmd").replaceChildren(codeBlock("git clone -b claude/expertstream-moe-android-oegt59 https://github.com/tharunmaks/stream- Stream-\ncd Stream- && make es_serve es_get\npip install websockets psutil"));
+  const jc = $("#joinCmds"), here = ["127.0.0.1", "localhost"].includes(location.hostname), note = t => h("p", { class: "note", style: "margin:12px 0 6px" }, t);
+  jc.replaceChildren(h("p", { class: "note", style: "margin:0 0 6px" }, here ? "On this device:" : "With the address you opened this page with:"), codeBlock(c.join));
+  if (c.local_join && !here) jc.append(note("On the gateway's own device:"), codeBlock(c.local_join));
+  if (c.lan_reachable !== false) for (const l of c.lan || []) if (!c.join.includes("//" + l.ip + ":")) jc.append(note("From another device on your network (" + l.ip + "):"), codeBlock(l.join));
+  jc.append(h("p", { class: "note" }, "Add ", h("code", {}, "--key sk-expert-…"), " to credit the node's work to your key: contributors skip the queue and the rate limit."));
+  $("#baseUrl").textContent = location.origin + "/v1";
+  $("#apiSnip").replaceChildren(snippetTabs("sk-expert-YOUR_KEY"), h("p", { class: "note" }, "Make a key on the ", h("a", { href: "#keys", onclick: e => { e.preventDefault(); go("keys"); } }, "API keys"), " page."));
+  $("#mcpCmd").replaceChildren(codeBlock("claude mcp add expertstream -e EXPERTCLOUD_GATEWAY=" + location.origin + " -- python3 mcp/expertstream_mcp.py --stdio"));
+  const o = L.options || {}, gi = $("#gwInfo"); gi.replaceChildren();
+  for (const [k, v] of [["Listening on", (c.bind_host || "?") + ":" + (c.port || location.port)], ["Rate limit", o.rate_per_min ? o.rate_per_min + " requests/min per key" : "none"],
+    ["Similar cache", o.similar_cache ? "overlap ≥ " + o.similar_cache : "off (exact repeats only)"], ["Queue timeout", o.queue_timeout != null ? o.queue_timeout + " s" : "—"], ["Open sign-up", L.open_signup ? "on (POST /keys)" : "off"]])
+    gi.append(h("dt", {}, k), h("dd", {}, v));
+}
+
+// ---------------------------------------------------------------- playground
+const CHAT = []; let ABORT = null, modelSig = "";
+function renderModelSelect(L) {
+  const ms = L.models || [], ids = ["auto", "expertstream-fast", "expertstream-coder", ...ms.map(m => m.id)], sig = ids.join("|");
+  if (sig === modelSig) return; modelSig = sig;
+  const sel = $("#pModel"), cur = sel.value || store.get("ec_model") || "auto";
+  sel.replaceChildren(h("optgroup", { label: "Smart routing" }, h("option", { value: "auto" }, "auto: biggest model online"), h("option", { value: "expertstream-fast" }, "expertstream-fast: smallest warm"), h("option", { value: "expertstream-coder" }, "expertstream-coder")),
+    ms.length ? h("optgroup", { label: "Models" }, ms.map(m => h("option", { value: m.id }, m.id))) : null);
+  sel.value = ids.includes(cur) ? cur : "auto";
+}
+$("#pModel").addEventListener("change", e => store.set("ec_model", e.target.value, true));
+for (const [id, out] of [["#pTemp", "#pTempV"], ["#pMax", "#pMaxV"]]) $(id).addEventListener("input", e => $(out).textContent = e.target.value);
+function renderChat() {
+  const box = $("#msgs");
+  if (!CHAT.length) {
+    const s = h("div", { class: "sugg" }, ["Explain mixture-of-experts in two sentences", "Write a Python function that reverses a list", "Give me three names for a phone cluster"].map(p => h("button", { type: "button", onclick: () => { $("#prompt").value = p; send(); } }, p)));
+    box.replaceChildren(h("div", { style: "margin:auto;text-align:center;max-width:480px" }, emptyState("spark", "Talk to your cloud", "Answers stream from the best node online, and each one shows which node answered and how fast."), s));
+    return;
   }
+  box.replaceChildren(...CHAT.map(m => {
+    const txt = h("div", { class: "txt" + (m.error ? " err" : "") }, m.content);
+    if (m.pending) txt.append(h("span", { class: "caret" }));
+    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? "node " + x.node : null, x.model, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
+      x.ttft_s != null ? "first token " + x.ttft_s.toFixed(2) + " s" : null, x.tps ? x.tps.toFixed(1) + " tok/s" : null, x.tokens ? x.tokens + " tokens" : null, x.tokens_saved ? x.tokens_saved + " tokens saved" : null]
+      .filter(Boolean).map(t => h("span", { class: "chip" }, t))) : null;
+    return h("div", { class: "msg " + m.role }, h("div", { class: "av" }, m.role === "user" ? "You" : icon("spark")), h("div", { class: "body" }, h("div", { class: "who" }, m.role === "user" ? "You" : "ExpertCloud"), txt, stats));
+  }));
+  box.scrollTop = box.scrollHeight;
 }
-let keysTick = 0;
-async function tick() {
-  if (!TOKEN) return;
+function setSending(on) { const b = $("#sendBtn"); b.replaceChildren(icon(on ? "stop" : "send")); b.setAttribute("aria-label", on ? "Stop" : "Send"); }
+async function send() {
+  if (ABORT) { ABORT.abort(); return; }
+  const text = $("#prompt").value.trim(); if (!text) return;
+  $("#prompt").value = ""; autoGrow();
+  CHAT.push({ role: "user", content: text });
+  const reply = { role: "assistant", content: "", pending: true }; CHAT.push(reply); renderChat();
+  const sys = $("#pSys").value.trim();
+  const messages = [...(sys ? [{ role: "system", content: sys }] : []), ...CHAT.filter(m => m !== reply && !m.error).map(m => ({ role: m.role, content: m.content }))];
+  const body = { model: $("#pModel").value || "auto", messages, stream: true, temperature: +$("#pTemp").value, max_tokens: +$("#pMax").value, compress: $("#pCompress").value };
+  if ($("#pCache").value) body.cache = $("#pCache").value;
+  ABORT = new AbortController(); setSending(true);
+  const t0 = performance.now(); let first = null;
   try {
-    const j = await api('/admin/live');
-    $('status').textContent = 'Connected · updated ' + new Date().toLocaleTimeString(); $('status').className = 'small ok';
-    const tps = j.speed.avg_tps || 0; $('tps').textContent = tps.toFixed(1);
-    $('gauge').setAttribute('stroke-dasharray', (Math.min(tps / 100, 1) * 252).toFixed(1) + ' 252');
-    $('speedline').textContent = `${fmt(j.speed.tokens_last_minute)} tokens in ${j.speed.answers_last_minute} answers in the last minute`;
-    $('saved').textContent = fmt(j.totals.tokens_saved); $('hits').textContent = fmt(j.totals.cache_hits); $('reqs').textContent = fmt(j.totals.requests);
-    $('nnodes').textContent = j.nodes.length;
-    $('models').textContent = j.models.length ? j.models.map(m => `${m.id} (${m.warm_nodes}/${m.nodes} warm)`).join(' · ') : 'no models online';
-    $('join').textContent = j.join; $('baseurl').textContent = location.origin + '/v1';
-    renderNodes(j.nodes);
-    if (keysTick++ % 5 === 0) refreshKeys();
-  } catch (e) { $('status').textContent = 'Not connected: ' + e.message; $('status').className = 'small err'; }
+    const r = await fetch("/v1/chat/completions", { method: "POST", signal: ABORT.signal, headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.json()).error.message; } catch {} if (r.status === 401) { store.del("ec_token"); showLogin(m); } throw new Error(m); }
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const ev = buf.slice(0, i); buf = buf.slice(i + 2);
+        for (const line of ev.split("\n")) {
+          if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+          const j = JSON.parse(line.slice(6));
+          if (j.error) throw new Error(j.error.message || "the node failed");
+          const d = j.choices && j.choices[0] && j.choices[0].delta;
+          if (d && d.content) { if (first == null) first = (performance.now() - t0) / 1000; reply.content += d.content; renderChat(); }
+          if (j.x_expertcloud) reply.stats = { ...j.x_expertcloud, model: j.model, tokens: j.usage && j.usage.completion_tokens, ttft_s: j.x_expertcloud.ttft_s ?? first };
+        }
+      }
+    }
+    if (!reply.content) reply.content = "(empty answer)";
+  } catch (e) {
+    if (e.name === "AbortError") reply.content += reply.content ? " [stopped]" : "[stopped]";
+    else { reply.error = true; reply.content = /no online node|no node/i.test(e.message) ? e.message + ". Add a node with a model first (Connect, then Nodes)." : e.message; }
+  } finally { reply.pending = false; ABORT = null; setSending(false); renderChat(); }
 }
-$('save').onclick = () => { TOKEN = $('token').value.trim(); try { localStorage.setItem('expertcloud_admin', TOKEN); } catch (e) {} keysTick = 0; tick(); };
-$('mkkey').onclick = async () => {
-  try { const j = await api('/admin/keys', { method: 'POST', body: JSON.stringify({ label: $('label').value }) });
-    $('key').textContent = j.key; $('keyout').style.display = 'block'; $('baseurl').textContent = location.origin + '/v1'; refreshKeys(); }
-  catch (e) { alert(e.message); }
-};
-function copy(id, btn) { navigator.clipboard.writeText($(id).textContent).then(() => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = t, 1200); }); }
-$('copykey').onclick = e => copy('key', e.target); $('copyjoin').onclick = e => copy('join', e.target);
-tick(); setInterval(tick, 2000);
+function autoGrow() { const t = $("#prompt"); t.style.height = "auto"; t.style.height = Math.min(200, t.scrollHeight + 2) + "px"; }
+$("#prompt").addEventListener("input", autoGrow);
+$("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+$("#composer").addEventListener("submit", e => { e.preventDefault(); send(); });
+$("#clearChat").addEventListener("click", () => { if (ABORT) ABORT.abort(); CHAT.length = 0; renderChat(); });
+
+// ---------------------------------------------------------------- start
+let started = false;
+function startApp() {
+  if (!started) { started = true; renderChat(); }
+  const want = location.hash.slice(1); go(VIEWS.some(v => v[0] === want) ? want : VIEW);
+  poll();
+}
+function tokenFromHash() {   // the sign-in link the gateway prints: use it, then take the token out of the address bar and history
+  const m = location.hash.match(/token=([^&]+)/); if (!m) return false;
+  let tok = m[1]; try { tok = decodeURIComponent(tok); } catch {}
+  try { history.replaceState(null, "", location.pathname + location.search); } catch {}
+  signIn(tok, true); return true;
+}
+window.addEventListener("hashchange", tokenFromHash);
+(function boot() {
+  if (tokenFromHash()) return;
+  const saved = store.get("ec_token");
+  if (saved) { TOKEN = saved; $("#app").hidden = false; startApp(); } else showLogin("");
+})();
 </script>
 </body>
 </html>

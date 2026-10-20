@@ -29,6 +29,7 @@ import time
 import uuid
 
 import secrets
+import socket
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -39,34 +40,68 @@ from cloud.controller import ALIASES, Controller, Node  # noqa: E402
 from gateway.compress import compress_messages, est_tokens  # noqa: E402
 from gateway.store import Store, default_db, key_hash  # noqa: E402
 
-OPTS = dict(open_signup=False, similar=0.0, rate_per_min=120, queue_timeout=120.0)
+OPTS = dict(open_signup=False, similar=0.0, rate_per_min=120, queue_timeout=120.0, host="127.0.0.1", port=8000)
+STARTED = time.time()
 app = FastAPI(title="ExpertStream OmniRoute Gateway", version="1.0")
 STORE = None
 CTRL = None
 ADMIN = None
 JOIN = None
 RATE = {}   # key hash -> recent request times
+ADMIN_USE = dict(requests=0, completion_tokens=0, tokens_saved=0, cache_hits=0)   # requests made with the admin token (dashboard Playground)
 
 
 def err(status, message, kind="invalid_request_error"):
     return JSONResponse(status_code=status, content={"error": {"message": message, "type": kind}})
 
 
+QUOTES = " \t\r\n\"'`<>\u2018\u2019\u201c\u201d\u00ab\u00bb"
+
+
+def clean_token(t):
+    """A token as people paste it: surrounding spaces, quotes (straight or curly), <>, a 'Bearer ' prefix, a trailing newline."""
+    t = t or ""
+    try: t = t.encode("latin-1").decode("utf-8")   # HTTP headers arrive as latin-1: recover pasted curly quotes
+    except (UnicodeEncodeError, UnicodeDecodeError): pass
+    t = t.strip(QUOTES)
+    while t[:7].lower() == "bearer ": t = t[7:].strip(QUOTES)
+    return t
+
+
+def same_secret(a, b):
+    """Constant-time comparison that also works for non-ASCII input (str compare_digest raises TypeError on it)."""
+    return bool(a) and bool(b) and secrets.compare_digest(a.encode("utf-8", "replace"), b.encode("utf-8", "replace"))
+
+
 def bearer(request):
-    h = request.headers.get("authorization") or ""
-    return h[7:].strip() if h.lower().startswith("bearer ") else (request.headers.get("x-api-key") or "").strip()
+    """The token of a request: Authorization (with or without 'Bearer '), x-api-key or x-admin-token."""
+    for name in ("authorization", "x-api-key", "x-admin-token"):
+        t = clean_token(request.headers.get(name))
+        if t: return t
+    return ""
 
 
 def is_admin(token):
-    return bool(token) and secrets.compare_digest(token, ADMIN)
+    return same_secret(clean_token(token), ADMIN)
+
+
+def token_hint(tok, want):
+    """Why a token was refused, in words that say what to do."""
+    where = "it is in ~/.expertcloud/admin_token, printed when the gateway starts"
+    if not tok: return "no token sent: use the header Authorization: Bearer <token> (%s)" % ("an sk-expert- key" if want == "key" else "the admin token; " + where)
+    if same_secret(tok, JOIN): return "that is the join token (for worker nodes), not the admin token; the admin token starts with adm- (%s)" % where
+    if want == "admin" and tok.startswith("sk-expert-"): return "that is a user API key; the admin pages need the admin token (adm-...; %s)" % where
+    if tok.startswith("adm-"): return "wrong admin token: it changes when the gateway is started with --rotate-tokens or a different --db (%s)" % where
+    if want == "admin": return "not the admin token (%s)" % where
+    return "unknown or revoked API key (Authorization: Bearer sk-expert-...)"
 
 
 def auth(request):
     """(key hash or 'admin', None) or (None, error response)"""
     tok = bearer(request)
     if is_admin(tok): return "admin", None
-    h = STORE.check_key(tok)
-    if not h: return None, err(401, "missing or unknown API key (Authorization: Bearer sk-expert-...)", "authentication_error")
+    h = STORE.check_key(tok) if tok else None
+    if not h: return None, err(401, token_hint(tok, "key"), "authentication_error")
     if OPTS["rate_per_min"] > 0 and STORE.contribution(h) == 0:
         now = time.time()
         q = [t for t in RATE.get(h, []) if now - t < 60]
@@ -76,7 +111,8 @@ def auth(request):
 
 
 def admin_only(request):
-    return None if is_admin(bearer(request) or request.headers.get("x-admin-token", "")) else err(401, "admin token required", "authentication_error")
+    tok = bearer(request)
+    return None if is_admin(tok) else err(401, token_hint(tok, "admin"), "authentication_error")
 
 
 # ---------------------------------------------------------------------------------------------------------------- OpenAI API
@@ -86,6 +122,17 @@ async def v1_models(request: Request):
     if e: return e
     data = [dict(id=a, object="model", owned_by="expertcloud", alias_for=CTRL.resolve(a)) for a in sorted(ALIASES)] + CTRL.models()
     return {"object": "list", "data": data}
+
+
+def admin_use(completion_tokens=0, saved=0, cache_hits=0):
+    ADMIN_USE["requests"] += 1; ADMIN_USE["completion_tokens"] += completion_tokens
+    ADMIN_USE["tokens_saved"] += saved; ADMIN_USE["cache_hits"] += cache_hits
+
+
+def totals():
+    t = STORE.totals()
+    for k, v in ADMIN_USE.items(): t[k] += v
+    return t
 
 
 def cache_key(model, messages, params):
@@ -143,6 +190,7 @@ async def chat(request: Request):
         if cached is not None:
             ms = (time.perf_counter() - t0) * 1000
             if acct: STORE.account(acct, saved=saved + cached.get("usage", {}).get("completion_tokens", 0), cache_hit=True)
+            else: admin_use(saved=saved + cached.get("usage", {}).get("completion_tokens", 0), cache_hits=1)
             extra = dict(cache="hit", cache_ms=round(ms, 2), tokens_saved=saved, node=None)
             usage = dict(prompt_tokens=after, completion_tokens=0, total_tokens=after)
             if stream:
@@ -163,6 +211,7 @@ async def chat(request: Request):
         pt, ct = int(usage.get("prompt_tokens") or after), int(usage.get("completion_tokens") or est_tokens(text))
         usage = dict(prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct)
         if acct: STORE.account(acct, pt, ct, saved)
+        else: admin_use(completion_tokens=ct, saved=saved)
         if use_cache and text: STORE.cache_put(ck, info.get("model") or target, prompt_text(messages), dict(text=text, usage=usage))
         extra = dict(cache="miss" if use_cache else "off", tokens_saved=saved, node=info.get("node"), ttft_s=info.get("ttft"), tps=info.get("tps"))
         return usage, extra
@@ -215,8 +264,10 @@ async def open_signup(request: Request):
 @app.websocket("/cloud/ws")
 async def cloud_ws(ws: WebSocket):
     await ws.accept()
-    if not secrets.compare_digest(ws.query_params.get("token", ""), JOIN):
-        await ws.send_text(json.dumps({"type": "rejected", "message": "wrong join token"})); await ws.close(code=4401); return
+    tok = clean_token(ws.query_params.get("token"))
+    if not (same_secret(tok, JOIN) or is_admin(tok)):
+        await ws.send_text(json.dumps({"type": "rejected", "message": "wrong join token (it starts with join-: GET /admin/join or the dashboard's Connect page)"}))
+        await ws.close(code=4401); return
     try:
         hello = json.loads(await asyncio.wait_for(ws.receive_text(), 30))
     except Exception:
@@ -242,10 +293,29 @@ async def cloud_ws(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------------------------------------------- admin
-def join_command(request):
-    host = request.headers.get("host") or "localhost:8000"
+def lan_ips():
+    """This machine's addresses other devices on the network can reach (no packet is sent: UDP connect only picks a route)."""
+    ips = []
+    for probe in ("10.255.255.255", "192.168.255.255", "8.8.8.8"):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect((probe, 1)); ip = s.getsockname()[0]; s.close()
+            if not ip.startswith("127.") and ip not in ips: ips.append(ip)
+        except OSError:
+            pass
+    return ips
+
+
+def join_command(request, host=None):
+    host = host or request.headers.get("host") or "localhost:%d" % OPTS["port"]
     scheme = "wss" if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https" else "ws"
     return "python3 cloud/worker_agent.py --master %s://%s --token %s" % (scheme, host, JOIN)
+
+
+def connect_info(request):
+    """Join commands and API base URLs for this device and for other devices on the network."""
+    lan = [dict(ip=ip, join=join_command(request, "%s:%d" % (ip, OPTS["port"])), api="http://%s:%d/v1" % (ip, OPTS["port"])) for ip in lan_ips()]
+    return dict(join=join_command(request), local_join="python3 cloud/worker_agent.py --master ws://127.0.0.1:%d --token %s" % (OPTS["port"], JOIN),
+                lan=lan, lan_reachable=OPTS["host"] not in ("127.0.0.1", "localhost", "::1"), bind_host=OPTS["host"], port=OPTS["port"])
 
 
 @app.post("/admin/keys")
@@ -282,21 +352,32 @@ async def admin_deploy(request: Request):
 
 @app.get("/admin/join")
 async def admin_join(request: Request):
-    return admin_only(request) or {"command": join_command(request), "token": JOIN}
+    return admin_only(request) or dict(connect_info(request), command=join_command(request), token=JOIN)
 
 
 @app.get("/admin/live")
 async def admin_live(request: Request):
     e = admin_only(request)
     if e: return e
-    return {"nodes": [n.view() for n in CTRL.online()], "models": CTRL.models(), "speed": CTRL.live_tps(), "totals": STORE.totals(),
-            "cache": STORE.cache_stats(), "join": join_command(request), "open_signup": OPTS["open_signup"]}
+    return {"nodes": [n.view() for n in CTRL.online()], "models": CTRL.models(), "speed": CTRL.live_tps(), "totals": totals(),
+            "cache": STORE.cache_stats(), "join": join_command(request), "open_signup": OPTS["open_signup"], "connect": connect_info(request),
+            "options": dict(rate_per_min=OPTS["rate_per_min"], similar_cache=OPTS["similar"], queue_timeout=OPTS["queue_timeout"]),
+            "uptime_s": round(time.time() - STARTED)}
+
+
+@app.get("/auth/check")
+async def auth_check(request: Request):
+    """For the dashboard's sign-in: which kind of token this is, or a hint why it is refused."""
+    tok = bearer(request)
+    if is_admin(tok): return {"ok": True, "role": "admin"}
+    if tok and STORE.check_key(tok): return {"ok": True, "role": "key", "hint": token_hint(tok, "admin")}
+    return err(401, token_hint(tok, "admin"), "authentication_error")
 
 
 @app.get("/")
 @app.get("/dashboard")
 async def dashboard():
-    return FileResponse(os.path.join(ROOT, "dashboard", "index.html"))
+    return FileResponse(os.path.join(ROOT, "dashboard", "index.html"), headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 @app.get("/health")
@@ -304,10 +385,13 @@ async def health():
     return {"ok": True, "nodes": len(CTRL.online()), "models": [m["id"] for m in CTRL.models()]}
 
 
-def init(db_path):
+def init(db_path, rotate=False):
     global STORE, CTRL, ADMIN, JOIN
     STORE = Store(db_path)
     CTRL = Controller(STORE)
+    if rotate:
+        STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))
+        STORE.set_setting("join_token", "join-" + secrets.token_urlsafe(18))
     ADMIN = STORE.setting("admin_token", lambda: "adm-" + secrets.token_urlsafe(24))
     JOIN = STORE.setting("join_token", lambda: "join-" + secrets.token_urlsafe(18))
     d = os.path.expanduser("~/.expertcloud"); os.makedirs(d, exist_ok=True)
@@ -325,12 +409,20 @@ def main():
     ap.add_argument("--similar-cache", type=float, default=0.0, help="reuse answers of prompts with at least this word overlap (0 = exact only)")
     ap.add_argument("--rate", type=int, default=120, help="requests per minute per key (0 = no limit; contributors are never limited)")
     ap.add_argument("--queue-timeout", type=float, default=120.0, help="seconds a request may wait for a free node")
+    ap.add_argument("--rotate-tokens", action="store_true", help="make a new admin token and join token (old ones stop working; nodes must rejoin)")
     a = ap.parse_args()
-    OPTS.update(open_signup=a.open_signup, similar=a.similar_cache, rate_per_min=a.rate, queue_timeout=a.queue_timeout)
-    init(a.db)
-    print("OmniRoute gateway on http://%s:%d  (dashboard: /dashboard)" % (a.host, a.port))
-    print("  admin token: %s" % ADMIN)
-    print("  join a node: python3 cloud/worker_agent.py --master ws://%s:%d --token %s" % (a.host if a.host != "0.0.0.0" else "THIS_HOST", a.port, JOIN), flush=True)
+    OPTS.update(open_signup=a.open_signup, similar=a.similar_cache, rate_per_min=a.rate, queue_timeout=a.queue_timeout, host=a.host, port=a.port)
+    init(a.db, a.rotate_tokens)
+    local = "http://127.0.0.1:%d" % a.port
+    print("OmniRoute gateway on http://%s:%d%s" % (a.host, a.port, "  (new tokens made)" if a.rotate_tokens else ""))
+    print("  dashboard (signs in by itself): %s/dashboard#token=%s" % (local, ADMIN))
+    print("  admin token: %s   (also in ~/.expertcloud/admin_token)" % ADMIN)
+    print("  join a node here: python3 cloud/worker_agent.py --master ws://127.0.0.1:%d --token %s" % (a.port, JOIN))
+    if OPTS["host"] not in ("127.0.0.1", "localhost", "::1"):
+        for ip in lan_ips(): print("  from other devices: http://%s:%d/dashboard   join: --master ws://%s:%d" % (ip, a.port, ip, a.port))
+    else:
+        print("  only this device can connect; start with --host 0.0.0.0 to let other devices join")
+    sys.stdout.flush()
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 

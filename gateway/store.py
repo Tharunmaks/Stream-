@@ -57,6 +57,10 @@ class Store:
             self.db.execute("INSERT INTO settings(name, value) VALUES(?, ?)", (name, value))
             return value
 
+    def set_setting(self, name, value):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?)", (name, value))
+
     # ---- virtual API keys ----
     def new_key(self, label=""):
         key = "sk-expert-" + secrets.token_urlsafe(32)

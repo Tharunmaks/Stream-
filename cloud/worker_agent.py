@@ -22,9 +22,13 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import uuid
 
-import psutil
+try:
+    import psutil
+except ImportError:   # Termux: pkg install python-psutil; without it, /proc is read directly
+    psutil = None
 import websockets
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -79,10 +83,38 @@ def disk_read_mbps(path):
         if tmp and os.path.exists(tmp): os.remove(tmp)
 
 
+def meminfo():
+    """(total, available) bytes."""
+    if psutil:
+        vm = psutil.virtual_memory(); return vm.total, vm.available
+    m = {}
+    try:
+        for line in open("/proc/meminfo"):
+            k, v = line.split(":", 1); m[k] = int(v.split()[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    total = m.get("MemTotal") or os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return total, m.get("MemAvailable", m.get("MemFree", 0))
+
+
+CPU_LAST = [None]
+
+
+def cpu_pct():
+    if psutil: return psutil.cpu_percent(interval=None)
+    try:
+        f = [int(x) for x in open("/proc/stat").readline().split()[1:]]
+    except (OSError, ValueError):
+        return os.getloadavg()[0] / (os.cpu_count() or 1) * 100 if hasattr(os, "getloadavg") else 0.0
+    idle, total, last = f[3] + (f[4] if len(f) > 4 else 0), sum(f), CPU_LAST[0]
+    CPU_LAST[0] = (idle, total)
+    return 0.0 if not last or total == last[1] else round(100 * (1 - (idle - last[0]) / (total - last[1])), 1)
+
+
 def caps(models_dir):
-    vm = psutil.virtual_memory()
-    return dict(os=platform.system(), arch=platform.machine(), cpu_cores=psutil.cpu_count(logical=False) or os.cpu_count(),
-                cpu_threads=os.cpu_count(), ram_mb=vm.total // 2**20, disk_read_mbps=disk_read_mbps(models_dir),
+    total, _ = meminfo()
+    return dict(os=platform.system(), arch=platform.machine(), cpu_cores=(psutil.cpu_count(logical=False) if psutil else None) or os.cpu_count(),
+                cpu_threads=os.cpu_count(), ram_mb=total // 2**20, disk_read_mbps=disk_read_mbps(models_dir),
                 disk_free_mb=shutil.disk_usage(models_dir).free // 2**20, engine="cpu", **gpu_info())
 
 
@@ -101,8 +133,8 @@ class Worker:
             await self.ws.send(json.dumps(obj))
 
     def load(self, ping_ms=None):
-        vm = psutil.virtual_memory()
-        return dict(cpu_pct=psutil.cpu_percent(interval=None), ram_free_mb=vm.available // 2**20, ram_mb=vm.total // 2**20,
+        total, avail = meminfo()
+        return dict(cpu_pct=cpu_pct(), ram_free_mb=avail // 2**20, ram_mb=total // 2**20,
                     active=self.engine.active(), ping_ms=ping_ms, tps=self.last_tps)
 
     async def heartbeat(self):
@@ -137,7 +169,11 @@ class Worker:
         await self.send(dict(type="deploy_result", req=msg.get("req"), models=self.engine.models(), **res))
 
     async def session(self):
-        url = self.args.master.rstrip("/") + "/cloud/ws?token=" + self.args.token
+        master = self.args.master.strip().rstrip("/")
+        if master.startswith("http"): master = "ws" + master[4:]        # http://host:8000 -> ws://host:8000
+        if "://" not in master: master = "ws://" + master
+        token = self.args.token.strip(" \t\r\n\"'`<>\u2018\u2019\u201c\u201d")
+        url = master + "/cloud/ws?token=" + urllib.parse.quote(token, safe="")
         async with websockets.connect(url, max_size=2**24, ping_interval=None) as ws:
             self.ws = ws
             hello = dict(type="hello", node_id=node_id() + (("-" + self.args.name) if self.args.suffix_name else ""), name=self.args.name,
