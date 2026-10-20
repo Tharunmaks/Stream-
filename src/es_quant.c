@@ -1219,6 +1219,36 @@ AVX2 static void avx_q8_0(const uint8_t *w, int cols, int r0, int r1, const es_b
         out[r] = hsum_ps(acc);
     }
 }
+/* AVX-VNNI: one vpdpbusd replaces maddubs + madd. |x| <= 127 and |y| <= 127 so maddubs never saturated: the
+ * integer dot products, and so the outputs, are bit-identical to the AVX2 kernel. */
+#define VNNI __attribute__((target("avx2,fma,f16c,avxvnni")))
+VNNI static inline __m256i dot32_vnni(__m256i x, __m256i y) {
+    return _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), _mm256_sign_epi8(x, x), _mm256_sign_epi8(y, x));
+}
+VNNI static void vnni_q8_0(const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    const int nb = cols / 32; const size_t rb = (size_t)nb * 34; int r = r0;
+    for (; r + 4 <= r1; r += 4) {
+        const blk_q8_0 *x0 = (const blk_q8_0 *)(w + rb * r), *x1 = (const blk_q8_0 *)(w + rb * (r + 1)),
+                       *x2 = (const blk_q8_0 *)(w + rb * (r + 2)), *x3 = (const blk_q8_0 *)(w + rb * (r + 3));
+        __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+        for (int b = 0; b < nb; b++) {
+            const __m256i yv = _mm256_loadu_si256((const __m256i *)y[b].qs); const float yd = y[b].d;
+            a0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot32_vnni(_mm256_loadu_si256((const __m256i *)x0[b].qs), yv)), _mm256_set1_ps(fp16_hw(x0[b].d) * yd), a0);
+            a1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot32_vnni(_mm256_loadu_si256((const __m256i *)x1[b].qs), yv)), _mm256_set1_ps(fp16_hw(x1[b].d) * yd), a1);
+            a2 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot32_vnni(_mm256_loadu_si256((const __m256i *)x2[b].qs), yv)), _mm256_set1_ps(fp16_hw(x2[b].d) * yd), a2);
+            a3 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dot32_vnni(_mm256_loadu_si256((const __m256i *)x3[b].qs), yv)), _mm256_set1_ps(fp16_hw(x3[b].d) * yd), a3);
+        }
+        out[r] = hsum_ps(a0); out[r + 1] = hsum_ps(a1); out[r + 2] = hsum_ps(a2); out[r + 3] = hsum_ps(a3);
+    }
+    for (; r < r1; r++) {
+        const blk_q8_0 *x = (const blk_q8_0 *)(w + rb * r); __m256 acc = _mm256_setzero_ps();
+        for (int b = 0; b < nb; b++) {
+            const __m256i p = dot32_vnni(_mm256_loadu_si256((const __m256i *)x[b].qs), _mm256_loadu_si256((const __m256i *)y[b].qs));
+            acc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(p), _mm256_set1_ps(fp16_hw(x[b].d) * y[b].d), acc);
+        }
+        out[r] = hsum_ps(acc);
+    }
+}
 /* Q4_0: nibbles are used unsigned (maddubs) and the "-8" offset is removed
  * with 8 * sum(y), computed once per block and shared by the four rows. */
 AVX2 static inline __m256i q4_nib(const blk_q4_0 *x, __m128i m) {
@@ -1612,7 +1642,7 @@ AVX2 static void avx_q6_K_multi(const uint8_t *w, int cols, int r0, int r1, cons
         }
     }
 }
-static int HAVE_AVX2 = -1;
+static int HAVE_AVX2 = -1, HAVE_VNNI = -1;
 #endif
 
 #if defined(__aarch64__)
@@ -1839,7 +1869,11 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
 #if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
     if (HAVE_AVX2) {
         if (a->q80) {
-            if (t == GGML_Q8_0) { avx_q8_0(w, cols, r0, r1, a->q80, y); return; }
+            if (t == GGML_Q8_0) {
+                if (HAVE_VNNI < 0) HAVE_VNNI = __builtin_cpu_supports("avxvnni") && !getenv("ES_NO_VNNI");
+                if (HAVE_VNNI) vnni_q8_0(w, cols, r0, r1, a->q80, y); else avx_q8_0(w, cols, r0, r1, a->q80, y);
+                return;
+            }
             if (t == GGML_Q4_0) { avx_q4_0(w, cols, r0, r1, a->q80, y); return; }
             if (t == GGML_Q5_0) { avx_q5_0(w, cols, r0, r1, a->q80, y); return; }
         }
