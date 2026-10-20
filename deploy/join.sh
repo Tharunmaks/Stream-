@@ -26,6 +26,6 @@ if ! ls "$MODELS"/*.gguf >/dev/null 2>&1; then echo "downloading $FILE"; ./es_ge
 NAME=${EC_NAME:-$(hostname | cut -c1-20)}
 echo "joining $MASTER as $NAME (keep this running; stop with the stop button / Ctrl+C)"
 while true; do
-  python3 cloud/worker_agent.py --master "$MASTER" --token "$TOKEN" --models "$MODELS" --name "$NAME" || true
+  python3 cloud/worker_agent.py --master "$MASTER" --token "$TOKEN" --models "$MODELS" --name "$NAME" ${EC_KEY:+--key "$EC_KEY"} || true
   echo "node stopped, restarting in 5 s"; sleep 5
 done

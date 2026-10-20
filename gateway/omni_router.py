@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -100,9 +101,11 @@ def auth(request):
     """(key hash or 'admin', None) or (None, error response)"""
     tok = bearer(request)
     if is_admin(tok): return "admin", None
-    h = STORE.check_key(tok) if tok else None
-    if not h: return None, err(401, token_hint(tok, "key"), "authentication_error")
-    if OPTS["rate_per_min"] > 0 and STORE.contribution(h) == 0:
+    su = STORE.session_user(tok) if tok.startswith("ses-") else None
+    h = su[2] if su else (STORE.check_key(tok) if tok else None)
+    if not h: return None, err(401, "signed out: sign in again" if tok.startswith("ses-") else token_hint(tok, "key"), "authentication_error")
+    contributed = STORE.user_usage(su[0])["contributed_tokens"] if su else STORE.contribution(h)
+    if OPTS["rate_per_min"] > 0 and contributed == 0:
         now = time.time()
         q = [t for t in RATE.get(h, []) if now - t < 60]
         if len(q) >= OPTS["rate_per_min"]: return None, err(429, "rate limit: %d requests per minute (contributing a node lifts it)" % OPTS["rate_per_min"], "rate_limit_error")
@@ -203,7 +206,7 @@ async def chat(request: Request):
             return {"id": cid, "object": "chat.completion", "created": created, "model": target, "usage": usage, "x_expertcloud": extra,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": cached["text"]}, "finish_reason": "stop"}]}
 
-    prio = 0 if (acct and STORE.contribution(acct) > 0) else 1
+    prio = 0 if (acct and STORE.contribution(acct) > 0) else 1   # contributors skip the queue
     gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"])
 
     async def finish(text, info):
@@ -292,6 +295,171 @@ async def cloud_ws(ws: WebSocket):
         print("node left: %s" % node.name, flush=True)
 
 
+
+# ---------------------------------------------------------------------------------------------------------------- public cloud
+USERNAME = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
+ATTEMPTS = {}   # (ip, kind) -> recent times, against password guessing and sign-up floods
+
+
+def setting_on(name, default):
+    v = STORE.setting(name)
+    return default if v is None else v == "1"
+
+
+def too_many(request, kind, limit, window):
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    q = [t for t in ATTEMPTS.get((ip, kind), []) if now - t < window]
+    ATTEMPTS[(ip, kind)] = q
+    return len(q) >= limit, q
+
+
+def user_of(request):
+    """(user id, username, console key hash), or None."""
+    tok = bearer(request)
+    return STORE.session_user(tok) if tok.startswith("ses-") else None
+
+
+async def body_of(request):
+    try:
+        b = await request.json()
+        return b if isinstance(b, dict) else {}
+    except ValueError:
+        return {}
+
+
+@app.post("/auth/signup")
+async def signup(request: Request):
+    if not setting_on("signup", True): return err(403, "sign-up is closed on this cloud", "permission_error")
+    full, q = too_many(request, "signup", 5, 3600)
+    if full: return err(429, "too many new accounts from this address; try again in an hour", "rate_limit_error")
+    b = await body_of(request)
+    name, pw = str(b.get("username") or "").strip(), str(b.get("password") or "")
+    if not USERNAME.match(name): return err(400, "username: 3 to 32 letters, digits, dots, dashes or underscores")
+    if len(pw) < 8: return err(400, "password: at least 8 characters")
+    uid = STORE.create_user(name, pw)
+    if uid is None: return err(409, "that username is taken")
+    q.append(time.time())
+    return {"token": STORE.new_session(uid), "username": name}
+
+
+@app.post("/auth/login")
+async def login(request: Request):
+    full, q = too_many(request, "login", 10, 600)
+    if full: return err(429, "too many wrong passwords; wait 10 minutes", "rate_limit_error")
+    b = await body_of(request)
+    name = str(b.get("username") or "").strip()
+    uid = STORE.check_password(name, str(b.get("password") or "")) if name else None
+    if not uid:
+        q.append(time.time()); return err(401, "wrong username or password", "authentication_error")
+    row = STORE.db.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+    return {"token": STORE.new_session(uid), "username": row[0]}
+
+
+@app.post("/auth/logout")
+async def logout(request: Request):
+    tok = bearer(request)
+    if tok.startswith("ses-"): STORE.end_session(tok)
+    return {"ok": True}
+
+
+def public_stats():
+    nodes = CTRL.online()
+    return dict(nodes=len(nodes), cpu_cores=sum(int((n.caps or {}).get("cpu_cores") or 0) for n in nodes),
+                ram_gb=round(sum(float((n.caps or {}).get("ram_mb") or 0) for n in nodes) / 1024, 1),
+                busy=sum(n.active for n in nodes), capacity=sum(n.capacity for n in nodes),
+                models=[dict(id=m["id"], size_mb=m.get("size_mb"), nodes=m["nodes"], warm=m["warm_nodes"] > 0) for m in CTRL.models()],
+                speed=CTRL.live_tps(), served=totals(), users=STORE.user_count(),
+                signup=setting_on("signup", True), public_compute=setting_on("public_compute", False), rate_per_min=OPTS["rate_per_min"])
+
+
+@app.get("/public/stats")
+async def stats():
+    """Live numbers anyone may see: no names, addresses or tokens."""
+    return public_stats()
+
+
+@app.get("/account")
+async def account(request: Request):
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    use = STORE.user_usage(u[0])
+    row = STORE.db.execute("SELECT created FROM users WHERE id=?", (u[0],)).fetchone()
+    return dict(username=u[1], created=row[0], usage=use, plan=dict(name="Free", rate_per_min=OPTS["rate_per_min"],
+                contributor=use["contributed_tokens"] > 0))
+
+
+@app.get("/account/keys")
+async def account_keys(request: Request):
+    u = user_of(request)
+    return {"keys": STORE.user_keys(u[0])} if u else err(401, "sign in first", "authentication_error")
+
+
+@app.post("/account/keys")
+async def account_new_key(request: Request):
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    if len([k for k in STORE.user_keys(u[0]) if not k["revoked"]]) >= 20: return err(400, "20 keys at most; revoke one first")
+    b = await body_of(request)
+    return {"key": STORE.new_key(str(b.get("label") or "my key")[:64], u[0])}
+
+
+@app.delete("/account/keys/{prefix}")
+async def account_revoke(prefix: str, request: Request):
+    u = user_of(request)
+    return {"revoked": STORE.user_revoke(u[0], prefix)} if u else err(401, "sign in first", "authentication_error")
+
+
+def my_nodes(uid):
+    mine = set(STORE.user_key_hashes(uid))
+    out = []
+    for n in CTRL.online():
+        if n.owner_hash in mine:
+            c = n.caps or {}
+            out.append(dict(name=n.name, cpu_cores=c.get("cpu_cores"), ram_mb=c.get("ram_mb"), models=[m for m in n.models], active=n.active,
+                            served=n.served, tps=n.tps, online_s=round(time.time() - n.connected)))
+    return out
+
+
+@app.get("/account/compute")
+async def account_compute(request: Request):
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    return dict(enabled=setting_on("public_compute", False), nodes=my_nodes(u[0]), contributed=STORE.user_usage(u[0])["contributed_tokens"])
+
+
+@app.post("/account/compute")
+async def account_join(request: Request):
+    """A join command for the user's own computer; its work is credited to a key of theirs."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    if not setting_on("public_compute", False): return err(403, "this cloud does not take shared computers yet", "permission_error")
+    key = STORE.new_key("my computers", u[0])
+    host = request.headers.get("host") or "localhost:%d" % OPTS["port"]
+    public = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    base = ("https://" if public else "http://") + host
+    raw = "https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/deploy/join.sh"
+    return dict(command="curl -sL %s | EC_KEY=%s bash -s -- %s %s" % (raw, key, base, JOIN),
+                python="python3 cloud/worker_agent.py --master %s --token %s --key %s" % (("wss://" if public else "ws://") + host, JOIN, key))
+
+
+@app.get("/admin/users")
+async def admin_users(request: Request):
+    e = admin_only(request)
+    if e: return e
+    rows = STORE.db.execute("SELECT id, username, created, last_login, disabled FROM users ORDER BY created DESC LIMIT 500").fetchall()
+    return {"users": [dict(id=r[0], username=r[1], created=r[2], last_login=r[3], disabled=bool(r[4]), usage=STORE.user_usage(r[0])) for r in rows]}
+
+
+@app.post("/admin/settings")
+async def admin_settings(request: Request):
+    e = admin_only(request)
+    if e: return e
+    b = await body_of(request)
+    for name in ("signup", "public_compute"):
+        if name in b: STORE.set_setting(name, "1" if b[name] else "0")
+    return {"signup": setting_on("signup", True), "public_compute": setting_on("public_compute", False)}
+
 # ---------------------------------------------------------------------------------------------------------------- admin
 def lan_ips():
     """This machine's addresses other devices on the network can reach (no packet is sent: UDP connect only picks a route)."""
@@ -362,7 +530,8 @@ async def admin_live(request: Request):
     return {"nodes": [n.view() for n in CTRL.online()], "models": CTRL.models(), "speed": CTRL.live_tps(), "totals": totals(),
             "cache": STORE.cache_stats(), "join": join_command(request), "open_signup": OPTS["open_signup"], "connect": connect_info(request),
             "options": dict(rate_per_min=OPTS["rate_per_min"], similar_cache=OPTS["similar"], queue_timeout=OPTS["queue_timeout"]),
-            "uptime_s": round(time.time() - STARTED)}
+            "uptime_s": round(time.time() - STARTED), "users": STORE.user_count(),
+            "settings": dict(signup=setting_on("signup", True), public_compute=setting_on("public_compute", False))}
 
 
 @app.get("/auth/check")
@@ -370,14 +539,33 @@ async def auth_check(request: Request):
     """For the dashboard's sign-in: which kind of token this is, or a hint why it is refused."""
     tok = bearer(request)
     if is_admin(tok): return {"ok": True, "role": "admin"}
+    if tok.startswith("ses-") and STORE.session_user(tok): return {"ok": True, "role": "user", "hint": "that is a user sign-in; the admin pages need the admin token"}
     if tok and STORE.check_key(tok): return {"ok": True, "role": "key", "hint": token_hint(tok, "admin")}
     return err(401, token_hint(tok, "admin"), "authentication_error")
 
 
+PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
+
+
 @app.get("/")
+async def console():
+    """The public cloud: sign up, models, playground, API keys, sharing a computer."""
+    return FileResponse(os.path.join(ROOT, "dashboard", "console.html"), headers=PAGE_HEADERS)
+
+
 @app.get("/dashboard")
+@app.get("/admin")
 async def dashboard():
-    return FileResponse(os.path.join(ROOT, "dashboard", "index.html"), headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+    """The owner's control room (admin token)."""
+    return FileResponse(os.path.join(ROOT, "dashboard", "index.html"), headers=PAGE_HEADERS)
+
+
+@app.get("/ui.css")
+@app.get("/ui.js")
+async def ui_asset(request: Request):
+    name = request.url.path.lstrip("/")
+    return FileResponse(os.path.join(ROOT, "dashboard", name), media_type="text/css" if name.endswith(".css") else "text/javascript",
+                        headers={"Cache-Control": "no-cache"})
 
 
 DEPLOY_FILES = {"Dockerfile": "deploy/huggingface/Dockerfile", "README.md": "deploy/huggingface/README.md"}
@@ -427,7 +615,8 @@ def main():
     init(a.db, a.rotate_tokens)
     local = "http://127.0.0.1:%d" % a.port
     print("OmniRoute gateway on http://%s:%d%s" % (a.host, a.port, "  (new tokens made)" if a.rotate_tokens else ""))
-    print("  dashboard (signs in by itself): %s/dashboard#token=%s" % (local, ADMIN))
+    print("  public page (sign up, models, API keys): %s/" % local)
+    print("  owner dashboard (signs in by itself): %s/dashboard#token=%s" % (local, ADMIN))
     print("  admin token: %s   (also in ~/.expertcloud/admin_token)" % ADMIN)
     print("  join a node here: python3 cloud/worker_agent.py --master ws://127.0.0.1:%d --token %s" % (a.port, JOIN))
     if OPTS["host"] not in ("127.0.0.1", "localhost", "::1"):

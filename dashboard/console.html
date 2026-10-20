@@ -1,0 +1,559 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>ExpertCloud</title>
+<meta name="description" content="A free AI cloud built from shared computers: open models, an OpenAI-compatible API and a playground.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c6cff'/%3E%3Cpath d='M9 22l7-12 7 12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui.css">
+<style>
+/* ---------- public landing ---------- */
+#landing { min-height: 100%; background: radial-gradient(1000px 520px at 10% -10%, rgba(124,108,255,.22), transparent 60%), radial-gradient(800px 460px at 110% 20%, rgba(90,200,250,.12), transparent 60%), var(--bg); }
+.lnav { display: flex; align-items: center; gap: 10px; padding: 16px 24px; max-width: 1180px; margin: 0 auto; }
+.lnav .sp { flex: 1; }
+.hero { max-width: 1180px; margin: 0 auto; padding: 56px 24px 32px; display: grid; grid-template-columns: 1.15fr 1fr; gap: 40px; align-items: center; }
+.hero h1 { font-size: clamp(34px, 6vw, 58px); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 16px; }
+.hero h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero p.lead { font-size: 17px; color: var(--muted); margin: 0 0 26px; max-width: 560px; }
+.hero .cta { display: flex; gap: 10px; flex-wrap: wrap; }
+.hero .cta .btn { height: 46px; padding: 0 20px; font-size: 15px; }
+.live { padding: 20px; }
+.live .t { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; margin-bottom: 14px; }
+.live .nums { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.live .num { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.live .num b { display: block; font-size: 26px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.live .num span { color: var(--muted); font-size: 12px; }
+.live .mods { margin-top: 14px; }
+.section { max-width: 1180px; margin: 0 auto; padding: 28px 24px; }
+.section h2 { font-size: 26px; letter-spacing: -.02em; margin: 0 0 6px; }
+.section p.sub { color: var(--muted); margin: 0 0 22px; }
+.feats { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.feat { padding: 20px; }
+.feat .ic { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: 12px; }
+.feat h3 { margin: 0 0 6px; font-size: 16px; }
+.feat p { margin: 0; color: var(--muted); font-size: 13.5px; }
+.plan { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.plan .card { padding: 22px; }
+.plan h3 { margin: 0 0 4px; font-size: 18px; }
+.plan .price { font-size: 34px; font-weight: 750; letter-spacing: -.03em; margin: 6px 0 10px; }
+.plan .price small { font-size: 14px; color: var(--muted); font-weight: 550; }
+.plan ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.plan li { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+.plan li svg { color: var(--ok); margin-top: 2px; }
+.how { counter-reset: s; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.how .card { padding: 20px; position: relative; }
+.how .card::before { counter-increment: s; content: counter(s); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; margin-bottom: 10px; }
+.how h3 { margin: 0 0 6px; font-size: 15px; } .how p { margin: 0; color: var(--muted); font-size: 13.5px; }
+.foot { max-width: 1180px; margin: 0 auto; padding: 30px 24px 50px; color: var(--faint); font-size: 12.5px; display: flex; gap: 16px; flex-wrap: wrap; }
+.foot a { color: var(--muted); }
+/* ---------- auth ---------- */
+.seg { display: grid; grid-template-columns: 1fr 1fr; background: var(--bg2); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 18px; }
+.seg button { border: 0; background: none; height: 34px; border-radius: 8px; cursor: pointer; font-weight: 600; color: var(--muted); }
+.seg button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+/* ---------- console ---------- */
+.mcard { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.mcard .nm { font-weight: 650; overflow-wrap: anywhere; }
+.mcard .row { justify-content: space-between; }
+.models { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.welcome { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+.welcome h1 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+.welcome .sp { flex: 1; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; padding: 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); }
+.ep { display: grid; grid-template-columns: auto 1fr; gap: 8px 14px; font-size: 13px; }
+.ep code { white-space: nowrap; }
+@media (max-width: 860px) {
+  .hero { grid-template-columns: 1fr; padding-top: 28px; gap: 24px; }
+  .plan { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .lnav { padding: 12px 16px; } .hero, .section { padding-left: 16px; padding-right: 16px; }
+  .lnav .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ======================================================= public landing -->
+<div id="landing" hidden>
+  <nav class="lnav">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M5 17l7-11 7 11"/><path d="M8.5 12.5h7"/></svg></div>ExpertCloud</div>
+    <div class="sp"></div>
+    <a class="btn ghost hide-sm" href="#docs-public" style="text-decoration:none">Docs</a>
+    <button class="btn ghost" data-auth="login">Sign in</button>
+    <button class="btn primary" data-auth="signup">Start free</button>
+  </nav>
+  <header class="hero">
+    <div>
+      <span class="badge"><svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg>Free plan, no credit card</span>
+      <h1 style="margin-top:16px">The free <span>AI cloud</span>, powered by shared computers.</h1>
+      <p class="lead">Run open AI models from any app with an OpenAI-compatible API, try them in the playground, and add your own computer to make the cloud stronger.</p>
+      <div class="cta"><button class="btn primary" data-auth="signup">Create a free account</button><button class="btn" data-auth="login">Sign in</button></div>
+    </div>
+    <div class="card live">
+      <div class="t"><span class="pill ok" id="liveDot"><span class="dot"></span><span>Live</span></span>Right now on this cloud</div>
+      <div class="nums">
+        <div class="num"><b id="lNodes">–</b><span>computers online</span></div>
+        <div class="num"><b id="lCores">–</b><span>CPU cores</span></div>
+        <div class="num"><b id="lRam">–</b><span>memory</span></div>
+        <div class="num"><b id="lTps">–</b><span>tokens/s, last minute</span></div>
+      </div>
+      <div class="mods"><label class="f">Models you can use</label><div class="chips" id="lModels"></div></div>
+      <p class="note" id="lServed"></p>
+    </div>
+  </header>
+  <section class="section">
+    <h2>Everything a cloud gives you, for free</h2>
+    <p class="sub">The same building blocks as the big clouds, run on computers people share.</p>
+    <div class="feats">
+      <div class="card feat"><div class="ic" data-icon="models"></div><h3>AI models</h3><p>Open models served by the cloud. The router picks the fastest free computer for every request.</p></div>
+      <div class="card feat"><div class="ic" data-icon="bolt"></div><h3>OpenAI-compatible API</h3><p>Point any OpenAI SDK or app at your ExpertCloud address with a free key. Streaming included.</p></div>
+      <div class="card feat"><div class="ic" data-icon="playground"></div><h3>Playground</h3><p>Chat with every model in the browser and see which computer answered and how fast.</p></div>
+      <div class="card feat"><div class="ic" data-icon="compute"></div><h3>Shared compute</h3><p>Add a phone, laptop or server with one command. Sharing gets you priority and no rate limit.</p></div>
+    </div>
+  </section>
+  <section class="section">
+    <h2>Plans</h2>
+    <p class="sub">Use the cloud for free. Share a computer to get more.</p>
+    <div class="plan">
+      <div class="card"><h3>Free</h3><div class="price">$0<small> / forever</small></div>
+        <ul id="planFree"></ul></div>
+      <div class="card" style="border-color:var(--accent)"><h3>Contributor</h3><div class="price">$0<small> + a computer you share</small></div>
+        <ul><li data-check>Everything in Free</li><li data-check>No rate limit</li><li data-check>Your requests skip the queue</li><li data-check>See the work your computers did</li></ul></div>
+    </div>
+  </section>
+  <section class="section" id="docs-public">
+    <h2>Start in a minute</h2>
+    <p class="sub">Three steps from zero to your first answer.</p>
+    <div class="how">
+      <div class="card"><h3>Create an account</h3><p>A username and a password. Nothing else.</p></div>
+      <div class="card"><h3>Make an API key</h3><p>In the console under API keys. Use it from curl, Python, JavaScript or any OpenAI app.</p></div>
+      <div class="card"><h3>Call a model</h3><p>Model <code>auto</code> picks the best model online. Or try it first in the Playground.</p></div>
+    </div>
+  </section>
+  <footer class="foot"><span>ExpertCloud</span><span>Prompts are answered by the computers in this cloud.</span><a href="/dashboard">Owner dashboard</a></footer>
+</div>
+
+<!-- ======================================================= console -->
+<div id="app" hidden>
+  <aside class="side">
+    <div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><path d="M5 17l7-11 7 11"/><path d="M8.5 12.5h7"/></svg></div>ExpertCloud</div>
+    <div id="sideNav"></div>
+    <div class="grow"></div>
+    <div class="side-foot">
+      <div class="nav" style="cursor:default"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span id="whoSide"></span></div>
+      <button class="nav" id="themeBtn"><svg class="i" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><span>Theme</span></button>
+      <button class="nav" id="logoutBtn"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg><span>Sign out</span></button>
+    </div>
+  </aside>
+  <main>
+    <header class="top">
+      <h2 id="title">Home</h2>
+      <div class="sp"></div>
+      <span class="pill" id="status"><span class="dot"></span><span>Connecting</span></span>
+      <button class="btn ghost icon mobile-only" id="logoutTop" aria-label="Sign out"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg></button>
+    </header>
+    <div class="page">
+      <div class="banner bad" id="offline" hidden><svg class="i" viewBox="0 0 24 24"><path d="M12 9v4M12 17v.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span>The cloud is not answering right now. It retries by itself.</span></div>
+
+      <section data-view="home">
+        <div class="welcome"><h1 id="hello">Welcome</h1><span class="badge" id="planBadge">Free plan</span><div class="sp"></div><button class="btn primary" data-go="playground">Open the playground</button></div>
+        <div class="grid kpis">
+          <div class="card kpi"><div class="l">Requests</div><div class="v" id="uReq">0</div><div class="s">made by your keys and the playground</div></div>
+          <div class="card kpi"><div class="l">Tokens generated</div><div class="v" id="uOut">0</div><div class="s" id="uIn">—</div></div>
+          <div class="card kpi"><div class="l">Tokens saved</div><div class="v" id="uSaved">0</div><div class="s">by prompt compression and the cache</div></div>
+          <div class="card kpi"><div class="l">Tokens you contributed</div><div class="v" id="uContrib">0</div><div class="s">generated by your shared computers</div></div>
+        </div>
+        <div class="grid two">
+          <div class="card"><div class="hd"><h3>Cloud status</h3><span class="sub">live</span></div><div class="bd">
+            <div class="spec" id="cloudSpec"></div>
+            <div class="bar" id="cloudLoad"></div>
+            <p class="note" id="cloudNote"></p>
+          </div></div>
+          <div class="card"><div class="hd"><h3>Quick start</h3></div><div class="bd">
+            <ol class="steps">
+              <li><h4>Make an API key</h4><button class="btn sm" data-go="keys">Go to API keys</button></li>
+              <li><h4>Call the API</h4><div id="quickSnip"></div></li>
+            </ol>
+          </div></div>
+        </div>
+      </section>
+
+      <section data-view="models" hidden>
+        <p class="muted" style="margin:0 0 16px">Models running on the cloud right now. <b>auto</b> picks the biggest one online, <b>expertstream-fast</b> the quickest.</p>
+        <div class="grid models" id="modelGrid"></div>
+      </section>
+
+      <section data-view="playground" hidden>
+        <div class="pg">
+          <div class="card chat">
+            <div class="msgs" id="msgs"></div>
+            <form class="composer" id="composer">
+              <textarea class="input" id="prompt" rows="1" placeholder="Message the cloud…"></textarea>
+              <button class="btn primary icon" id="sendBtn" aria-label="Send"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+            </form>
+          </div>
+          <div class="card">
+            <div class="hd"><h3>Settings</h3><div class="sp"></div><button class="btn sm ghost" id="clearChat">Clear chat</button></div>
+            <div class="bd">
+              <div class="field"><label class="f" for="pModel">Model</label><select class="input" id="pModel"></select></div>
+              <div class="field"><label class="f" for="pSys">System prompt</label><textarea class="input" id="pSys" rows="3" placeholder="Optional"></textarea></div>
+              <div class="field"><label class="f rv" for="pTemp">Temperature <span id="pTempV">0.7</span></label><input type="range" id="pTemp" min="0" max="2" step="0.05" value="0.7"></div>
+              <div class="field" style="margin:0"><label class="f rv" for="pMax">Max tokens <span id="pMaxV">512</span></label><input type="range" id="pMax" min="16" max="4096" step="16" value="512"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section data-view="keys" hidden>
+        <div class="card" style="margin-bottom:16px"><div class="bd">
+          <form class="row" id="keyForm" style="flex-wrap:wrap">
+            <input class="input" id="keyLabel" placeholder="What is it for? e.g. my-app" maxlength="64" style="min-width:200px">
+            <button class="btn primary"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New API key</button>
+          </form>
+          <p class="note">A key is shown once. Keep it secret: anyone with it can use the cloud as you.</p>
+        </div></div>
+        <div class="card"><div class="hd"><h3>Your API keys</h3><span class="sub" id="keysSub"></span></div>
+          <div class="tbl-wrap"><table class="keys-tbl"><thead><tr><th>Key</th><th>Label</th><th>Created</th><th class="r">Requests</th><th class="r">Tokens out</th><th>Last used</th><th>Status</th><th></th></tr></thead>
+          <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
+      </section>
+
+      <section data-view="compute" hidden>
+        <div id="computeBox"></div>
+      </section>
+
+      <section data-view="docs" hidden>
+        <div class="grid two">
+          <div class="card"><div class="hd"><h3>Connect any app</h3><span class="sub">OpenAI-compatible</span></div><div class="bd">
+            <dl class="kv" style="margin-bottom:14px"><dt>Base URL</dt><dd id="docBase"></dd><dt>API key</dt><dd>sk-expert-… (from API keys)</dd><dt>Models</dt><dd>auto · expertstream-fast · expertstream-coder · any name on the Models page</dd></dl>
+            <div id="docSnip"></div>
+          </div></div>
+          <div class="grid" style="align-content:start">
+            <div class="card"><div class="hd"><h3>Endpoints</h3></div><div class="bd"><div class="ep">
+              <code>POST /v1/chat/completions</code><span class="muted">chat, with "stream": true for live text</span>
+              <code>GET /v1/models</code><span class="muted">models online now</span>
+              <code>GET /me</code><span class="muted">usage of the key you call with</span>
+            </div></div></div>
+            <div class="card"><div class="hd"><h3>Extras</h3></div><div class="bd"><div class="ep">
+              <code>"compress": "aggressive"</code><span class="muted">shrinks long prompts before they are sent</span>
+              <code>"temperature": 0</code><span class="muted">repeat questions are answered from the cache, instantly</span>
+              <code>"cache": "similar"</code><span class="muted">also reuse answers to near-identical questions</span>
+            </div></div></div>
+            <div class="card"><div class="hd"><h3>Limits</h3></div><div class="bd"><p class="muted" style="margin:0" id="docLimits"></p></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <nav class="mnav" id="mobNav"></nav>
+</div>
+<div id="toasts"></div>
+
+<script src="/ui.js"></script>
+<script>
+"use strict";
+let TOKEN = "", USER = "", STATS = null, ACCOUNT = null, timer = null, failures = 0;
+const ORIGIN = location.origin;
+document.querySelectorAll("[data-icon]").forEach(e => e.append(icon(e.dataset.icon)));
+document.querySelectorAll("[data-check]").forEach(e => e.prepend(icon("check")));
+
+// ---------------------------------------------------------------- data
+async function call(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", ...(TOKEN ? { "Authorization": "Bearer " + TOKEN } : {}), ...(opts.headers || {}) } });
+  let j = null; try { j = await r.json(); } catch {}
+  if (r.status === 401 && TOKEN) { signedOut("Your session ended. Sign in again."); throw new Error("signed out"); }
+  if (!r.ok) throw new Error((j && j.error && j.error.message) || "HTTP " + r.status);
+  return j;
+}
+async function refresh() {
+  clearTimeout(timer);
+  try {
+    STATS = await call("/public/stats"); failures = 0; $("#offline").hidden = true;
+    if (TOKEN) ACCOUNT = await call("/account");
+    render();
+  } catch (e) { if (!TOKEN && e.message === "signed out") return; failures++; $("#offline").hidden = failures < 2; setStatus("bad", "Offline"); renderLanding(); }
+  timer = setTimeout(refresh, document.hidden ? 15000 : 3000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+function setStatus(kind, text) { const s = $("#status"); s.className = "pill " + kind; s.lastChild.textContent = text; }
+
+// ---------------------------------------------------------------- landing
+function renderLanding() {
+  const s = STATS;
+  $("#lNodes").textContent = s ? fmt(s.nodes) : "–"; $("#lCores").textContent = s ? fmt(s.cpu_cores) : "–";
+  $("#lRam").textContent = s ? (s.ram_gb >= 1 ? s.ram_gb.toFixed(s.ram_gb >= 10 ? 0 : 1) + " GB" : "0 GB") : "–";
+  $("#lTps").textContent = s ? (s.speed.avg_tps || 0).toFixed(1) : "–";
+  const d = $("#liveDot"); d.className = "pill " + (!s ? "bad" : s.nodes ? "ok" : "warn"); d.lastChild.textContent = !s ? "Offline" : s.nodes ? "Live" : "Waiting for computers";
+  $("#lModels").replaceChildren(...(s && s.models.length ? s.models.map(m => h("span", { class: "chip" + (m.warm ? " warm" : "") }, h("span", { class: "dot" }), m.id)) : [h("span", { class: "muted", style: "font-size:13px" }, s ? "No models online yet" : "—")]));
+  $("#lServed").textContent = s ? fmt(s.served.completion_tokens) + " tokens generated for " + fmt(s.users) + (s.users === 1 ? " person" : " people") + " so far." : "";
+  $("#planFree").replaceChildren(...["All models on the cloud", "OpenAI-compatible API and keys", "Playground in the browser", s && s.rate_per_min ? s.rate_per_min + " requests per minute" : "Fair-use rate limit", "Prompt compression and answer cache"].map(t => h("li", {}, icon("check"), t)));
+  document.querySelectorAll('[data-auth="signup"]').forEach(b => b.hidden = s && !s.signup);
+}
+
+// ---------------------------------------------------------------- auth
+function authModal(mode) {
+  let m = mode;
+  const err = h("div", { class: "err", hidden: true, role: "alert" }, h("b", {}, "!"), h("span", {}));
+  const user = h("input", { class: "input", autocomplete: "username", autocapitalize: "off", spellcheck: "false", placeholder: "username", maxlength: "32" });
+  const pass = h("input", { class: "input", type: "password", placeholder: "password", maxlength: "200" });
+  const go = h("button", { class: "btn primary", style: "width:100%;height:44px" });
+  const seg = h("div", { class: "seg" });
+  const hint = h("p", { class: "note" });
+  const draw = () => {
+    seg.replaceChildren(...[["signup", "Create account"], ["login", "Sign in"]].map(([k, l]) => h("button", { type: "button", class: m === k ? "on" : "", onclick: () => { m = k; draw(); } }, l)));
+    go.textContent = m === "signup" ? "Create free account" : "Sign in";
+    pass.setAttribute("autocomplete", m === "signup" ? "new-password" : "current-password");
+    hint.textContent = m === "signup" ? "Usernames: 3 to 32 letters or digits. Passwords: at least 8 characters." : "";
+    err.hidden = true;
+  };
+  const form = h("form", {}, seg, err, h("div", { class: "field" }, h("label", { class: "f" }, "Username"), user), h("div", { class: "field" }, h("label", { class: "f" }, "Password"), pass), go, hint);
+  let close;
+  form.addEventListener("submit", async e => {
+    e.preventDefault(); go.disabled = true;
+    try {
+      const r = await fetch("/auth/" + m, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
+      store.set("ec_session", j.token, true); TOKEN = j.token; USER = j.username; close(); enterConsole(m === "signup");
+    } catch (er) { err.hidden = false; err.lastChild.textContent = er.message.charAt(0).toUpperCase() + er.message.slice(1); }
+    go.disabled = false;
+  });
+  const logo = h("div", { class: "logo" }); logo.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 17l7-11 7 11"/><path d="M8.5 12.5h7"/></svg>';
+  close = modalEl(h("div", { class: "brand", style: "margin-bottom:18px" }, logo, "ExpertCloud"), form);
+  draw(); setTimeout(() => user.focus(), 50);
+}
+function modalEl(head, body) {   // a modal without a footer, closed by the caller
+  const bg = h("div", { class: "modal-bg" }), close = () => { bg.remove(); document.removeEventListener("keydown", esc); };
+  const esc = e => { if (e.key === "Escape") close(); };
+  bg.append(h("div", { class: "modal", role: "dialog", "aria-modal": "true", style: "max-width:420px" }, h("div", { class: "bd", style: "padding:24px" }, head, body)));
+  bg.addEventListener("click", e => { if (e.target === bg) close(); }); document.addEventListener("keydown", esc); document.body.append(bg);
+  return close;
+}
+document.querySelectorAll("[data-auth]").forEach(b => b.addEventListener("click", () => authModal(b.dataset.auth)));
+function signedOut(msg) { store.del("ec_session"); TOKEN = ""; USER = ""; ACCOUNT = null; $("#app").hidden = true; $("#landing").hidden = false; if (msg) toast(msg, "bad"); }
+async function signOut() { try { await call("/auth/logout", { method: "POST" }); } catch {} signedOut(""); try { history.replaceState(null, "", "/"); } catch {} }
+$("#logoutBtn").addEventListener("click", signOut); $("#logoutTop").addEventListener("click", signOut);
+$("#themeBtn").addEventListener("click", () => {
+  const cur = document.documentElement.dataset.theme, dark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  const t = dark ? "light" : "dark"; document.documentElement.dataset.theme = t; store.set("ec_theme", t, true);
+});
+(t => { if (t) document.documentElement.dataset.theme = t; })(store.get("ec_theme"));
+
+// ---------------------------------------------------------------- console navigation
+const VIEWS = [["home", "Home"], ["models", "Models"], ["playground", "Playground"], ["keys", "API keys"], ["compute", "Compute"], ["docs", "Docs"]];
+let VIEW = "home";
+for (const [id, label] of VIEWS) {
+  $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id === "keys" ? "keys" : id), h("span", {}, label)));
+  if (id !== "docs") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label === "API keys" ? "Keys" : label));
+}
+document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
+function go(id) {
+  VIEW = id;
+  document.querySelectorAll("[data-nav]").forEach(b => b.classList.toggle("on", b.dataset.nav === id));
+  document.querySelectorAll("[data-view]").forEach(s => s.hidden = s.dataset.view !== id);
+  $("#title").textContent = VIEWS.find(v => v[0] === id)[1];
+  try { history.replaceState(null, "", "#" + id); } catch {}
+  if (id === "keys") loadKeys();
+  if (id === "compute") loadCompute();
+  render();
+}
+function enterConsole(fresh) {
+  $("#landing").hidden = true; $("#app").hidden = false;
+  if (fresh) toast("Welcome to ExpertCloud, " + USER + "!", "ok");
+  renderChat(); renderDocs();
+  const want = location.hash.slice(1); go(VIEWS.some(v => v[0] === want) ? want : "home");
+  refresh();
+}
+
+// ---------------------------------------------------------------- render
+function render() {
+  renderLanding();
+  if (!TOKEN || !STATS) return;
+  const s = STATS, a = ACCOUNT;
+  setStatus(s.nodes ? "ok" : "warn", s.nodes ? "Cloud live · " + s.nodes + (s.nodes === 1 ? " computer" : " computers") : "No computers online");
+  if (a) { USER = a.username; $("#whoSide").textContent = a.username; $("#hello").textContent = "Hi, " + a.username; $("#planBadge").textContent = a.plan.contributor ? "Contributor" : "Free plan"; }
+  renderModelSelect();
+  if (VIEW === "home") renderHome();
+  if (VIEW === "models") renderModels();
+}
+function renderHome() {
+  const s = STATS, u = (ACCOUNT && ACCOUNT.usage) || {};
+  $("#uReq").textContent = fmt(u.requests); $("#uOut").textContent = fmt(u.completion_tokens); $("#uIn").textContent = fmt(u.prompt_tokens) + " prompt tokens sent";
+  $("#uSaved").textContent = fmt(u.tokens_saved); $("#uContrib").textContent = fmt(u.contributed_tokens);
+  const cells = [[fmt(s.nodes), "computers"], [fmt(s.cpu_cores), "CPU cores"], [s.ram_gb + " GB", "memory"], [(s.speed.avg_tps || 0).toFixed(1), "tokens/s"], [fmt(s.models.length), "models"], [fmt(s.users), "people"]];
+  $("#cloudSpec").replaceChildren(...cells.map(([v, l]) => h("div", {}, h("b", {}, v), h("span", {}, l))));
+  const pct = s.capacity ? s.busy / s.capacity * 100 : 0;
+  $("#cloudLoad").replaceChildren(h("div", { class: "t" }, h("span", {}, "Busy right now"), h("b", {}, s.busy + " of " + s.capacity + " slots")), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" })));
+  $("#cloudNote").textContent = s.nodes ? fmt(s.served.completion_tokens) + " tokens generated on this cloud so far." : "No computers are online, so requests wait. Share one from the Compute page.";
+}
+function renderModels() {
+  const g = $("#modelGrid"), ms = STATS.models;
+  if (!ms.length) { g.replaceChildren(h("div", { class: "card", style: "grid-column:1/-1" }, emptyState("models", "No models online", "Models appear here as soon as a computer that has one joins the cloud."))); return; }
+  g.replaceChildren(...ms.map(m => h("div", { class: "card mcard" },
+    h("div", { class: "row" }, h("div", { class: "nm" }, m.id), h("span", { class: "chip" + (m.warm ? " warm" : "") }, h("span", { class: "dot" }), m.warm ? "ready" : "loads on first use")),
+    h("div", { class: "muted", style: "font-size:13px" }, mb(m.size_mb) + " · on " + m.nodes + (m.nodes === 1 ? " computer" : " computers")),
+    h("div", { class: "row", style: "justify-content:flex-start;gap:8px" }, h("button", { class: "btn sm primary", onclick: () => { $("#pModel").value = m.id; go("playground"); } }, "Try it"),
+      h("button", { class: "btn sm", onclick: () => copy(m.id) }, "Copy name")))));
+}
+
+// ---------------------------------------------------------------- keys
+let KEYS = [];
+async function loadKeys() { try { KEYS = (await call("/account/keys")).keys; renderKeys(); } catch (e) { if (e.message !== "signed out") toast("Could not load keys: " + e.message, "bad"); } }
+function renderKeys() {
+  $("#keysSub").textContent = KEYS.filter(k => !k.revoked).length + " active";
+  const st = k => h("span", { class: "st " + (k.revoked ? "off" : "on") }, k.revoked ? "Revoked" : "Active");
+  const rv = k => k.revoked ? null : h("button", { class: "btn sm danger", onclick: () => revoke(k) }, "Revoke");
+  $("#keyRows").replaceChildren(...KEYS.map(k => h("tr", {},
+    h("td", { class: "k" }, h("code", {}, k.prefix + "…"), st(k), rv(k)), h("td", { "data-l": "Label" }, k.label || "—"), h("td", { "data-l": "Created" }, ago(k.created)),
+    h("td", { class: "r", "data-l": "Requests" }, fmt(k.requests)), h("td", { class: "r", "data-l": "Tokens out" }, fmt(k.completion_tokens)),
+    h("td", { "data-l": "Last used" }, k.last_used ? ago(k.last_used) : "never"), h("td", { class: "act" }, st(k)), h("td", { class: "r act" }, rv(k)))));
+  const em = $("#keysEmpty"); em.hidden = KEYS.length > 0; em.replaceChildren(emptyState("keys", "No API keys yet", "Make one above to use the cloud from your own apps."));
+}
+$("#keyForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  try { const r = await call("/account/keys", { method: "POST", body: JSON.stringify({ label: $("#keyLabel").value.trim() }) }); $("#keyLabel").value = ""; showKey(r.key); loadKeys(); }
+  catch (er) { toast("Could not make a key: " + er.message, "bad"); }
+});
+function snippets(key) {
+  const base = ORIGIN + "/v1";
+  return {
+    curl: `curl ${base}/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello!"}]}'`,
+    Python: `from openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key="${key}")\nr = client.chat.completions.create(model="auto", messages=[{"role": "user", "content": "Hello!"}])\nprint(r.choices[0].message.content)`,
+    JavaScript: `import OpenAI from "openai";\n\nconst client = new OpenAI({ baseURL: "${base}", apiKey: "${key}" });\nconst r = await client.chat.completions.create({ model: "auto", messages: [{ role: "user", content: "Hello!" }] });\nconsole.log(r.choices[0].message.content);`,
+  };
+}
+function snippetTabs(key) {
+  const sn = snippets(key), box = h("div", {}), tabs = h("div", { class: "tabs" });
+  const pick = name => { tabs.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.textContent === name)); box.replaceChildren(codeBlock(sn[name])); };
+  for (const name of Object.keys(sn)) tabs.append(h("button", { type: "button", onclick: () => pick(name) }, name));
+  pick("curl"); return h("div", {}, tabs, box);
+}
+function showKey(key) {
+  const b = h("button", { class: "btn sm icon", type: "button", "aria-label": "Copy key", onclick: () => copy(key, b) }, icon("copy"));
+  modal("Your new API key", [h("p", { class: "muted", style: "margin:0" }, "Copy it now: it is not shown again."), h("div", { class: "keybox" }, h("code", {}, key), b), snippetTabs(key)],
+    close => [h("button", { class: "btn primary", onclick: close }, "Done")]);
+}
+function revoke(k) {
+  modal("Revoke " + k.prefix + "…?", h("p", { class: "muted", style: "margin:0" }, "Apps using this key stop working at once."),
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => {
+      close(); try { await call("/account/keys/" + encodeURIComponent(k.prefix), { method: "DELETE" }); toast("Key revoked", "ok"); loadKeys(); } catch (e) { toast("Could not revoke: " + e.message, "bad"); } } }, "Revoke key")]);
+}
+
+// ---------------------------------------------------------------- compute
+async function loadCompute() {
+  const box = $("#computeBox");
+  let c; try { c = await call("/account/compute"); } catch (e) { return; }
+  const mine = c.nodes.length ? h("ul", { class: "list" }, c.nodes.map(n => h("li", {}, h("span", { class: "dot", style: "background:var(--ok)" }),
+    h("div", {}, h("div", { class: "nm" }, n.name), h("div", { class: "muted", style: "font-size:12px" }, [n.cpu_cores ? n.cpu_cores + " cores" : null, mb(n.ram_mb) + " RAM", n.models.length + (n.models.length === 1 ? " model" : " models")].filter(Boolean).join(" · "))),
+    h("div", { class: "meta" }, n.served + " answers" + (n.tps ? " · " + n.tps.toFixed(1) + " tok/s" : "") + " · online " + dur(n.online_s)))))
+    : emptyState("compute", "None of your computers are online", c.enabled ? "Run the command below on a computer and it appears here." : "");
+  const how = h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Share a computer")), h("div", { class: "bd" }));
+  const bd = how.lastChild;
+  if (!c.enabled) bd.append(h("p", { class: "muted", style: "margin:0" }, "This cloud does not take shared computers from users yet. The owner can turn it on in their dashboard."));
+  else {
+    bd.append(h("p", { class: "muted", style: "margin:0 0 12px" }, "Any Linux computer, Android phone (Termux), Kaggle or Colab notebook can join. It downloads a model, then answers requests while it runs. Requests from other people are answered on it, so they pass through it."),
+      h("button", { class: "btn primary", onclick: async e => {
+        e.target.disabled = true;
+        try { const r = await call("/account/compute", { method: "POST" });
+          bd.querySelector(".joincmd")?.remove();
+          bd.append(h("div", { class: "joincmd" }, h("label", { class: "f", style: "margin-top:14px" }, "Run this on the computer (in a notebook, put ! in front):"), codeBlock(r.command),
+            h("p", { class: "note" }, "This command holds a key of yours: everything the computer generates is credited to you. Do not share it."))); }
+        catch (er) { toast(er.message, "bad"); }
+        e.target.disabled = false; } }, "Get my join command"));
+  }
+  box.replaceChildren(h("div", { class: "grid kpis", style: "grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" },
+    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Your computers online"), h("div", { class: "v" }, fmt(c.nodes.length))),
+    h("div", { class: "card kpi" }, h("div", { class: "l" }, "Tokens you contributed"), h("div", { class: "v" }, fmt(c.contributed)), h("div", { class: "s" }, c.contributed ? "you have Contributor perks" : "share a computer to get Contributor perks"))),
+    h("div", { class: "grid two" }, how, h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Your computers")), mine)));
+}
+
+// ---------------------------------------------------------------- docs
+function renderDocs() {
+  $("#docBase").textContent = ORIGIN + "/v1";
+  $("#docSnip").replaceChildren(snippetTabs("sk-expert-YOUR_KEY"));
+  $("#quickSnip").replaceChildren(codeBlock(snippets("sk-expert-YOUR_KEY").curl));
+  const r = STATS && STATS.rate_per_min;
+  $("#docLimits").textContent = (r ? "Free plan: " + r + " requests per minute per key. " : "") + "Contributors (people sharing a computer) have no limit and skip the queue. Long answers stream as they are written.";
+}
+
+// ---------------------------------------------------------------- playground
+const CHAT = []; let ABORT = null, modelSig = "";
+function renderModelSelect() {
+  const ms = STATS.models, ids = ["auto", "expertstream-fast", "expertstream-coder", ...ms.map(m => m.id)], sig = ids.join("|");
+  if (sig === modelSig) return; modelSig = sig;
+  const sel = $("#pModel"), cur = sel.value || "auto";
+  sel.replaceChildren(h("optgroup", { label: "Smart routing" }, h("option", { value: "auto" }, "auto: biggest model online"), h("option", { value: "expertstream-fast" }, "expertstream-fast: quickest"), h("option", { value: "expertstream-coder" }, "expertstream-coder")),
+    ms.length ? h("optgroup", { label: "Models" }, ms.map(m => h("option", { value: m.id }, m.id))) : null);
+  sel.value = ids.includes(cur) ? cur : "auto";
+}
+for (const [id, out] of [["#pTemp", "#pTempV"], ["#pMax", "#pMaxV"]]) $(id).addEventListener("input", e => $(out).textContent = e.target.value);
+function renderChat() {
+  const box = $("#msgs");
+  if (!CHAT.length) {
+    const s = h("div", { class: "sugg" }, ["Explain how a cloud works in two sentences", "Write a Python function that reverses a list", "Give me three ideas for a weekend project"].map(p => h("button", { type: "button", onclick: () => { $("#prompt").value = p; send(); } }, p)));
+    box.replaceChildren(h("div", { style: "margin:auto;text-align:center;max-width:480px" }, emptyState("spark", "Ask the cloud anything", "Your message goes to the best computer online. Each answer shows which one and how fast."), s));
+    return;
+  }
+  box.replaceChildren(...CHAT.map(m => {
+    const txt = h("div", { class: "txt" + (m.error ? " err" : "") }, m.content);
+    if (m.pending) txt.append(h("span", { class: "caret" }));
+    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? "computer " + x.node : null, x.model, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
+      x.ttft_s != null ? "first word " + x.ttft_s.toFixed(2) + " s" : null, x.tps ? x.tps.toFixed(1) + " tok/s" : null, x.tokens ? x.tokens + " tokens" : null].filter(Boolean).map(t => h("span", { class: "chip" }, t))) : null;
+    return h("div", { class: "msg " + m.role }, h("div", { class: "av" }, m.role === "user" ? "You" : icon("spark")), h("div", { class: "body" }, h("div", { class: "who" }, m.role === "user" ? "You" : "ExpertCloud"), txt, stats));
+  }));
+  box.scrollTop = box.scrollHeight;
+}
+function setSending(on) { const b = $("#sendBtn"); b.replaceChildren(icon(on ? "stop" : "send")); b.setAttribute("aria-label", on ? "Stop" : "Send"); }
+async function send() {
+  if (ABORT) { ABORT.abort(); return; }
+  const text = $("#prompt").value.trim(); if (!text) return;
+  $("#prompt").value = ""; autoGrow();
+  CHAT.push({ role: "user", content: text });
+  const reply = { role: "assistant", content: "", pending: true }; CHAT.push(reply); renderChat();
+  const sys = $("#pSys").value.trim();
+  const messages = [...(sys ? [{ role: "system", content: sys }] : []), ...CHAT.filter(m => m !== reply && !m.error).map(m => ({ role: m.role, content: m.content }))];
+  ABORT = new AbortController(); setSending(true);
+  const t0 = performance.now(); let first = null;
+  try {
+    const r = await fetch("/v1/chat/completions", { method: "POST", signal: ABORT.signal, headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: $("#pModel").value || "auto", messages, stream: true, temperature: +$("#pTemp").value, max_tokens: +$("#pMax").value }) });
+    if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.json()).error.message; } catch {} if (r.status === 401) signedOut("Your session ended. Sign in again."); throw new Error(m); }
+    const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const ev = buf.slice(0, i); buf = buf.slice(i + 2);
+        for (const line of ev.split("\n")) {
+          if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+          const j = JSON.parse(line.slice(6));
+          if (j.error) throw new Error(j.error.message || "the computer failed");
+          const d = j.choices && j.choices[0] && j.choices[0].delta;
+          if (d && d.content) { if (first == null) first = (performance.now() - t0) / 1000; reply.content += d.content; renderChat(); }
+          if (j.x_expertcloud) reply.stats = { ...j.x_expertcloud, model: j.model, tokens: j.usage && j.usage.completion_tokens, ttft_s: j.x_expertcloud.ttft_s ?? first };
+        }
+      }
+    }
+    if (!reply.content) reply.content = "(empty answer)";
+  } catch (e) {
+    if (e.name === "AbortError") reply.content += reply.content ? " [stopped]" : "[stopped]";
+    else { reply.error = true; reply.content = /no online node|no node/i.test(e.message) ? "No computer with that model is online right now. Try again soon, or pick another model." : e.message; }
+  } finally { reply.pending = false; ABORT = null; setSending(false); renderChat(); }
+}
+function autoGrow() { const t = $("#prompt"); t.style.height = "auto"; t.style.height = Math.min(200, t.scrollHeight + 2) + "px"; }
+$("#prompt").addEventListener("input", autoGrow);
+$("#prompt").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+$("#composer").addEventListener("submit", e => { e.preventDefault(); send(); });
+$("#clearChat").addEventListener("click", () => { if (ABORT) ABORT.abort(); CHAT.length = 0; renderChat(); });
+
+// ---------------------------------------------------------------- start
+(function boot() {
+  const saved = store.get("ec_session");
+  if (saved) { TOKEN = saved; enterConsole(false); }
+  else { $("#landing").hidden = false; renderLanding(); refresh(); }
+})();
+</script>
+</body>
+</html>

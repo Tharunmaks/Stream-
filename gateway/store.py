@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS keys (
 CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS cache (
     key TEXT PRIMARY KEY, model TEXT NOT NULL, prompt TEXT NOT NULL, response TEXT NOT NULL, created REAL NOT NULL, hits INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE, pw TEXT NOT NULL, created REAL NOT NULL,
+    console_hash TEXT, disabled INTEGER DEFAULT 0, last_login REAL);
+CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created REAL NOT NULL, last_used REAL);
 CREATE TABLE IF NOT EXISTS nodes_seen (node_id TEXT PRIMARY KEY, name TEXT, owner_hash TEXT, first_seen REAL, last_seen REAL,
     tokens_generated INTEGER DEFAULT 0);
 """
@@ -41,6 +45,8 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        cols = [r[1] for r in self.db.execute("PRAGMA table_info(keys)")]
+        if "user_id" not in cols: self.db.execute("ALTER TABLE keys ADD COLUMN user_id INTEGER")   # databases from before accounts
         try:
             self.db.execute(FTS)
             self.fts = True
@@ -62,10 +68,11 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO settings(name, value) VALUES(?, ?)", (name, value))
 
     # ---- virtual API keys ----
-    def new_key(self, label=""):
+    def new_key(self, label="", user_id=None):
         key = "sk-expert-" + secrets.token_urlsafe(32)
         with self.lock:
-            self.db.execute("INSERT INTO keys(hash, prefix, label, created) VALUES(?, ?, ?, ?)", (key_hash(key), key[:14], label, time.time()))
+            self.db.execute("INSERT INTO keys(hash, prefix, label, created, user_id) VALUES(?, ?, ?, ?, ?)",
+                            (key_hash(key), key[:14], label, time.time(), user_id))
         return key
 
     def check_key(self, key):
@@ -102,6 +109,78 @@ class Store:
         r = self.db.execute("SELECT COUNT(*), COALESCE(SUM(requests),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(tokens_saved),0),"
                             " COALESCE(SUM(cache_hits),0) FROM keys").fetchone()
         return dict(keys=r[0], requests=r[1], completion_tokens=r[2], tokens_saved=r[3], cache_hits=r[4])
+
+    # ---- user accounts (the public cloud console) ----
+    @staticmethod
+    def _pw(password, salt):
+        return hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32).hex()
+
+    def create_user(self, username, password):
+        """The new user's id, or None if the name is taken. Each user gets a 'console' key that accounts for console use."""
+        salt = secrets.token_bytes(16)
+        try:
+            with self.lock:
+                cur = self.db.execute("INSERT INTO users(username, pw, created) VALUES(?, ?, ?)", (username, salt.hex() + ":" + self._pw(password, salt), time.time()))
+            uid = cur.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+        console = self.new_key("console", uid)
+        with self.lock:
+            self.db.execute("UPDATE users SET console_hash=? WHERE id=?", (key_hash(console), uid))
+        return uid
+
+    def check_password(self, username, password):
+        row = self.db.execute("SELECT id, pw, disabled FROM users WHERE username=?", (username,)).fetchone()
+        if not row:
+            self._pw(password, b"0" * 16); return None   # same time as a real check, so names cannot be probed by timing
+        salt, h = row[1].split(":", 1)
+        if row[2] or not secrets.compare_digest(self._pw(password, bytes.fromhex(salt)), h): return None
+        with self.lock:
+            self.db.execute("UPDATE users SET last_login=? WHERE id=?", (time.time(), row[0]))
+        return row[0]
+
+    def new_session(self, uid):
+        tok = "ses-" + secrets.token_urlsafe(32)
+        with self.lock:
+            self.db.execute("INSERT INTO sessions(hash, user_id, created, last_used) VALUES(?, ?, ?, ?)", (key_hash(tok), uid, time.time(), time.time()))
+        return tok
+
+    def session_user(self, tok, max_age=30 * 86400):
+        """(user id, username, console key hash) of a live session, else None."""
+        if not tok or not tok.startswith("ses-"): return None
+        row = self.db.execute("SELECT u.id, u.username, u.console_hash, s.last_used FROM sessions s JOIN users u ON u.id=s.user_id"
+                              " WHERE s.hash=? AND u.disabled=0", (key_hash(tok),)).fetchone()
+        if not row or time.time() - row[3] > max_age: return None
+        if time.time() - row[3] > 300:
+            with self.lock:
+                self.db.execute("UPDATE sessions SET last_used=? WHERE hash=?", (time.time(), key_hash(tok)))
+        return row[:3]
+
+    def end_session(self, tok):
+        with self.lock:
+            self.db.execute("DELETE FROM sessions WHERE hash=?", (key_hash(tok),))
+
+    def user_keys(self, uid):
+        rows = self.db.execute("SELECT prefix, label, created, revoked, requests, completion_tokens, tokens_saved, contributed_tokens, last_used FROM keys"
+                               " WHERE user_id=? AND label != 'console' ORDER BY created DESC", (uid,)).fetchall()
+        names = ["prefix", "label", "created", "revoked", "requests", "completion_tokens", "tokens_saved", "contributed_tokens", "last_used"]
+        return [dict(zip(names, r)) for r in rows]
+
+    def user_revoke(self, uid, prefix):
+        with self.lock:
+            return self.db.execute("UPDATE keys SET revoked=1 WHERE user_id=? AND prefix=? AND label != 'console'", (uid, prefix)).rowcount
+
+    def user_usage(self, uid):
+        r = self.db.execute("SELECT COALESCE(SUM(requests),0), COALESCE(SUM(prompt_tokens),0), COALESCE(SUM(completion_tokens),0),"
+                            " COALESCE(SUM(tokens_saved),0), COALESCE(SUM(cache_hits),0), COALESCE(SUM(contributed_tokens),0) FROM keys WHERE user_id=?",
+                            (uid,)).fetchone()
+        return dict(zip(["requests", "prompt_tokens", "completion_tokens", "tokens_saved", "cache_hits", "contributed_tokens"], r))
+
+    def user_count(self):
+        return self.db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    def user_key_hashes(self, uid):
+        return [r[0] for r in self.db.execute("SELECT hash FROM keys WHERE user_id=? AND revoked=0", (uid,))]
 
     # ---- contribute-to-use ledger ----
     def node_seen(self, node_id, name, owner_hash):

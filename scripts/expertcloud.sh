@@ -71,10 +71,12 @@ start)
     ls "$MODELS"/*.gguf >/dev/null 2>&1 || say "  No models yet. Put .gguf files in $MODELS, or add one from the dashboard (Nodes page)."
   fi
   say ""
-  say "Open the dashboard (it signs you in by itself):"
+  say "Your cloud's public page (people sign up and use it here):"
+  say "  http://127.0.0.1:$PORT/"
+  say "Your owner dashboard (signs you in by itself):"
   say "  $(open_link)"
   if [ "$LAN" = 1 ]; then ip=$(python3 -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.connect(('10.255.255.255',1));print(s.getsockname()[0])" 2>/dev/null)
-    [ -n "$ip" ] && say "From other devices on the same Wi-Fi: http://$ip:$PORT/dashboard"; fi
+    [ -n "$ip" ] && say "Other devices on the same Wi-Fi open: http://$ip:$PORT/"; fi
   say ""; say "It keeps running in the background. Check it any time with:  cloud status"
   ;;
 stop)

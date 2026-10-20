@@ -59,6 +59,19 @@ are spread over two one-slot nodes.
 * **The engine is CPU-only.** GPU memory is reported for scheduling, not used.
 * Token Killer savings depend on the prompt: tidy prompts save little; duplicated or padded ones save a lot.
 
+## Your own public cloud
+
+ExpertCloud is a cloud platform of its own, like the big clouds but built from computers people share:
+
+* **Public page** at `/`: live numbers (computers online, CPU cores, memory, speed, models), plans, sign-up and sign-in.
+* **Console** for every signed-in person: Home (their usage and the cloud's status), Models, Playground, API keys,
+  Compute (share a computer with one command; its work is credited to them and lifts their rate limit) and Docs.
+* **Owner dashboard** at `/dashboard` (admin token): all computers, all keys, deploys, and two switches: whether anyone can
+  create an account, and whether users may share their computers (a shared computer sees the prompts it answers).
+
+Accounts are a username and a password (scrypt-hashed); sessions last 30 days. Sign-ups are limited to 5 an hour per address
+and sign-ins to 10 failures per 10 minutes.
+
 ## Easiest way: the `cloud` command
 
 ```
