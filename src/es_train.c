@@ -577,6 +577,20 @@ int es_tm_lora_export_gguf(const es_tm *m, const char *path, char *err, size_t c
 typedef struct { es_tm *m; const float *X, *A, *B; float *Z, *Y; int T, in, out; size_t ldy; } lf_ctx;
 static void lf_job(void *c_, int item, int tid) {
     (void)tid; lf_ctx *c = c_; const int r = c->m->rank;
+    if (r % 8 == 0 && c->in % 8 == 0) {   /* SIMD path: Z = X A^T and Y += ls Z B^T with the matrix kernels */
+        const int t0 = item * 16, nt = c->T - t0 < 16 ? c->T - t0 : 16;
+        float *tmp = malloc(sizeof(float) * (size_t)nt * c->out);
+        if (tmp) {
+            FWD(c->X + (size_t)t0 * c->in, nt, (size_t)c->in, c->A, r, c->in, c->Z + (size_t)t0 * r, (size_t)r, 0);
+            FWD(c->Z + (size_t)t0 * r, nt, (size_t)r, c->B, c->out, r, tmp, (size_t)c->out, 0);
+            const float ls = c->m->ls;
+            for (int t = 0; t < nt; t++) {
+                float *y = c->Y + (size_t)(t0 + t) * c->ldy; const float *q = tmp + (size_t)t * c->out;
+                for (int o = 0; o < c->out; o++) y[o] += ls * q[o];
+            }
+            free(tmp); return;
+        }
+    }
     for (int t = item * 16; t < c->T && t < item * 16 + 16; t++) {
         const float *x = c->X + (size_t)t * c->in; float *z = c->Z + (size_t)t * r;
         for (int k = 0; k < r; k++) { const float *a = c->A + (size_t)k * c->in; float s = 0; for (int i = 0; i < c->in; i++) s += a[i] * x[i]; z[k] = s; }
