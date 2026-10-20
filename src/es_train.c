@@ -312,18 +312,20 @@ static inline __attribute__((always_inline)) void fwd_body(const float *X, int T
     for (; r + 4 <= nr; r += 4) {
         const float *w0 = W + (size_t)r * n, *w1 = w0 + n, *w2 = w1 + n, *w3 = w2 + n;
         int t = 0;
-        for (; t + 2 <= T; t += 2) {
-            const float *x0 = X + (size_t)t * ldx, *x1 = x0 + ldx;
-            v8 a00 = {0}, a01 = {0}, a02 = {0}, a03 = {0}, a10 = {0}, a11 = {0}, a12 = {0}, a13 = {0};
+        for (; t + 3 <= T; t += 3) {   /* 4 rows x 3 tokens: 12 accumulators, 7 loads per 12 multiply-adds */
+            const float *x0 = X + (size_t)t * ldx, *x1 = x0 + ldx, *x2 = x1 + ldx;
+            v8 a00 = {0}, a01 = {0}, a02 = {0}, a03 = {0}, a10 = {0}, a11 = {0}, a12 = {0}, a13 = {0}, a20 = {0}, a21 = {0}, a22 = {0}, a23 = {0};
             for (int i = 0; i < n; i += 8) {
-                const v8 p = *(const v8 *)(x0 + i), q = *(const v8 *)(x1 + i);
-                const v8 b0 = *(const v8 *)(w0 + i), b1 = *(const v8 *)(w1 + i), b2 = *(const v8 *)(w2 + i), b3 = *(const v8 *)(w3 + i);
-                a00 += p * b0; a01 += p * b1; a02 += p * b2; a03 += p * b3;
-                a10 += q * b0; a11 += q * b1; a12 += q * b2; a13 += q * b3;
+                const v8 p = *(const v8 *)(x0 + i), q = *(const v8 *)(x1 + i), u = *(const v8 *)(x2 + i);
+                v8 b = *(const v8 *)(w0 + i); a00 += p * b; a10 += q * b; a20 += u * b;
+                b = *(const v8 *)(w1 + i); a01 += p * b; a11 += q * b; a21 += u * b;
+                b = *(const v8 *)(w2 + i); a02 += p * b; a12 += q * b; a22 += u * b;
+                b = *(const v8 *)(w3 + i); a03 += p * b; a13 += q * b; a23 += u * b;
             }
-            float *y0 = Y + (size_t)t * ldy + o0 + r, *y1 = y0 + ldy;
+            float *y0 = Y + (size_t)t * ldy + o0 + r, *y1 = y0 + ldy, *y2 = y1 + ldy;
             y0[0] = hsum(a00); y0[1] = hsum(a01); y0[2] = hsum(a02); y0[3] = hsum(a03);
             y1[0] = hsum(a10); y1[1] = hsum(a11); y1[2] = hsum(a12); y1[3] = hsum(a13);
+            y2[0] = hsum(a20); y2[1] = hsum(a21); y2[2] = hsum(a22); y2[3] = hsum(a23);
         }
         for (; t < T; t++) {
             const float *x0 = X + (size_t)t * ldx;
