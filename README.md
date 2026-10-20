@@ -75,6 +75,11 @@ about 1e-6). Honest limits: reading the data through a 200B model on a phone tak
 facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
 `python3 scripts/test_graft.py MODEL.gguf`.
 
+**ExpertStream Cloud & OmniRoute Gateway.** Pool your own machines into one OpenAI-compatible endpoint with free `sk-expert-...`
+keys: `gateway/omni_router.py` (OpenAI API with streaming, prompt compression, response cache, scoring router with failover),
+`cloud/worker_agent.py` (one command per machine, works behind home routers), an MCP server (`mcp/expertstream_mcp.py`) and a
+dashboard. Every node runs the native engine. Details and limits: [`docs/cloud.md`](docs/cloud.md); test: `python3 scripts/test_cloud.py MODEL.gguf`.
+
 **Faster on PCs; streaming tuned for phones.** On a 4-core x86 PC without a GPU, Qwen3-30B-A3B (30B parameters, Q2_K) generates
 8.0 words/s from RAM (it was 3.65; llama.cpp: 7.6), after new AVX2 kernels for the formats big models use (Q2_K, Q3_K, TQ1_0/TQ2_0, all
 IQ formats, MXFP4: 4-15x faster each, every one checked against exact float math). With phone-like storage (1 GB/s) and only 1-3 GB of

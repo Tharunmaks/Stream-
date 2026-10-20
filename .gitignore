@@ -30,3 +30,6 @@ es_graft
 *.esgraft
 *.esgraft.*
 es_fmtbench
+expertcloud.db
+expertcloud.db-*
+__pycache__/

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ExpertCloud Control</title>
+<style>
+  :root { --bg:#0b0f14; --panel:#121821; --line:#1f2a36; --text:#e6edf3; --dim:#8b98a5; --accent:#4cc38a; --warn:#e5a50a; --bad:#e5534b; --blue:#539bf5; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:16px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:18px; letter-spacing:.2px; } h1 span { color:var(--accent); }
+  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); }
+  main { padding:16px; display:grid; gap:16px; max-width:1200px; margin:0 auto; }
+  .row { display:grid; gap:16px; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
+  .big { font-size:28px; font-weight:650; font-variant-numeric:tabular-nums; } .dim { color:var(--dim); } .small { font-size:12px; }
+  input, button { font:inherit; color:var(--text); background:#0e141b; border:1px solid var(--line); border-radius:7px; padding:8px 10px; }
+  input { width:100%; } button { cursor:pointer; background:#1a2430; white-space:nowrap; } button.primary { background:var(--accent); color:#06120b; border-color:var(--accent); font-weight:600; }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--blue); outline-offset:1px; }
+  .flex { display:flex; gap:8px; align-items:center; } .grow { flex:1; min-width:0; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px; }
+  .cmd { background:#0e141b; border:1px solid var(--line); border-radius:7px; padding:8px 10px; overflow-x:auto; white-space:nowrap; }
+  .bar { height:7px; background:#0e141b; border-radius:4px; overflow:hidden; margin:3px 0 8px; } .bar > i { display:block; height:100%; background:var(--accent); }
+  .bar.warn > i { background:var(--warn); } .bar.bad > i { background:var(--bad); }
+  .nodes { display:grid; gap:12px; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); }
+  .badge { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11.5px; border:1px solid var(--line); margin:2px 4px 0 0; }
+  .badge.warm { border-color:var(--accent); color:var(--accent); }
+  .ok { color:var(--accent); } .err { color:var(--bad); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; } td, th { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; } .tablewrap { overflow-x:auto; }
+  svg text { fill:var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Expert<span>Cloud</span> Control</h1>
+  <div class="flex" style="min-width:min(100%,420px)">
+    <input id="token" type="password" placeholder="Admin token (printed by the gateway, ~/.expertcloud/admin_token)" aria-label="Admin token">
+    <button id="save">Connect</button>
+  </div>
+</header>
+<main>
+  <div id="status" class="small dim">Not connected.</div>
+  <div class="row">
+    <div class="card"><h2>Speed</h2>
+      <svg viewBox="0 0 200 120" width="100%" style="max-width:260px" role="img" aria-label="tokens per second">
+        <path d="M20 105 A80 80 0 0 1 180 105" stroke="#1f2a36" stroke-width="14" fill="none" stroke-linecap="round"/>
+        <path id="gauge" d="M20 105 A80 80 0 0 1 180 105" stroke="#4cc38a" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="0 252"/>
+        <text id="tps" x="100" y="92" text-anchor="middle" font-size="28" font-weight="650">0</text>
+        <text x="100" y="112" text-anchor="middle" font-size="11" fill="#8b98a5">tokens / s generating (last minute)</text>
+      </svg>
+      <div class="small dim" id="speedline"></div>
+    </div>
+    <div class="card"><h2>Token Killer &amp; cache</h2>
+      <div class="big" id="saved">0</div><div class="dim small">prompt tokens saved</div>
+      <div style="margin-top:10px" class="flex"><div class="grow"><div class="big" id="hits" style="font-size:20px">0</div><div class="dim small">cache hits</div></div>
+      <div class="grow"><div class="big" id="reqs" style="font-size:20px">0</div><div class="dim small">requests</div></div></div>
+    </div>
+    <div class="card"><h2>Cloud</h2>
+      <div class="big" id="nnodes">0</div><div class="dim small">nodes online</div>
+      <div style="margin-top:10px" class="small" id="models"></div>
+    </div>
+  </div>
+  <div class="row">
+    <div class="card"><h2>Free API key</h2>
+      <div class="flex"><input id="label" placeholder="Label (optional)" aria-label="Key label"><button class="primary" id="mkkey">Generate</button></div>
+      <div id="keyout" style="margin-top:10px; display:none">
+        <div class="flex"><div class="cmd mono grow" id="key"></div><button id="copykey">Copy</button></div>
+        <div class="small dim" style="margin-top:6px">Shown once. OpenAI base URL: <code id="baseurl"></code></div>
+      </div>
+    </div>
+    <div class="card"><h2>Add a machine</h2>
+      <div class="small dim" style="margin-bottom:6px">Run in the ExpertStream folder on the new PC, laptop or Raspberry Pi (Python 3 with psutil, websockets, httpx; <code>make es_serve es_get</code>):</div>
+      <div class="flex"><div class="cmd mono grow" id="join">connect first</div><button id="copyjoin">Copy</button></div>
+      <div class="small dim" style="margin-top:6px">Add <code>--key sk-expert-...</code> to credit its work to your key (contributors get priority). Prompts pass through the nodes: join only machines you trust.</div>
+    </div>
+  </div>
+  <div class="card"><h2>Nodes</h2><div class="nodes" id="nodes"><div class="dim">No nodes yet.</div></div></div>
+  <div class="card"><h2>Keys</h2><div class="tablewrap"><table><thead><tr><th>Key</th><th>Label</th><th>Requests</th><th>Tokens out</th><th>Saved</th><th>Contributed</th><th></th></tr></thead><tbody id="keys"></tbody></table></div></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let TOKEN = '';
+try { TOKEN = localStorage.getItem('expertcloud_admin') || ''; } catch (e) {}
+$('token').value = TOKEN;
+function el(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
+function fmt(n) { n = Number(n) || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n)); }
+async function api(path, opts = {}) {
+  const r = await fetch(path, Object.assign({}, opts, { headers: Object.assign({ 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }, opts.headers || {}) }));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  return j;
+}
+function bar(label, frac, text) {
+  const wrap = el('div'); const top = el('div', '', 'flex small');
+  top.appendChild(el('span', label, 'grow dim')); top.appendChild(el('span', text));
+  const b = el('div', '', 'bar' + (frac > 0.9 ? ' bad' : frac > 0.7 ? ' warn' : '')); const i = el('i'); i.style.width = Math.max(0, Math.min(100, frac * 100)) + '%'; b.appendChild(i);
+  wrap.appendChild(top); wrap.appendChild(b); return wrap;
+}
+function renderNodes(nodes) {
+  const box = $('nodes'); box.replaceChildren();
+  if (!nodes.length) { box.appendChild(el('div', 'No nodes online. Run the join command on a machine.', 'dim')); return; }
+  for (const n of nodes) {
+    const c = n.caps || {}, l = n.load || {}, card = el('div', '', 'card');
+    const head = el('div', '', 'flex'); head.appendChild(el('strong', n.name, 'grow')); head.appendChild(el('span', l.ping_ms != null ? l.ping_ms + ' ms' : '', 'small dim'));
+    card.appendChild(head);
+    card.appendChild(el('div', `${c.cpu_cores || '?'} cores · ${fmt(c.ram_mb)} MB RAM · ${c.gpu ? c.gpu + ' ' + fmt(c.vram_mb) + ' MB' : 'no GPU'} · disk ${c.disk_read_mbps || '?'} MB/s · ${c.os || ''} ${c.arch || ''}`, 'small dim'));
+    card.appendChild(el('div', '', '')).style.height = '8px';
+    card.appendChild(bar('CPU', (l.cpu_pct || 0) / 100, Math.round(l.cpu_pct || 0) + '%'));
+    const ramUsed = (l.ram_mb || c.ram_mb || 0) - (l.ram_free_mb || 0);
+    card.appendChild(bar('RAM', ramUsed / Math.max(1, l.ram_mb || c.ram_mb || 1), fmt(ramUsed) + ' / ' + fmt(l.ram_mb || c.ram_mb) + ' MB'));
+    card.appendChild(bar('Slots', n.active / Math.max(1, n.capacity), n.active + ' / ' + n.capacity));
+    card.appendChild(el('div', `served ${n.served} · ${n.tps ? n.tps.toFixed(1) + ' tok/s' : '–'} · first token ${n.ttft_s != null ? n.ttft_s.toFixed(2) + ' s' : '–'}`, 'small'));
+    const ms = el('div'); for (const m of n.models || []) { const b = el('span', m.name + (m.warm ? ' · warm' : ''), 'badge' + (m.warm ? ' warm' : '')); ms.appendChild(b); }
+    if (!(n.models || []).length) ms.appendChild(el('span', 'no models (deploy one with the MCP tool or POST /admin/deploy)', 'small dim'));
+    card.appendChild(ms);
+    const id = el('div', n.id, 'small dim mono'); id.style.marginTop = '6px'; card.appendChild(id);
+    box.appendChild(card);
+  }
+}
+async function refreshKeys() {
+  const j = await api('/admin/keys'); const tb = $('keys'); tb.replaceChildren();
+  for (const k of j.keys) {
+    const tr = el('tr'); for (const v of [k.prefix + '…', k.label || '', fmt(k.requests), fmt(k.completion_tokens), fmt(k.tokens_saved), fmt(k.contributed_tokens)]) tr.appendChild(el('td', v));
+    const td = el('td'); if (!k.revoked) { const b = el('button', 'Revoke'); b.onclick = async () => { await api('/admin/keys/' + encodeURIComponent(k.prefix), { method: 'DELETE' }); refreshKeys(); }; td.appendChild(b); } else td.textContent = 'revoked';
+    tr.appendChild(td); tb.appendChild(tr);
+  }
+}
+let keysTick = 0;
+async function tick() {
+  if (!TOKEN) return;
+  try {
+    const j = await api('/admin/live');
+    $('status').textContent = 'Connected · updated ' + new Date().toLocaleTimeString(); $('status').className = 'small ok';
+    const tps = j.speed.avg_tps || 0; $('tps').textContent = tps.toFixed(1);
+    $('gauge').setAttribute('stroke-dasharray', (Math.min(tps / 100, 1) * 252).toFixed(1) + ' 252');
+    $('speedline').textContent = `${fmt(j.speed.tokens_last_minute)} tokens in ${j.speed.answers_last_minute} answers in the last minute`;
+    $('saved').textContent = fmt(j.totals.tokens_saved); $('hits').textContent = fmt(j.totals.cache_hits); $('reqs').textContent = fmt(j.totals.requests);
+    $('nnodes').textContent = j.nodes.length;
+    $('models').textContent = j.models.length ? j.models.map(m => `${m.id} (${m.warm_nodes}/${m.nodes} warm)`).join(' · ') : 'no models online';
+    $('join').textContent = j.join; $('baseurl').textContent = location.origin + '/v1';
+    renderNodes(j.nodes);
+    if (keysTick++ % 5 === 0) refreshKeys();
+  } catch (e) { $('status').textContent = 'Not connected: ' + e.message; $('status').className = 'small err'; }
+}
+$('save').onclick = () => { TOKEN = $('token').value.trim(); try { localStorage.setItem('expertcloud_admin', TOKEN); } catch (e) {} keysTick = 0; tick(); };
+$('mkkey').onclick = async () => {
+  try { const j = await api('/admin/keys', { method: 'POST', body: JSON.stringify({ label: $('label').value }) });
+    $('key').textContent = j.key; $('keyout').style.display = 'block'; $('baseurl').textContent = location.origin + '/v1'; refreshKeys(); }
+  catch (e) { alert(e.message); }
+};
+function copy(id, btn) { navigator.clipboard.writeText($(id).textContent).then(() => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = t, 1200); }); }
+$('copykey').onclick = e => copy('key', e.target); $('copyjoin').onclick = e => copy('join', e.target);
+tick(); setInterval(tick, 2000);
+</script>
+</body>
+</html>
