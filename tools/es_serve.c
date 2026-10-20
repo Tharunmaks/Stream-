@@ -525,7 +525,7 @@ static void usage(void) {
     fprintf(stderr,
             "usage: es_serve (-m PACKDIR | -g FILE.gguf) [-p port=8080] [-w webdir] [--lan] [--key KEY] [--cors ORIGIN[,ORIGIN...]|*]\n"
             "                [-c context=4096] [-C expert_cache_mb=auto: 60%% of free RAM] [-j threads=fast cores] [-n max_tokens=512] [-t temperature=0.7]\n"
-            "                [-S Turbo draft length, 0 = off] [-E skip] [-L lookahead] [-W warm] [-i readers] [--graft NAME.esgraft] [--adapter NAME.esadapt] [--cache-route 0.2]\n"
+            "                [-S Turbo draft length, 0 = off] [-E skip] [-L lookahead] [-W warm] [-i readers] [--graft NAME.esgraft] [--adapter NAME.esadapt] [--cache-route 0.2] [--experts N]\n"
             "  OpenAI base URL http://127.0.0.1:PORT/v1 (any API key), Ollama URL http://127.0.0.1:PORT, web app http://127.0.0.1:PORT\n"
             "  ES_PREFIX_CACHE=0 turns prefix reuse off, ES_KV_SLOTS=N parked conversations (4), ES_KV_SLOT_MB budget (1024)\n");
     exit(2);
@@ -542,7 +542,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--key") && nx) { snprintf(g_key, sizeof g_key, "%s", nx); i++; }
         else if (!strcmp(a, "--graft") && nx) { graft = nx; i++; }       /* trained with es_graft: runs on top of the frozen model */
         else if (!strcmp(a, "--adapter") && nx) { adapter = nx; i++; }
-        else if (!strcmp(a, "--cache-route") && nx) { o.cache_route = (float)atof(nx); i++; }   /* prefer experts already in RAM */   /* trained with es_graft zo: inside every layer */
+        else if (!strcmp(a, "--cache-route") && nx) { o.cache_route = (float)atof(nx); i++; }   /* prefer experts already in RAM */
+        else if (!strcmp(a, "--experts") && nx) { o.topk = atoi(nx); i++; }                     /* experts per token */   /* trained with es_graft zo: inside every layer */
         else if (!strcmp(a, "--cors") && nx) { snprintf(g_cors + strlen(g_cors), sizeof g_cors - strlen(g_cors), ",%s", nx); i++; }
         else if (a[0] == '-' && a[1] && !a[2] && nx) {
             i++;

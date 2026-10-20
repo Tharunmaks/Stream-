@@ -535,6 +535,9 @@ static float SKIP_THR;
 /* cache-aware routing (ES_CACHE_ROUTE=beta, off by default): an expert already in RAM gets beta times the best selection score as
  * a bonus, so it wins over an expert on storage that was only slightly better; the outputs keep their real router weights */
 static float CACHE_ROUTE; static unsigned long long STAT_ROUTE_SWAP;
+/* fewer experts per token than the model was trained with (ES_TOPK, es_chat -K): reads and compute shrink in proportion; the chosen
+ * experts' weights are rescaled to the sum the full choice would have had */
+static int TOPK;
 typedef struct { int slot, l, e; } gtask;
 static struct { pthread_mutex_t mu; pthread_cond_t cv, cv_done; gtask *dq, *pq; int dh, dn, ph, pn, cap, stop; pthread_t th[16]; int nth; } GQ;
 static unsigned long long STAT_PF_ISSUED, STAT_PF_USED, STAT_SKIPPED;
@@ -742,6 +745,8 @@ static int route(int l, float *r, int *sel, float *w) {
     const layer *L = &M.L[l];
     const int ne = M.n_exp;
     int k = M.n_used;
+    const int k_full = k;
+    if (TOPK > 0 && TOPK < k) k = TOPK;
     add_bias(r, &L->gate_inp_b, ne);
     if (M.gating == GATE_SOFTMAX) {
         float mx = -INFINITY, sum = 0;
@@ -815,6 +820,15 @@ static int route(int l, float *r, int *sel, float *w) {
         STAT_SKIPPED += (unsigned long long)(k - kk); k = kk;
     }
 #endif
+    if (k < k_full && !M.norm_topk && M.gating != GATE_SOFTMAX_CHOSEN) {   /* keep the total weight of the full choice */
+        float full = wsum;
+        for (int j = k; j < k_full; j++) {
+            int best = -1;
+            for (int e = 0; e < ne; e++) { int used = 0; for (int i = 0; i < j; i++) used |= (i < k ? sel[i] : -1) == e; if (!used && (best < 0 || selp[e] > selp[best])) best = e; }
+            if (best >= 0) { full += r[best]; selp[best] = -INFINITY; }
+        }
+        if (wsum > 0) for (int j = 0; j < k; j++) w[j] *= full / wsum;
+    }
     if (M.norm_topk) { const float d = wsum > 6.103515625e-5f ? wsum : 6.103515625e-5f; for (int j = 0; j < k; j++) w[j] /= d; }
     if (M.w_scale != 0.0f && M.w_scale != 1.0f) for (int j = 0; j < k; j++) w[j] *= M.w_scale;
     return k;
@@ -2088,6 +2102,7 @@ int es_engine_init(const es_engine_opts *o, char *err, size_t errcap) {
         if ((ev = getenv("ES_SIM_FLASH_MBPS")) && atof(ev) > 0) SIM_S_PER_BYTE = 1.0 / (atof(ev) * 1e6);
         SKIP_THR = (ev = getenv("ES_SKIP")) ? (float)atof(ev) : o->skip_thr;
         CACHE_ROUTE = (ev = getenv("ES_CACHE_ROUTE")) ? (float)atof(ev) : o->cache_route;
+        TOPK = (ev = getenv("ES_TOPK")) ? atoi(ev) : o->topk;
         LOOKAHEAD = (ev = getenv("ES_LOOKAHEAD")) ? atoi(ev) : o->lookahead;
         int nio = (ev = getenv("ES_IOTHREADS")) ? atoi(ev) : (o->io_threads > 0 ? o->io_threads : 4);
         if (!PACK && !MAPPED && nio > 0 && !getenv("ES_SYNC_IO")) {

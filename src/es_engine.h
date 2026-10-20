@@ -27,6 +27,7 @@ typedef struct {
     int         lookahead;   /* 1 = predict the next layer's experts and load them while computing */
     int         warm;        /* 1 = preload the experts this model used most last time */
     int         io_threads;  /* parallel expert readers (0 = 4) */
+    int         topk;        /* experts per token for MoE models (0 = as trained); fewer is faster, at some cost in quality */
     float       cache_route; /* prefer experts already in RAM when nearly as good (bonus = this x best score; 0 = off, 0.2 measured) */
     int         spec;        /* Turbo: guess up to this many next tokens from the text so far and check them together (-1 = default 7, 0 = off) */
 } es_engine_opts;
