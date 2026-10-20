@@ -17,6 +17,8 @@ What the run found and fixed:
   no worse than llama.cpp's (each measured against the engine with exact activations). On a 2-bit Qwen3-0.6B the engine is
   clearly more exact (perplexity 383 vs llama.cpp's 573).
 
+After the AVX2 kernels for the low-bit formats (next commit after this run), the 43 small models were run again: 43 of 43 pass.
+
 Not covered: the speed or answer quality of models above 7B (the test machine cannot hold or stream them), and phones (not run here).
 
 ## mini: 105 of 105 passed

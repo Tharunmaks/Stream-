@@ -75,6 +75,13 @@ about 1e-6). Honest limits: reading the data through a 200B model on a phone tak
 facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
 `python3 scripts/test_graft.py MODEL.gguf`.
 
+**Faster on PCs; streaming tuned for phones.** On a 4-core x86 PC without a GPU, Qwen3-30B-A3B (30B parameters, Q2_K) generates
+8.0 words/s from RAM (it was 3.65; llama.cpp: 7.6), after new AVX2 kernels for the formats big models use (Q2_K, Q3_K, TQ1_0/TQ2_0, all
+IQ formats, MXFP4: 4-15x faster each, every one checked against exact float math). With phone-like storage (1 GB/s) and only 1-3 GB of
+RAM for experts it streams at 3.8-6.4 words/s. The expert cache now sizes itself to the free RAM, and `-R 0.2` (es_serve
+`--cache-route 0.2`) prefers experts already in RAM: +4-13% speed, perplexity unchanged within noise. Not measured: a real phone (ARM
+uses its own NEON kernels).
+
 **Tested on 218 models (`scripts/test_200.py`).** 105 small random models covering 14 designs, compared logit by logit with
 PyTorch (Kimi K3: with llama.cpp); 43 real GGUF files in many quantizations, compared with llama.cpp; and 70 real giant files from 14B
 to 2.4T parameters (9.1 TB in all), loaded and run from their headers alone (`es_get --skeleton`, every weight zero: this proves
