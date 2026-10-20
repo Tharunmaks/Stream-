@@ -622,6 +622,9 @@ static inline int dot_n(const int8_t *w, const int8_t *a, int n) {
 }
 static inline int asum(const int8_t *a, int n) { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }
 #define ES_MULTI_MAX 16
+#if defined(__aarch64__)
+static int getenv_cached_no_lbneon(void) { static int v = -1; if (v < 0) v = getenv("ES_NO_LBNEON") != NULL; return v; }   /* the old low-bit path, for comparison */
+#endif
 static int getenv_cached_no_multi(void) { static int v = -1; if (v < 0) v = getenv("ES_NO_MULTI") != NULL; return v; }
 static int lowbit_ok(uint32_t t) {
     return t == GGML_MXFP4 || t == GGML_IQ4_NL || t == GGML_IQ4_XS || t == GGML_IQ2_XXS || t == GGML_IQ2_XS || t == GGML_IQ2_S ||
@@ -1619,6 +1622,9 @@ void es_mv_q5_0_neon(const uint8_t *, int, int, int, const es_blk_q80 *, float *
 void es_mv_q4_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 void es_mv_q6_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 int es_mv_multi_neon(uint32_t, const uint8_t *, int, int, int, const es_act *, int, float *, size_t);
+void es_mv_tq1_0_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+void es_mv_tq2_0_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
+int es_mv_lowbit_neon(uint32_t, const uint8_t *, int, int, int, const es_blk_q80 *, float *);
 void es_mv_q3_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 void es_mv_q5_K_neon(const uint8_t *, int, int, int, const es_block_q8_K *, float *);
 static int HAVE_DOT = -1;
@@ -1867,7 +1873,10 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
             if (t == GGML_Q6_K) { es_mv_q6_K_neon(w, cols, r0, r1, a->q8, y); return; }
             if (t == GGML_Q3_K) { es_mv_q3_K_neon(w, cols, r0, r1, a->q8, y); return; }
             if (t == GGML_Q5_K) { es_mv_q5_K_neon(w, cols, r0, r1, a->q8, y); return; }
+            if (t == GGML_TQ1_0) { es_mv_tq1_0_neon(w, cols, r0, r1, a->q8, y); return; }
+            if (t == GGML_TQ2_0) { es_mv_tq2_0_neon(w, cols, r0, r1, a->q8, y); return; }
         }
+        if (a->q80 && !getenv_cached_no_lbneon() && es_mv_lowbit_neon(t, w, cols, r0, r1, a->q80, y)) return;
     }
 #endif
     if (a->q80 && lowbit_ok(t)) {

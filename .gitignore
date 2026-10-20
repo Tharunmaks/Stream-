@@ -29,3 +29,4 @@ es_graft
 *.esfeat.rows
 *.esgraft
 *.esgraft.*
+es_fmtbench

@@ -49,6 +49,9 @@ es_serve: tools/es_serve.c tools/es_json.h $(CORE) $(ENGINE) es_q2k_neon.o es_qu
 es_mtest: tools/es_mtest.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_mtest.c $(CORE) src/es_quant.c es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 
+es_fmtbench: tools/es_fmtbench.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_fmtbench.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
+
 es_qtest: tools/es_qtest.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_qtest.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.c es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 

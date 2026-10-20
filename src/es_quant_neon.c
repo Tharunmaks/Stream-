@@ -342,6 +342,242 @@ static void q6K_multi(const uint8_t *w, int cols, int r0, int r1, const es_act *
         }
     }
 }
+/* ---- ternary formats (TQ1_0, TQ2_0) against Q8_K activations: digit u in 0..2 for the value u - 1, so sum(u a) - sum(a) ---- */
+void es_mv_tq2_0_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 66; const uint8x16_t m3 = vdupq_n_u8(3);
+    for (int r = r0; r < r1; r++) {
+        const uint8_t *x = w + rb * r; float s = 0;
+        for (int b = 0; b < nb; b++, x += 66) {
+            const int8_t *q8 = y[b].qs; int32x4_t acc = vdupq_n_s32(0); int ys = 0;
+            for (int g = 0; g < 16; g++) ys += y[b].bsums[g];
+            for (int j = 0; j < 64; j += 32) {
+                const uint8x16_t qa = vld1q_u8(x + j), qb = vld1q_u8(x + j + 16);
+                for (int l = 0; l < 4; l++, q8 += 32) {
+                    const int sh = 2 * l;
+                    const uint8x16_t ua = vandq_u8(vshlq_u8(qa, vdupq_n_s8((int8_t)-sh)), m3), ub = vandq_u8(vshlq_u8(qb, vdupq_n_s8((int8_t)-sh)), m3);
+                    acc = vdotq_s32(acc, vreinterpretq_s8_u8(ua), vld1q_s8(q8));
+                    acc = vdotq_s32(acc, vreinterpretq_s8_u8(ub), vld1q_s8(q8 + 16));
+                }
+            }
+            s += y[b].d * es_fp16_to_fp32(*(const uint16_t *)(x + 64)) * (float)(hsum(acc) - ys);
+        }
+        out[r] = s;
+    }
+}
+/* digit k of each byte q: ((q * 3^k mod 256) * 3) >> 8 */
+static inline uint8x16_t tq1_digit(uint8x16_t x, uint8_t c) {
+    const uint8x16_t q = vmulq_u8(x, vdupq_n_u8(c));
+    return vcombine_u8(vshrn_n_u16(vmull_u8(vget_low_u8(q), vdup_n_u8(3)), 8), vshrn_n_u16(vmull_high_u8(q, vdupq_n_u8(3)), 8));
+}
+void es_mv_tq1_0_neon(const uint8_t *w, int cols, int r0, int r1, const es_block_q8_K *y, float *out) {
+    static const uint8_t pow3[5] = {1, 3, 9, 27, 81};
+    const int nb = cols / 256; const size_t rb = (size_t)nb * 54;
+    for (int r = r0; r < r1; r++) {
+        const uint8_t *x = w + rb * r; float s = 0;
+        for (int b = 0; b < nb; b++, x += 54) {
+            const int8_t *q8 = y[b].qs; int32x4_t acc = vdupq_n_s32(0); int ys = 0, tail = 0;
+            for (int g = 0; g < 16; g++) ys += y[b].bsums[g];
+            const uint8x16_t qa = vld1q_u8(x), qb = vld1q_u8(x + 16), qc = vld1q_u8(x + 32);
+            for (int k = 0; k < 5; k++) {
+                acc = vdotq_s32(acc, vreinterpretq_s8_u8(tq1_digit(qa, pow3[k])), vld1q_s8(q8 + 32 * k));
+                acc = vdotq_s32(acc, vreinterpretq_s8_u8(tq1_digit(qb, pow3[k])), vld1q_s8(q8 + 32 * k + 16));
+                acc = vdotq_s32(acc, vreinterpretq_s8_u8(tq1_digit(qc, pow3[k])), vld1q_s8(q8 + 160 + 16 * k));
+            }
+            for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++) tail += ((((uint16_t)(uint8_t)(x[48 + j] * pow3[k])) * 3) >> 8) * q8[240 + 4 * k + j];
+            s += y[b].d * es_fp16_to_fp32(*(const uint16_t *)(x + 52)) * (float)(hsum(acc) + tail - ys);
+        }
+        out[r] = s;
+    }
+}
+
+/* ---- low-bit formats (IQ1/IQ2/IQ3/IQ4, MXFP4) against Q8_0 activations, one activation (generating) ----
+ * The same decoding as mv_lowbit_n in es_quant.c, but codebook rows and signs are assembled in registers, each 32 weights take two
+ * SDOT and one float multiply-add, each row's sum stays in a vector, and the activation sums for the IQ1 offsets are made once. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-const-variable"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#include "es_iq_tables.h"
+#pragma GCC diagnostic pop
+static const int8_t N_IQ4NL[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+#define N_IQ1S_DELTA 0.125f
+static uint64_t NSM[256];   /* sign bits -> bytes of 0xFF where negative */
+static void nsm_init(void) {
+    if (NSM[255]) return;
+    for (int b = 0; b < 256; b++) { uint64_t m = 0; for (int j = 0; j < 8; j++) if (b >> j & 1) m |= 0xFFull << (8 * j); NSM[b] = m; }
+}
+static inline float n_h2f(const uint8_t *p) { uint16_t h; memcpy(&h, p, 2); return es_fp16_to_fp32(h); }
+static inline float n_e8m0_half(uint8_t x) { uint32_t bits = x < 2 ? (0x00200000u << x) : ((uint32_t)(x - 1) << 23); float f; memcpy(&f, &bits, 4); return f; }
+static inline int8x16_t g2(uint64_t a, uint64_t b) { return vcombine_s8(vcreate_s8(a), vcreate_s8(b)); }
+static inline int8x16_t sg2(uint64_t a, uint64_t b, uint8_t sa, uint8_t sb) {   /* two positive codebook rows with their 8 sign bits each */
+    const int8x16_t m = g2(NSM[sa], NSM[sb]);
+    return vsubq_s8(veorq_s8(g2(a, b), m), m);
+}
+static inline int8x16_t lut16(const int8_t *lut, uint8x16_t idx) { return vqtbl1q_s8(vld1q_s8(lut), idx); }
+#define NACC(w0, w1, lo, hi) do { const int32x4_t a_ = vdotq_s32(vdupq_n_s32(0), (w0), vld1q_s8(A->qs)), b_ = vdotq_s32(vdupq_n_s32(0), (w1), vld1q_s8(A->qs + 16)); \
+    acc = vfmaq_n_f32(acc, vcvtq_f32_s32(a_), (lo)); acc = vfmaq_n_f32(acc, vcvtq_f32_s32(b_), (hi)); } while (0)
+static int nasum8(const int8_t *a) { int s = 0; for (int i = 0; i < 8; i++) s += a[i]; return s; }
+int es_mv_lowbit_neon(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_blk_q80 *y, float *out) {
+    if (!(t == GGML_IQ2_XXS || t == GGML_IQ2_XS || t == GGML_IQ2_S || t == GGML_IQ3_XXS || t == GGML_IQ3_S || t == GGML_IQ1_S || t == GGML_IQ1_M ||
+          t == GGML_IQ4_NL || t == GGML_IQ4_XS || t == GGML_MXFP4 || t == GGML_IQ1_XS || t == GGML_IQ1_XXS || t == GGML_IQ1_XXXS)) return 0;
+    const size_t rb = es_row_bytes(t, cols);
+    static _Thread_local int *S8; static _Thread_local int S8CAP;
+    const int iq1 = t == GGML_IQ1_S || t == GGML_IQ1_M || t == GGML_IQ1_XS || t == GGML_IQ1_XXS || t == GGML_IQ1_XXXS;
+    if (iq1) {
+        if (S8CAP < cols / 8) { free(S8); S8 = malloc(sizeof(int) * (size_t)(cols / 8)); S8CAP = S8 ? cols / 8 : 0; if (!S8) return 0; }
+        for (int g = 0; g < cols / 8; g++) S8[g] = nasum8(y[g / 4].qs + 8 * (g % 4));
+    }
+    nsm_init();
+    const uint8x16_t m15 = vdupq_n_u8(15);
+    for (int r = r0; r < r1; r++) {
+        const uint8_t *p = w + rb * (size_t)r;
+        float32x4_t acc = vdupq_n_f32(0); float sd = 0;
+        const es_blk_q80 *A;
+        switch (t) {
+        case GGML_IQ1_XS: case GGML_IQ1_XXS: case GGML_IQ1_XXXS: {
+            const int bs = t == GGML_IQ1_XS ? 46 : t == GGML_IQ1_XXS ? 42 : 38;
+            for (int i = 0; i < cols / 256; i++, p += bs) {
+                const float d = n_h2f(p);
+                for (int ib = 0; ib < 8; ib++) {
+                    const uint8_t *qs = p + 2 + 4 * ib; int nib; uint64_t g[4];
+                    if (t == GGML_IQ1_XXS) { const int h = p[34 + ib]; for (int l = 0; l < 4; l++) g[l] = ES_IQ1XXS_GRID[qs[l] | (((h >> l) & 1) << 8)]; nib = ((h >> 4) & 7) | ((h >> 4) & 8); }
+                    else if (t == GGML_IQ1_XS) { const int h = p[34 + ib]; for (int l = 0; l < 4; l++) g[l] = ES_IQ1XS_GRID[qs[l] | (((h >> 2 * l) & 3) << 8)]; nib = (p[42 + ib / 2] >> (4 * (ib & 1))) & 0xf; }
+                    else { for (int l = 0; l < 4; l++) g[l] = ES_IQ1XXXS_GRID[qs[l]]; nib = (p[34 + ib / 2] >> (4 * (ib & 1))) & 0xf; }
+                    const float delta = nib & 8 ? -N_IQ1S_DELTA : N_IQ1S_DELTA;
+                    A = &y[i * 8 + ib]; const float f = d * (float)(2 * (nib & 7) + 1) * A->d; const int *s8 = S8 + 4 * (i * 8 + ib);
+                    NACC(g2(g[0], g[1]), g2(g[2], g[3]), f, f); sd += f * delta * (float)(s8[0] + s8[1] + s8[2] + s8[3]);
+                }
+            }
+            break;
+        }
+        case GGML_MXFP4:
+            for (int b = 0; b < cols / 32; b++, p += 17) {
+                const uint8x16_t x = vld1q_u8(p + 1); A = &y[b]; const float f = n_e8m0_half(p[0]) * A->d;
+                NACC(lut16(ES_KVALUES_FP4, vandq_u8(x, m15)), lut16(ES_KVALUES_FP4, vshrq_n_u8(x, 4)), f, f);
+            }
+            break;
+        case GGML_IQ4_NL:
+            for (int b = 0; b < cols / 32; b++, p += 18) {
+                const uint8x16_t x = vld1q_u8(p + 2); A = &y[b]; const float f = n_h2f(p) * A->d;
+                NACC(lut16(N_IQ4NL, vandq_u8(x, m15)), lut16(N_IQ4NL, vshrq_n_u8(x, 4)), f, f);
+            }
+            break;
+        case GGML_IQ4_XS:
+            for (int i = 0; i < cols / 256; i++, p += 136) {
+                uint16_t sh; memcpy(&sh, p + 2, 2);
+                const float d = n_h2f(p);
+                const uint8_t *sl = p + 4, *qs = p + 8;
+                for (int ib = 0; ib < 8; ib++, qs += 16) {
+                    const int ls = ((sl[ib / 2] >> (4 * (ib % 2))) & 0xf) | (((sh >> (2 * ib)) & 3) << 4);
+                    const uint8x16_t x = vld1q_u8(qs); A = &y[i * 8 + ib]; const float f = d * (float)(ls - 32) * A->d;
+                    NACC(lut16(N_IQ4NL, vandq_u8(x, m15)), lut16(N_IQ4NL, vshrq_n_u8(x, 4)), f, f);
+                }
+            }
+            break;
+        case GGML_IQ2_XXS:
+            for (int i = 0; i < cols / 256; i++, p += 66) {
+                const float d = n_h2f(p);
+                for (int ib = 0; ib < 8; ib++) {
+                    uint32_t a2[2]; memcpy(a2, p + 2 + 8 * ib, 8);
+                    const uint8_t *a8 = (const uint8_t *)a2;
+                    A = &y[i * 8 + ib]; const float f = d * (0.5f + (float)(a2[1] >> 28)) * 0.25f * A->d;
+                    NACC(sg2(ES_IQ2XXS_GRID[a8[0]], ES_IQ2XXS_GRID[a8[1]], ES_KSIGNS_IQ2XS[a2[1] & 127], ES_KSIGNS_IQ2XS[(a2[1] >> 7) & 127]),
+                         sg2(ES_IQ2XXS_GRID[a8[2]], ES_IQ2XXS_GRID[a8[3]], ES_KSIGNS_IQ2XS[(a2[1] >> 14) & 127], ES_KSIGNS_IQ2XS[(a2[1] >> 21) & 127]), f, f);
+                }
+            }
+            break;
+        case GGML_IQ2_XS:
+            for (int i = 0; i < cols / 256; i++, p += 74) {
+                const float d = n_h2f(p);
+                uint16_t qs[32]; memcpy(qs, p + 2, 64);
+                const uint8_t *sc = p + 66;
+                for (int ib = 0; ib < 8; ib++) {
+                    const uint16_t *e = qs + 4 * ib;
+                    A = &y[i * 8 + ib]; const float f = d * 0.25f * A->d;
+                    NACC(sg2(ES_IQ2XS_GRID[e[0] & 511], ES_IQ2XS_GRID[e[1] & 511], ES_KSIGNS_IQ2XS[e[0] >> 9], ES_KSIGNS_IQ2XS[e[1] >> 9]),
+                         sg2(ES_IQ2XS_GRID[e[2] & 511], ES_IQ2XS_GRID[e[3] & 511], ES_KSIGNS_IQ2XS[e[2] >> 9], ES_KSIGNS_IQ2XS[e[3] >> 9]),
+                         f * (0.5f + (sc[ib] & 0xf)), f * (0.5f + (sc[ib] >> 4)));
+                }
+            }
+            break;
+        case GGML_IQ2_S:
+            for (int i = 0; i < cols / 256; i++, p += 82) {
+                const float d = n_h2f(p);
+                const uint8_t *qs = p + 2, *signs = p + 34, *qh = p + 66, *sc = p + 74;
+                for (int ib = 0; ib < 8; ib++, qs += 4, signs += 4) {
+                    const int hh = qh[ib];
+                    A = &y[i * 8 + ib]; const float f = d * 0.25f * A->d;
+                    NACC(sg2(ES_IQ2S_GRID[qs[0] | ((hh << 8) & 0x300)], ES_IQ2S_GRID[qs[1] | ((hh << 6) & 0x300)], signs[0], signs[1]),
+                         sg2(ES_IQ2S_GRID[qs[2] | ((hh << 4) & 0x300)], ES_IQ2S_GRID[qs[3] | ((hh << 2) & 0x300)], signs[2], signs[3]),
+                         f * (0.5f + (sc[ib] & 0xf)), f * (0.5f + (sc[ib] >> 4)));
+                }
+            }
+            break;
+        case GGML_IQ3_XXS:
+            for (int i = 0; i < cols / 256; i++, p += 98) {
+                const float d = n_h2f(p);
+                const uint8_t *qs = p + 2, *ss = p + 66;
+                for (int ib = 0; ib < 8; ib++, qs += 8) {
+                    uint32_t a2; memcpy(&a2, ss + 4 * ib, 4);
+#define G3X(j) ((uint64_t)ES_IQ3XXS_GRID[qs[2 * (j)]] | (uint64_t)ES_IQ3XXS_GRID[qs[2 * (j) + 1]] << 32)
+                    A = &y[i * 8 + ib]; const float f = d * (0.5f + (float)(a2 >> 28)) * 0.5f * A->d;
+                    NACC(sg2(G3X(0), G3X(1), ES_KSIGNS_IQ2XS[a2 & 127], ES_KSIGNS_IQ2XS[(a2 >> 7) & 127]),
+                         sg2(G3X(2), G3X(3), ES_KSIGNS_IQ2XS[(a2 >> 14) & 127], ES_KSIGNS_IQ2XS[(a2 >> 21) & 127]), f, f);
+#undef G3X
+                }
+            }
+            break;
+        case GGML_IQ3_S:
+            for (int i = 0; i < cols / 256; i++, p += 110) {
+                const float d = n_h2f(p);
+                const uint8_t *qs = p + 2, *qh = p + 66, *signs = p + 74, *sc = p + 106;
+                for (int ib = 0; ib < 8; ib++, qs += 8, signs += 4) {
+                    const int h = ib & 1, hb = qh[ib];
+#define G3S(l) ((uint64_t)ES_IQ3S_GRID[qs[2 * (l)] | ((hb << (8 - 2 * (l))) & 256)] | (uint64_t)ES_IQ3S_GRID[qs[2 * (l) + 1] | ((hb << (7 - 2 * (l))) & 256)] << 32)
+                    A = &y[i * 8 + ib]; const float f = d * (float)(1 + 2 * (h ? sc[ib / 2] >> 4 : sc[ib / 2] & 0xf)) * A->d;
+                    NACC(sg2(G3S(0), G3S(1), signs[0], signs[1]), sg2(G3S(2), G3S(3), signs[2], signs[3]), f, f);
+#undef G3S
+                }
+            }
+            break;
+        case GGML_IQ1_S:
+            for (int i = 0; i < cols / 256; i++, p += 50) {
+                const float d = n_h2f(p);
+                const uint8_t *qs = p + 2;
+                uint16_t qh[8]; memcpy(qh, p + 34, 16);
+                for (int ib = 0; ib < 8; ib++, qs += 4) {
+                    const int hq = qh[ib];
+                    const float delta = hq & 0x8000 ? -N_IQ1S_DELTA : N_IQ1S_DELTA;
+                    A = &y[i * 8 + ib]; const float f = d * (float)(2 * ((hq >> 12) & 7) + 1) * A->d; const int *s8 = S8 + 4 * (i * 8 + ib);
+                    NACC(g2(ES_IQ1S_GRID[qs[0] | ((hq & 7) << 8)], ES_IQ1S_GRID[qs[1] | ((hq >> 3 & 7) << 8)]),
+                         g2(ES_IQ1S_GRID[qs[2] | ((hq >> 6 & 7) << 8)], ES_IQ1S_GRID[qs[3] | ((hq >> 9 & 7) << 8)]), f, f);
+                    sd += f * delta * (float)(s8[0] + s8[1] + s8[2] + s8[3]);
+                }
+            }
+            break;
+        case GGML_IQ1_M:
+            for (int i = 0; i < cols / 256; i++, p += 56) {
+                const uint8_t *qs = p, *qh = p + 32;
+                uint16_t sc[4]; memcpy(sc, p + 48, 8);
+                const float d = es_fp16_to_fp32((uint16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000)));
+                for (int ib = 0; ib < 8; ib++, qs += 4, qh += 2) {
+                    const float d0 = qh[0] & 0x08 ? -N_IQ1S_DELTA : N_IQ1S_DELTA, d1 = qh[0] & 0x80 ? -N_IQ1S_DELTA : N_IQ1S_DELTA;
+                    const float d2 = qh[1] & 0x08 ? -N_IQ1S_DELTA : N_IQ1S_DELTA, d3 = qh[1] & 0x80 ? -N_IQ1S_DELTA : N_IQ1S_DELTA;
+                    const float dl1 = (float)(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1), dl2 = (float)(2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+                    A = &y[i * 8 + ib]; const float f = A->d * d; const int *s8 = S8 + 4 * (i * 8 + ib);
+                    NACC(g2(ES_IQ1S_GRID[qs[0] | ((qh[0] << 8) & 0x700)], ES_IQ1S_GRID[qs[1] | ((qh[0] << 4) & 0x700)]),
+                         g2(ES_IQ1S_GRID[qs[2] | ((qh[1] << 8) & 0x700)], ES_IQ1S_GRID[qs[3] | ((qh[1] << 4) & 0x700)]), f * dl1, f * dl2);
+                    sd += f * (dl1 * (d0 * (float)s8[0] + d1 * (float)s8[1]) + dl2 * (d2 * (float)s8[2] + d3 * (float)s8[3]));
+                }
+            }
+            break;
+        default: return 0;
+        }
+        out[r] = vaddvq_f32(acc) + sd;
+    }
+    return 1;
+}
+#undef NACC
+
 /* 1 if handled here (the caller falls back to one activation at a time otherwise) */
 int es_mv_multi_neon(uint32_t t, const uint8_t *w, int cols, int r0, int r1, const es_act *A, int na, float *Y, size_t ys) {
     int q80 = 1, q8 = 1;
