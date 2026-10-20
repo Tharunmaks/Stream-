@@ -82,6 +82,8 @@ long es_rss_mb(void);
 /* ---- Graft (es_graft.h): a small trained network on top of the frozen model ---- */
 /* load a graft trained for this model (NULL or "" removes it); 0 on success */
 int  es_engine_set_graft(const char *path, char *err, size_t cap);
+/* LoRA trained by es_lora (NAME.eslora); NULL removes it */
+int  es_engine_set_lora(const char *path, char *err, size_t cap);
 /* graft training: the base model's final hidden state and scores for every wanted position of one sequence */
 int  es_engine_features(const int32_t *ids, int n, const uint8_t *want, void (*cb)(int pos, const float *x, const float *logits, void *ud), void *ud);
 int  es_engine_chat_example(const es_msg *m, int n, const char *resp, int32_t *ids, int cap, int *start);

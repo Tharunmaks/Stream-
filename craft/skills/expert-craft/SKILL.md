@@ -21,6 +21,7 @@ Projects live in `~/expertcraft/<name>` (set `EXPERTCRAFT_HOME` to change; the t
 | The user wants | Route |
 |---|---|
 | a smart model that knows *their* notes, facts, names, wording or style (a 7B, 70B or 200B model "trained on my data") | **Graft** (section G): a big open model stays frozen, a small graft learns their data |
+| to fine-tune the model itself (new skills, style, a coder): exact gradients on the CPU | **LoRA** ([lora.md](lora.md)): `es_lora train`, then `es_chat --lora`. Measured -32% held-out perplexity where the graft got -17% and MeZO -1.6%; slower per step than the graft, needs dense llama/qwen2/qwen3 |
 | to change the model's layers themselves without backprop (MeZO), or to train together across several devices | **zo adapters** ([zo.md](zo.md)): works and merges across devices from 16-byte step logs, but measured about 10x slower to learn than the graft; offer it as an experiment, not as the main route |
 | to build a model from scratch, or to experiment with training itself | **Flash Experts** (sections 1-7) |
 | a dense model trained on a free GPU (Colab, Kaggle) | Other routes, at the end |

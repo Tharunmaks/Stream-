@@ -36,3 +36,4 @@ __pycache__/
 expertcloud.db*
 clouddata.db*
 plans.json
+es_lora

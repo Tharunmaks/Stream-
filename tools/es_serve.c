@@ -534,7 +534,7 @@ static void usage(void) {
 int main(int argc, char **argv) {
     es_engine_opts o = {.gguf_fd = -1, .ctx = 4096, .cache_mb = 0, .lookahead = 1, .warm = 1};
     int port = 8080;
-    const char *graft = NULL, *adapter = NULL;
+    const char *graft = NULL, *adapter = NULL, *lora = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i]; const char *nx = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--")) continue;                         /* old style: es_chat options after -- */
@@ -542,6 +542,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--key") && nx) { snprintf(g_key, sizeof g_key, "%s", nx); i++; }
         else if (!strcmp(a, "--graft") && nx) { graft = nx; i++; }       /* trained with es_graft: runs on top of the frozen model */
         else if (!strcmp(a, "--adapter") && nx) { adapter = nx; i++; }
+        else if (!strcmp(a, "--lora") && nx) { lora = nx; i++; }        /* trained with es_lora */
         else if (!strcmp(a, "--cache-route") && nx) { o.cache_route = (float)atof(nx); i++; }   /* prefer experts already in RAM */
         else if (!strcmp(a, "--experts") && nx) { o.topk = atoi(nx); i++; }                     /* experts per token */   /* trained with es_graft zo: inside every layer */
         else if (!strcmp(a, "--cors") && nx) { snprintf(g_cors + strlen(g_cors), sizeof g_cors - strlen(g_cors), ",%s", nx); i++; }
@@ -578,6 +579,7 @@ int main(int argc, char **argv) {
     char err[512];
     if (es_engine_init(&o, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
     if (adapter && es_engine_adapter_load(adapter, NULL, NULL, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
+    if (lora && es_engine_set_lora(lora, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
     if (graft && es_engine_set_graft(graft, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
     es_engine_get_info(&g_info); g_ctx = g_info.ctx;
     snprintf(g_model, sizeof g_model, "%s%s%s", g_info.name, adapter ? " + adapter" : "", graft ? " + graft" : "");

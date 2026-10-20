@@ -100,6 +100,12 @@ model. Every step is 16 bytes (seed, slope, step size), so devices can merge the
 (`es_graft zo-merge`, bit-identical). Measured honestly: on SmolLM2-135M it lowered held-out perplexity by 1.9% in 17 minutes (1.6% after
 83 minutes with the safe default, levelling off after about 1,000 steps), where the graft gave 17.3% in 74 seconds. Details: [`craft/skills/expert-craft/zo.md`](craft/skills/expert-craft/zo.md).
 
+**LoRA with exact gradients** (`es_lora`): fine-tunes q, k, v, o, gate, up and down of every layer of a frozen GGUF model on the
+CPU, streaming the model layer by layer (forward, then recompute and backward per layer) so it needs about one layer's memory.
+Gradients checked against finite differences; the trainer matches the engine to 1e-4. On the TinyStories benchmark above:
+held-out perplexity 12.29 -> 8.31 (-32%) in 18 minutes, against -17% for the graft and -1.6% for MeZO. Then
+`es_chat -g MODEL.gguf --lora NAME.eslora`, or export for llama.cpp. Details: [`craft/skills/expert-craft/lora.md`](craft/skills/expert-craft/lora.md).
+
 **Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
 Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
 `curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.

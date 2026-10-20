@@ -941,11 +941,25 @@ static void moe_n(int l, int N) {
     }
 }
 
+/* ---------------- LoRA (es_lora train): y += (alpha / rank) B (A x) on q k v o gate up down of dense layers ----------------
+ * Trained with exact gradients by es_lora; the numbers are the trainer's, laid out per layer and target: A (rank x in), B (out x rank). */
+static int LO_ON, LO_R, CUR_L = -1; static float LO_S, *LO_P; static size_t LO_N, *LO_OFF;
+static void lora_add(int l, int t, const float *x, float *y, int in, int out) {
+    const size_t a = LO_OFF[((size_t)l * 7 + t) * 2];
+    if (a == SIZE_MAX) return;
+    const float *A = LO_P + a, *B = LO_P + LO_OFF[((size_t)l * 7 + t) * 2 + 1];
+    float z[256];
+    for (int k = 0; k < LO_R; k++) { const float *ak = A + (size_t)k * in; float s = 0; for (int i = 0; i < in; i++) s += ak[i] * x[i]; z[k] = s * LO_S; }
+    for (int o = 0; o < out; o++) { const float *bo = B + (size_t)o * LO_R; float s = 0; for (int k = 0; k < LO_R; k++) s += bo[k] * z[k]; y[o] += s; }
+}
+
 /* dense SwiGLU FFN for N tokens: input prepared in acts, output out (stride n_embd) */
 static void dense_n(const W *wg, const W *wu, const W *wd, const es_act *acts, int N, float *out) {
     const int ff = wg->rows;
     jobn(wg, acts, BGU, (size_t)2 * ff, N); jobn(wu, acts, BGU + ff, (size_t)2 * ff, N);
     run_jobs();
+    const int lo = LO_ON && CUR_L >= 0 && wg == &M.L[CUR_L].ffn_gate;   /* LoRA on the layer's own FFN, not a shared expert */
+    if (lo) for (int i = 0; i < N; i++) { lora_add(CUR_L, 4, acts[i].x, BGU + (size_t)i * 2 * ff, M.n_embd, ff); lora_add(CUR_L, 5, acts[i].x, BGU + (size_t)i * 2 * ff + ff, M.n_embd, ff); }
     for (int i = 0; i < N; i++) {
         const float *g = BGU + (size_t)i * 2 * ff; float *h = BH + (size_t)i * ff;
         if (M.situ_b > 0) for (int j = 0; j < ff; j++) h[j] = act_situ(g[j], g[ff + j]);
@@ -954,6 +968,7 @@ static void dense_n(const W *wg, const W *wu, const W *wd, const es_act *acts, i
     }
     jobn(wd, BACT2, out, (size_t)M.n_embd, N);
     run_jobs();
+    if (lo) for (int i = 0; i < N; i++) lora_add(CUR_L, 6, BACT2[i].x, out + (size_t)i * M.n_embd, ff, M.n_embd);
 }
 
 /* attention for N tokens at positions pos0.. : input BXN prepared in BACT, output BTMP */
@@ -965,6 +980,10 @@ static void attention_n(int l, int N, int pos0) {
         const int qrow = M.attn_gated ? 2 * qd : qd;
         jobn(&L->q, BACT, BQ, (size_t)qrow, N); jobn(&L->k, BACT, BKV, (size_t)kvd, N); jobn(&L->v, BACT, BV2, (size_t)kvd, N);
         run_jobs();
+        if (LO_ON)
+            for (int i = 0; i < N; i++) {
+                lora_add(l, 0, BACT[i].x, BQ + (size_t)i * qrow, n, qd); lora_add(l, 1, BACT[i].x, BKV + (size_t)i * kvd, n, kvd); lora_add(l, 2, BACT[i].x, BV2 + (size_t)i * kvd, n, kvd);
+            }
         if (M.attn_gated)   /* split [q | gate] per head: gates aside, queries packed */
             for (int i = 0; i < N; i++) {
                 const float *src = BQ + (size_t)i * qrow;
@@ -1035,6 +1054,7 @@ static void attention_n(int l, int N, int pos0) {
     for (int i = 0; i < N; i++) prep(&BACT2[i], BATTN + (size_t)i * M.od, M.od);
     jobn(&L->o, BACT2, BTMP, (size_t)n, N);
     run_jobs();
+    if (LO_ON && !M.mla) for (int i = 0; i < N; i++) lora_add(l, 3, BACT2[i].x, BTMP + (size_t)i * n, M.od, n);
     for (int i = 0; i < N; i++) add_bias(BTMP + (size_t)i * n, &L->bo, n);
 }
 
@@ -1258,6 +1278,7 @@ static int res_banked(int l) { return M.res_bs > 0 ? (l + M.res_bs - 1) / M.res_
 static void layer_n(int l, int N, int pos0) {
     const int n = M.n_embd;
     layer *L = &M.L[l];
+    CUR_L = l;
     const int k3 = M.kind == AR_K3, nb = k3 ? res_banked(l) : 0, bank = k3 && M.res_bs > 0 && l % M.res_bs == 0;
     arena_reset();
     for (int i = 0; i < N; i++) {
@@ -2434,6 +2455,7 @@ static void df_init(void) {
     h = fnv(h, shape, sizeof shape); h = fnv(h, INFO.name, strlen(INFO.name)); h = fnv(h, &G.file_size, sizeof G.file_size);
     for (uint64_t i = 0; i < G.n_tensors; i++) { h = fnv(h, G.t[i].name, strlen(G.t[i].name)); h = fnv(h, &G.t[i].offset, sizeof G.t[i].offset); }
     if (AD_ON) h = fnv(h, AD, sizeof(float) * (size_t)M.n_layer * 2 * AD_R * M.n_embd);   /* an adapter changes every row */
+    if (LO_ON) h = fnv(h, LO_P, sizeof(float) * LO_N);                                       /* so does a LoRA */
     FINGER = h;
     e = getenv("ES_KV_DIR");
     if (e) snprintf(DF_DIR, sizeof DF_DIR, "%s", e);
@@ -2896,4 +2918,37 @@ int es_engine_features_multi(int S, const int32_t *const *ids, const int *len, c
     free(H); free(off); free(kcs); free(vcs); free(ssms); free(convs);
     POS = 0; FIRST = 1; SNAP_POS = -1; ACCN = ACCI = 0;   /* the conversation's cache now holds sequence 0 */
     return ok ? 0 : -1;
+}
+
+/* LoRA from es_lora (ESLORA01); NULL or "" removes it */
+int es_engine_set_lora(const char *path, char *err, size_t cap) {
+    if (!path || !*path) { LO_ON = 0; free(LO_P); free(LO_OFF); LO_P = NULL; LO_OFF = NULL; es_engine_adapter_changed(); return 0; }
+    if (M.kind != AR_STD || M.mla || M.attn_gated) { snprintf(err, cap, "LoRA works on dense llama, qwen2 and qwen3 models"); return -1; }
+    for (int l = 0; l < M.n_layer; l++) if (M.L[l].moe || M.L[l].recr) { snprintf(err, cap, "LoRA works on dense models (this one has experts)"); return -1; }
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(err, cap, "cannot open %s", path); return -1; }
+    struct { char magic[8]; uint32_t version, n_layer, rank, mask; float alpha; uint32_t pad; uint64_t steps, fp, count; } h;
+    if (fread(&h, sizeof h, 1, f) != 1 || memcmp(h.magic, "ESLORA01", 8)) { fclose(f); snprintf(err, cap, "%s is not an ExpertStream LoRA", path); return -1; }
+    const int ff = M.L[0].ffn_gate.rows;
+    uint64_t fp = 1469598103934665603ull; const int v[] = {M.n_layer, M.n_embd, M.n_head, M.n_head_kv, M.head_dim, ff, M.n_vocab};
+    for (size_t i = 0; i < sizeof v / sizeof *v; i++) { fp ^= (uint64_t)v[i]; fp *= 1099511628211ull; }
+    for (const char *p = M.arch; *p; p++) { fp ^= (uint8_t)*p; fp *= 1099511628211ull; }
+    if (h.fp != fp || (int)h.n_layer != M.n_layer) { fclose(f); snprintf(err, cap, "%s was trained for a different model", path); return -1; }
+    if (h.rank < 1 || h.rank > 256) { fclose(f); snprintf(err, cap, "%s: rank %u is above 256", path, h.rank); return -1; }
+    size_t *off = malloc(sizeof(size_t) * (size_t)M.n_layer * 7 * 2), n = 0;
+    const int qd = M.n_head * M.head_dim, kvd = M.n_head_kv * M.head_dim;
+    const int in[7] = {M.n_embd, M.n_embd, M.n_embd, qd, M.n_embd, M.n_embd, ff}, out[7] = {qd, kvd, kvd, M.n_embd, ff, ff, M.n_embd};
+    for (int l = 0; l < M.n_layer; l++)
+        for (int t = 0; t < 7; t++) {
+            size_t *o = off + ((size_t)l * 7 + t) * 2;
+            if (!(h.mask >> t & 1)) { o[0] = o[1] = SIZE_MAX; continue; }
+            o[0] = n; n += (size_t)h.rank * in[t]; o[1] = n; n += (size_t)out[t] * h.rank;
+        }
+    float *p = malloc(sizeof(float) * (n ? n : 1));
+    if (n != h.count || !p || fread(p, sizeof(float), n, f) != n) { fclose(f); free(p); free(off); snprintf(err, cap, "%s is damaged", path); return -1; }
+    fclose(f);
+    free(LO_P); free(LO_OFF);
+    LO_P = p; LO_OFF = off; LO_N = n; LO_R = (int)h.rank; LO_S = h.alpha / (float)h.rank; LO_ON = 1;
+    es_engine_adapter_changed();   /* everything computed so far was without it */
+    return 0;
 }
