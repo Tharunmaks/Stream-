@@ -127,6 +127,7 @@ class Worker:
         self.ws = None
         self.send_lock = asyncio.Lock()
         self.last_tps = None
+        self.last_ping = None
 
     async def send(self, obj):
         async with self.send_lock:
@@ -138,15 +139,24 @@ class Worker:
                     active=self.engine.active(), ping_ms=ping_ms, tps=self.last_tps)
 
     async def heartbeat(self):
+        """Keeps the node listed as online. It never waits for a ping: on a phone that is busy answering, a ping can take
+        seconds, and a late heartbeat made the node look offline in the middle of an answer."""
+        while True:
+            try:
+                await self.send(dict(type="heartbeat", load=self.load(self.last_ping), models=self.engine.models(), capacity=self.args.slots))
+            except Exception:
+                return   # the connection is gone; session() reconnects
+            await asyncio.sleep(5)
+
+    async def pinger(self):
         while True:
             t0 = time.time()
             try:
-                pong = await self.ws.ping(); await asyncio.wait_for(pong, 10)
-                ping = round((time.time() - t0) * 1000, 1)
+                await asyncio.wait_for(await self.ws.ping(), 20)
+                self.last_ping = round((time.time() - t0) * 1000, 1)
             except Exception:
-                ping = None
-            await self.send(dict(type="heartbeat", load=self.load(ping), models=self.engine.models(), capacity=self.args.slots))
-            await asyncio.sleep(5)
+                self.last_ping = None
+            await asyncio.sleep(10)
 
     async def infer(self, msg):
         job = msg.get("job")
@@ -181,6 +191,7 @@ class Worker:
             await self.send(hello)
             print("joined %s as %s with %d model(s)" % (self.args.master, self.args.name, len(hello["models"])), flush=True)
             hb = asyncio.create_task(self.heartbeat())
+            pg = asyncio.create_task(self.pinger())
             try:
                 async for raw in ws:
                     try: msg = json.loads(raw)
@@ -193,7 +204,7 @@ class Worker:
                     elif t == "deploy": asyncio.create_task(self.deploy(msg))
                     elif t == "rejected": print("rejected by the gateway: %s" % msg.get("message"), flush=True); return False
             finally:
-                hb.cancel()
+                hb.cancel(); pg.cancel()
                 for task in self.tasks.values(): task.cancel()
         return True
 

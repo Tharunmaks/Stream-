@@ -59,18 +59,19 @@ are spread over two one-slot nodes.
 * **The engine is CPU-only.** GPU memory is reported for scheduling, not used.
 * Token Killer savings depend on the prompt: tidy prompts save little; duplicated or padded ones save a lot.
 
-## Easiest way: one command
+## Easiest way: the `cloud` command
 
 ```
-scripts/expertcloud.sh start      # gateway + a node on this device, in the background; prints the sign-in link
-scripts/expertcloud.sh status | link | logs | stop
+scripts/expertcloud.sh shortcut     # once: makes "cloud" work in new terminals
+cloud start                         # gateway + this device as a node, in the background, restarted if they crash
+cloud status                        # live: nodes online, speed, requests served
+cloud open                          # the dashboard link (signs you in)
+cloud logs | stop
 ```
-Options: `--lan` (let other devices connect), `--models DIR`, `--port N`, `--name NAME`, `--rotate` (new tokens).
+`cloud start --lan` lets other devices join; `--models DIR` picks the model folder (default `~/models`); `--rotate` makes new tokens.
 
-**Keeping it running on a phone.** Android freezes background apps, and Termux with them, so the node drops when you switch to the
-browser. `start` takes a Termux wake lock (needs the Termux:API app: `pkg install termux-api`) and detaches both processes from the
-terminal. Also, once: Android Settings > Apps > Termux > Battery > Unrestricted, and pull down Termux's notification to check it
-shows "wake lock held". Changing browser tabs never affects the server; only Android suspending Termux does.
+**On a phone:** Android freezes background apps, which stops Termux. `cloud start` takes a Termux wake lock (install the
+Termux:API app and run `pkg install termux-api`), and once: Android Settings > Apps > Termux > Battery > Unrestricted.
 
 ## Security
 

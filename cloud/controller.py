@@ -12,6 +12,7 @@ import json
 import time
 import uuid
 
+NODE_TIMEOUT = 60.0         # heartbeats come every 5 s; a phone under load can be slow, so a node counts as online for a minute
 FIRST_TOKEN_TIMEOUT = 600.0     # a cold big model can take minutes to load its core; a dropped node fails over at once
 ALIASES = {"auto", "expertstream-fast", "expertstream-coder"}
 
@@ -89,7 +90,7 @@ class Controller:
 
     def online(self):
         now = time.time()
-        return [n for n in self.nodes.values() if now - n.last_seen < 20]
+        return [n for n in self.nodes.values() if now - n.last_seen < NODE_TIMEOUT]
 
     def models(self):
         seen = {}
