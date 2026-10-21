@@ -116,6 +116,7 @@ struct es_tm {
     /* buffers for up to Tcap tokens */
     int Tcap;
     float *X, *Xn, *Q, *K, *Vv, *Qp, *Kp, *Att, *Lse, *Xm, *Xn2, *G, *U, *Hh, *r1, *r2, *qr, *kr, *Z[ES_LT_N];
+    float *keep; size_t keep_cap;   /* per-layer forward intermediates (no recompute in the backward pass) */
     float *dX, *dXn, *dQ, *dK, *dV, *dAtt, *dH, *dZ;
     float *ck; size_t ck_cap;                 /* saved layer inputs */
     float *cosr, *sinr; int rope_cap;
@@ -855,6 +856,33 @@ static void layer_bwd(es_tm *m, const batch *b, int l, const float *Xin, float *
     pool_run(&m->P, items, norm1_bwd_job, &c);
 }
 
+
+/* ---------------------------------------------------------------- keep activations instead of recomputing */
+#define NKB (17 + ES_LT_N)
+static float **kb_ptr(es_tm *m, int i) {
+    float **p[17] = {&m->Xn, &m->Q, &m->K, &m->Vv, &m->Qp, &m->Kp, &m->Att, &m->Lse, &m->Xm, &m->Xn2, &m->G, &m->U, &m->Hh, &m->r1, &m->r2, &m->qr, &m->kr};
+    return i < 17 ? p[i] : &m->Z[i - 17];
+}
+static size_t kb_w(const es_tm *m, int i) {   /* floats per token of buffer i */
+    const size_t rk = m->rank > 0 ? (size_t)m->rank : 1;
+    const size_t w[17] = {m->d, m->qd, m->kvd, m->kvd, m->qd, m->kvd, m->qd, m->H, m->d, m->d, m->ff, m->ff, m->ff, 1, 1, m->H, m->KV};
+    return i < 17 ? w[i] : rk;
+}
+static size_t kb_layer(const es_tm *m, int T) { size_t n = 0; for (int i = 0; i < NKB; i++) n += kb_w(m, i) * (size_t)T; return n; }
+/* point the layer buffers at layer l's slice of m->keep (orig holds the normal buffers) */
+static void kb_set(es_tm *m, int l, int T, float **orig) {
+    float *base = l < 0 ? NULL : m->keep + (size_t)l * kb_layer(m, T);
+    for (int i = 0; i < NKB; i++) { *kb_ptr(m, i) = l < 0 ? orig[i] : base; if (base) base += kb_w(m, i) * (size_t)T; }
+}
+static int keep_on(es_tm *m, int T) {
+    static int env = -1; if (env < 0) { const char *e = getenv("ES_LORA_RECOMPUTE"); env = !(e && atoi(e)); }
+    if (!env) return 0;
+    const size_t need = kb_layer(m, T) * (size_t)m->L;
+    if (need > m->keep_cap) {
+        free(m->keep); m->keep = malloc(sizeof(float) * need); m->keep_cap = m->keep ? need : 0;
+    }
+    return m->keep != NULL;
+}
 /* ---------------------------------------------------------------- loss */
 typedef struct { es_tm *m; int n; const int32_t *tgt; float gscale; double *loss; int backward; float *logits_out; } ce_ctx;
 static void ce_job(void *c_, int item, int tid) {
@@ -897,7 +925,13 @@ static double run(es_tm *m, int S, const int32_t *const *ids, const int *len, co
         const int32_t id = ids[s][p] < 0 || ids[s][p] >= m->V ? 0 : ids[s][p];
         es_dequant_row(m->embd.type, m->embd.data + m->embd.rb * (size_t)id, X0 + (size_t)(b.base[s] + p) * m->d, m->d);
     }
-    for (int l = 0; l < m->L; l++) layer_fwd(m, &b, l, m->ck + (size_t)l * T * m->d, m->ck + (size_t)(l + 1) * T * m->d);
+    float *orig[NKB]; for (int i = 0; i < NKB; i++) orig[i] = *kb_ptr(m, i);
+    const int keep = backward && keep_on(m, T);
+    for (int l = 0; l < m->L; l++) {
+        if (keep) kb_set(m, l, T, orig);
+        layer_fwd(m, &b, l, m->ck + (size_t)l * T * m->d, m->ck + (size_t)(l + 1) * T * m->d);
+    }
+    if (keep) kb_set(m, -1, T, orig);
     const float *XL = m->ck + (size_t)m->L * T * m->d;
     /* loss, in tiles of learned positions; the backward pass of the output layer goes straight into dX */
     double loss = 0;
@@ -922,9 +956,11 @@ static double run(es_tm *m, int S, const int32_t *const *ids, const int *len, co
     if (backward)
         for (int l = m->L - 1; l >= 0; l--) {
             const float *Xin = m->ck + (size_t)l * T * m->d;
-            layer_fwd(m, &b, l, Xin, m->X);   /* recompute: refills every intermediate of this layer */
+            if (keep) kb_set(m, l, T, orig);   /* this layer's saved intermediates */
+            else layer_fwd(m, &b, l, Xin, m->X);   /* recompute: refills every intermediate of this layer */
             layer_bwd(m, &b, l, Xin, m->dX);
         }
+    if (keep) kb_set(m, -1, T, orig);
     if (count) { long c = 0; for (int i = 0; i < nl; i++) c += tgt[i] >= 0; *count = c; }
     free(rows); free(tgt); free(b.base); free(b.pos);
     return loss;
