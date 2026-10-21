@@ -1,0 +1,72 @@
+{
+ "hardware": {
+  "cpu_model": "Intel(R) Xeon(R) Processor",
+  "logical_cores": 8,
+  "numa_nodes": 1,
+  "ram_gb": 15.64,
+  "disk_free_gb": 31.1,
+  "amx_bf16": true,
+  "amx_int8": true,
+  "avx512f": true,
+  "avx512_bf16": true,
+  "avx2": true,
+  "neon": false,
+  "arm_dotprod": false,
+  "arm_i8mm": false,
+  "arch": "x86_64",
+  "gpu": false
+ },
+ "threads": "2",
+ "gemm": {
+  "float32_gflops_measured": 0.4,
+  "size": 512
+ },
+ "dense_core_only": {
+  "state": "done",
+  "steps_done": 40,
+  "total_step": 40,
+  "final_loss": 2.8663,
+  "first_loss": 5.5517,
+  "tokens_per_s": 4736.8,
+  "elapsed_s": 2.05,
+  "core_params": 139776,
+  "expert_params": 0,
+  "total_params": 139776,
+  "val_loss": 2.9964,
+  "wall_s": 2.8,
+  "disk_bytes_used": 1126400,
+  "sample": "def f=  atdiets\ns             ttemne'neaettde                                    ssa"
+ },
+ "flash_67M_experts": {
+  "state": "done",
+  "steps_done": 40,
+  "total_step": 40,
+  "final_loss": 2.6889,
+  "first_loss": 5.5517,
+  "tokens_per_s": 96.9,
+  "elapsed_s": 100.36,
+  "core_params": 139776,
+  "expert_params": 67108864,
+  "total_params": 67248640,
+  "val_loss": 2.842,
+  "wall_s": 135.3,
+  "disk_bytes_used": 36401152,
+  "sample": "def ie                        ounnpe'oidetuended n                               fte"
+ },
+ "flash_67M_ternary_core": {
+  "state": "done",
+  "steps_done": 40,
+  "total_step": 40,
+  "final_loss": 2.7516,
+  "first_loss": 5.5452,
+  "tokens_per_s": 1492.4,
+  "elapsed_s": 6.52,
+  "core_params": 139776,
+  "expert_params": 67108864,
+  "total_params": 67248640,
+  "val_loss": 2.9026,
+  "wall_s": 51.6,
+  "disk_bytes_used": 36454400,
+  "sample": "def d                         etelnd 'I\"cttMg<f:It)g hi i                           "
+ }
+}

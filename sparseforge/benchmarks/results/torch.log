@@ -1,0 +1,66 @@
+step 1 loss 120.2387 4.768s
+step 2 loss 98.8616 0.668s
+step 3 loss 60.3645 0.161s
+step 4 loss 39.1093 0.143s
+step 5 loss 28.796 0.683s
+step 6 loss 18.5532 0.247s
+step 7 loss 17.4331 0.439s
+step 8 loss 14.7291 0.368s
+step 9 loss 13.849 0.138s
+step 10 loss 14.3193 0.169s
+step 11 loss 9.669 0.321s
+step 12 loss 9.8713 0.107s
+pretrain_full_fp32 {"tokens_per_s": 1520.7, "first_loss": 120.2387, "last_loss": 9.8713, "val_loss_after": 10.4487, "total_params": 3241472, "trainable_params": 3241472}
+step 1 loss 7.4628 1.66s
+step 2 loss 10.2033 9.134s
+step 3 loss 10.2887 0.079s
+step 4 loss 11.0193 0.444s
+step 5 loss 9.2253 1.778s
+step 6 loss 7.036 0.907s
+step 7 loss 8.1258 1.027s
+step 8 loss 7.6507 0.55s
+step 9 loss 7.1763 0.125s
+step 10 loss 8.7671 0.079s
+step 11 loss 6.5403 0.08s
+step 12 loss 6.5921 0.29s
+ft_baseline_full_fp32 {"tokens_per_s": 376.6, "first_loss": 7.4628, "last_loss": 6.5921, "val_loss_after": 7.7075, "total_params": 3241472, "trainable_params": 3241472}
+step 1 loss 7.4811 1.512s
+step 2 loss 9.329 0.377s
+step 3 loss 8.3002 0.108s
+step 4 loss 9.1999 0.157s
+step 5 loss 9.0675 0.247s
+step 6 loss 7.2847 0.104s
+step 7 loss 7.7266 0.137s
+step 8 loss 7.2625 0.086s
+step 9 loss 7.2606 0.079s
+step 10 loss 8.9631 0.215s
+step 11 loss 6.5993 0.074s
+step 12 loss 6.8279 0.103s
+ft_sf_lora_int8_bf16 {"tokens_per_s": 3335.7, "first_loss": 7.4811, "last_loss": 6.8279, "val_loss_after": 7.7748, "total_params": 217600, "trainable_params": 131072}
+step 1 loss 7.4621 0.872s
+step 2 loss 9.3258 0.164s
+step 3 loss 8.2926 0.255s
+step 4 loss 9.1826 0.137s
+step 5 loss 9.043 0.108s
+step 6 loss 7.2708 0.168s
+step 7 loss 7.7037 0.228s
+step 8 loss 7.2566 0.106s
+step 9 loss 7.244 0.123s
+step 10 loss 8.9537 0.33s
+step 11 loss 6.6027 0.164s
+step 12 loss 6.8202 0.163s
+ft_sf_lora_int4_bf16_ckpt {"tokens_per_s": 2892.0, "first_loss": 7.4621, "last_loss": 6.8202, "val_loss_after": 7.7578, "total_params": 217600, "trainable_params": 131072}
+step 1 loss 124.9283 0.387s
+step 2 loss 121.8543 0.135s
+step 3 loss 97.2384 0.213s
+step 4 loss 69.1379 0.168s
+step 5 loss 47.268 0.225s
+step 6 loss 31.5092 0.152s
+step 7 loss 27.0067 0.127s
+step 8 loss 20.6273 0.157s
+step 9 loss 20.8516 0.128s
+step 10 loss 18.353 0.118s
+step 11 loss 15.1574 0.189s
+step 12 loss 14.6625 0.11s
+scratch_hashmoe4_fp32 {"tokens_per_s": 3268.0, "first_loss": 124.9283, "last_loss": 14.6625, "val_loss_after": 14.9232, "total_params": 3236352, "trainable_params": 3236352}
+exit=0
