@@ -797,7 +797,18 @@ static void qk_bwd_job(void *c_, int item, int tid) {   /* undo rotation, norms 
 }
 
 /* attention of sequence s, key/value head g (and its query heads) */
-static void attn_job(void *c_, int item, int tid) {
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
+#define ES_MV __attribute__((target_clones("arch=x86-64-v3", "default")))
+#else
+#define ES_MV
+#endif
+static inline __attribute__((always_inline)) float vdot(const float *a, const float *b, int n) {   /* 8 lanes, then a fixed-order sum */
+    v8 acc = {0}; int e = 0;
+    for (; e + 8 <= n; e += 8) acc += *(const v8 *)(a + e) * *(const v8 *)(b + e);
+    float r = hsum(acc); for (; e < n; e++) r += a[e] * b[e];
+    return r;
+}
+ES_MV static void attn_job(void *c_, int item, int tid) {
     tok_ctx *c = c_; es_tm *m = c->m;
     const int s = item / m->KV, g = item % m->KV, grp = m->H / m->KV, hd = m->hd, b0 = c->b->base[s], n = c->b->len[s];
     float *sc = m->scratch[tid];
@@ -807,7 +818,7 @@ static void attn_job(void *c_, int item, int tid) {
             float mx = -INFINITY;
             for (int j = 0; j <= i; j++) {
                 const float *k = m->K + (size_t)(b0 + j) * m->kvd + (size_t)g * hd;
-                float d = 0; for (int e = 0; e < hd; e++) d += q[e] * k[e];
+                const float d = vdot(q, k, hd);
                 sc[j] = d * m->scale; if (sc[j] > mx) mx = sc[j];
             }
             double sum = 0;
@@ -822,7 +833,7 @@ static void attn_job(void *c_, int item, int tid) {
             m->Lse[(size_t)(b0 + i) * m->H + h] = mx + (float)log(sum);
         }
 }
-static void attn_bwd_job(void *c_, int item, int tid) {
+ES_MV static void attn_bwd_job(void *c_, int item, int tid) {
     (void)tid; tok_ctx *c = c_; es_tm *m = c->m;
     const int s = item / m->KV, g = item % m->KV, grp = m->H / m->KV, hd = m->hd, b0 = c->b->base[s], n = c->b->len[s];
     for (int j = 0; j < n; j++) { memset(m->dK + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, 0, sizeof(float) * hd); memset(m->dV + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, 0, sizeof(float) * hd); }
@@ -831,12 +842,12 @@ static void attn_bwd_job(void *c_, int item, int tid) {
             const float *q = m->Q + (size_t)(b0 + i) * m->qd + (size_t)h * hd, *dO = m->dAtt + (size_t)(b0 + i) * m->qd + (size_t)h * hd;
             const float *O = m->Att + (size_t)(b0 + i) * m->qd + (size_t)h * hd;
             float *dq = m->dQ + (size_t)(b0 + i) * m->qd + (size_t)h * hd;
-            float D = 0; for (int e = 0; e < hd; e++) D += dO[e] * O[e];
+            const float D = vdot(dO, O, hd);
             for (int e = 0; e < hd; e++) dq[e] = 0;
             const float lse = m->Lse[(size_t)(b0 + i) * m->H + h];
             for (int j = 0; j <= i; j++) {
                 const float *k = m->K + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, *v = m->Vv + (size_t)(b0 + j) * m->kvd + (size_t)g * hd;
-                float d = 0, dp = 0; for (int e = 0; e < hd; e++) { d += q[e] * k[e]; dp += dO[e] * v[e]; }
+                const float d = vdot(q, k, hd), dp = vdot(dO, v, hd);
                 const float p = expf(d * m->scale - lse), ds = p * (dp - D) * m->scale;
                 float *dk = m->dK + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, *dv = m->dV + (size_t)(b0 + j) * m->kvd + (size_t)g * hd;
                 for (int e = 0; e < hd; e++) { dv[e] += p * dO[e]; dq[e] += ds * k[e]; dk[e] += ds * q[e]; }

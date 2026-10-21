@@ -60,7 +60,7 @@ void es_amx_pack_part(uint16_t *p, const float *part, int K, int N, int bt, int 
 
 #ifdef HAVE_AMX_BUILD
 typedef struct { uint8_t palette, start; uint8_t res[14]; uint16_t colsb[16]; uint8_t rows[16]; } tcfg;
-#define AMXT __attribute__((target("amx-tile,amx-bf16,avx512f")))
+#define AMXT __attribute__((target("amx-tile,amx-bf16,avx512f,avx512bf16,avx512vl")))
 static int VERIFY = -1; long es_amx_redo;
 #define REDO es_amx_redo
 AMXT static void amx_block(const tcfg *cfg, const uint16_t *Ab, int K, const uint16_t *Bp, int KB, int NB, int nb, float *Cb) {
@@ -87,7 +87,11 @@ AMXT void es_amx_gemm(const float *A, int lda, const uint16_t *Bp, int K, int N,
         const int mr = m1 - mm < 32 ? m1 - mm : 32;
         for (int r = 0; r < 32; r++) {
             uint16_t *d = Ab + (size_t)r * K;
-            if (r < mr) { const float *s = A + (size_t)(mm + r) * lda; for (int k = 0; k < K; k++) d[k] = bf16(s[k]); }
+            if (r < mr) {   /* vcvtneps2bf16: round to nearest even, as bf16() */
+                const float *s = A + (size_t)(mm + r) * lda; int k = 0;
+                for (; k + 16 <= K; k += 16) { __m256bh h = _mm512_cvtneps_pbh(_mm512_loadu_ps(s + k)); _mm256_storeu_si256((__m256i *)(d + k), (__m256i)h); }
+                for (; k < K; k++) d[k] = bf16(s[k]);
+            }
             else memset(d, 0, (size_t)K * 2);
         }
         for (int nb = 0; nb < NB; nb += 2) {
