@@ -15,6 +15,7 @@
 #include "es_train.h"
 #include "es_gguf.h"
 #include "es_quant.h"
+#include "es_amx.h"
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -439,6 +440,32 @@ static const float *blas_weights(es_tm *m, const tw *w) {
     dq_ctx c = {w, WBUF}; pool_run(&m->P, (w->rows + 63) / 64, dq_job, &c);
     return WBUF;
 }
+
+/* ES_AMX=1: frozen-weight products on AMX bf16 tiles (fp32 accumulate). Each weight is packed to bf16 once per layout
+ * (forward: W^T, backward: W) and kept: 2 bytes per weight per layout. Lossy (bf16 inputs); off by default. */
+typedef struct { const void *key; int bt; uint16_t *p; } amx_ent;
+static amx_ent AMXC[1024]; static int AMXN; static int AMX_ON = -1;
+static int amx_on(void) { if (AMX_ON < 0) { const char *e = getenv("ES_AMX"); AMX_ON = e && atoi(e) && es_amx_available(); if (AMX_ON) fprintf(stderr, "ES_AMX: bf16 tiles\n"); } return AMX_ON; }
+static const uint16_t *amx_packed(const tw *w, int bt) {
+    for (int i = 0; i < AMXN; i++) if (AMXC[i].key == w->data && AMXC[i].bt == bt) return AMXC[i].p;
+    if (AMXN >= 1024) return NULL;
+    const int K = bt ? w->cols : w->rows, N = bt ? w->rows : w->cols, chunk = bt ? 16 : 32;
+    uint16_t *p = aligned_alloc(64, (size_t)K * N * 2); float *part = malloc(sizeof(float) * (size_t)chunk * w->cols);
+    if (!p || !part) { free(p); free(part); return NULL; }
+    for (int r0 = 0; r0 < w->rows; r0 += chunk) { dequant_rows(w, r0, chunk, part); es_amx_pack_part(p, part, K, N, bt, r0); }
+    free(part);
+    AMXC[AMXN++] = (amx_ent){w->data, bt, p};
+    return p;
+}
+typedef struct { const float *A; int lda; const uint16_t *B; int K, N; float *C; int ldc, M, beta; } amx_ctx;
+static void amx_job(void *c_, int item, int tid) { (void)tid; amx_ctx *c = c_; const int m0 = item * 32, m1 = m0 + 32 < c->M ? m0 + 32 : c->M; es_amx_gemm(c->A, c->lda, c->B, c->K, c->N, c->C, c->ldc, m0, m1, c->beta); }
+static int amx_mm(es_tm *m, const tw *w, int bt, const float *A, int lda, int T, float *C, int ldc, int beta) {
+    if (!amx_on() || w->rows % 32 || w->cols % 32 || T < 16) return 0;
+    const uint16_t *B = amx_packed(w, bt); if (!B) return 0;
+    amx_ctx c = {A, lda, B, bt ? w->cols : w->rows, bt ? w->rows : w->cols, C, ldc, T, beta};
+    pool_run(&m->P, (T + 31) / 32, amx_job, &c);
+    m->bytes += (double)w->nbytes; return 1;
+}
 /* Y (T x rows, row stride ldy) = X (T x cols) W^T */
 typedef struct { es_tm *m; const tw *w; const float *X; int T; float *Y; size_t ldy; } mmf_ctx;
 static void mmf_job(void *c_, int item, int tid) {
@@ -452,6 +479,7 @@ static void mmf_job(void *c_, int item, int tid) {
     }
 }
 static void mm_fwd(es_tm *m, const tw *w, const float *X, int T, float *Y, size_t ldy) {
+    if (amx_mm(m, w, 1, X, w->cols, T, Y, (int)ldy, 0)) return;
     const float *Wf;
     if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
         sgemm(1, T, w->rows, w->cols, X, w->cols, Wf, w->cols, 0.0f, Y, (int)ldy); m->bytes += (double)w->nbytes; return;
@@ -485,6 +513,7 @@ static void mmb_row_job(void *c_, int item, int tid) {   /* a block of rows agai
     BWD(c->dY, c->T, c->ldy, r0, Wb, nr, n, c->acc[tid], (size_t)n);
 }
 static void mm_bwd(es_tm *m, const tw *w, const float *dY, int T, size_t ldy, float *dX) {
+    if (amx_mm(m, w, 0, dY, (int)ldy, T, dX, w->cols, 1)) return;
     const float *Wf;
     if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
         sgemm(0, T, w->cols, w->rows, dY, (int)ldy, Wf, w->cols, 1.0f, dX, w->cols); m->bytes += (double)w->nbytes; return;
