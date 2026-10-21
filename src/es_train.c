@@ -815,6 +815,62 @@ static void qk_bwd_job(void *c_, int item, int tid) {   /* undo rotation, norms 
 }
 
 /* attention of sequence s, key/value head g (and its query heads) */
+
+/* ES_LORA_BLAS single-thread attention: per (sequence, head) S = Q K^T, P = softmax, O = P V as sgemms (exact causal mask) */
+static float *ABUF; static size_t ABUF_N;
+static float *abuf(size_t n) { if (n > ABUF_N) { free(ABUF); ABUF = malloc(sizeof(float) * n); ABUF_N = ABUF ? n : 0; } return ABUF; }
+static int attn_blas_fwd(es_tm *m, const batch *b) {
+    int mx_n = 0; for (int s = 0; s < b->S; s++) if (b->len[s] > mx_n) mx_n = b->len[s];
+    float *S = abuf((size_t)mx_n * mx_n); if (!S) return 0;
+    const int grp = m->H / m->KV, hd = m->hd;
+    for (int s = 0; s < b->S; s++) {
+        const int b0 = b->base[s], n = b->len[s];
+        for (int h = 0; h < m->H; h++) {
+            const int g = h / grp;
+            const float *Q = m->Q + (size_t)b0 * m->qd + (size_t)h * hd, *K = m->K + (size_t)b0 * m->kvd + (size_t)g * hd, *V = m->Vv + (size_t)b0 * m->kvd + (size_t)g * hd;
+            sgemm2(0, 1, n, n, hd, m->scale, Q, m->qd, K, m->kvd, 0.0f, S, n);
+            for (int i = 0; i < n; i++) {
+                float *r = S + (size_t)i * n, mx = -INFINITY;
+                for (int j = 0; j <= i; j++) if (r[j] > mx) mx = r[j];
+                double sum = 0; for (int j = 0; j <= i; j++) { r[j] = expf(r[j] - mx); sum += r[j]; }
+                const float inv = (float)(1.0 / sum); for (int j = 0; j <= i; j++) r[j] *= inv;
+                for (int j = i + 1; j < n; j++) r[j] = 0;
+                m->Lse[(size_t)(b0 + i) * m->H + h] = mx + (float)log(sum);
+            }
+            sgemm2(0, 0, n, hd, n, 1.0f, S, n, V, m->kvd, 0.0f, m->Att + (size_t)b0 * m->qd + (size_t)h * hd, m->qd);
+        }
+    }
+    return 1;
+}
+static int attn_blas_bwd(es_tm *m, const batch *b) {
+    int mx_n = 0; for (int s = 0; s < b->S; s++) if (b->len[s] > mx_n) mx_n = b->len[s];
+    float *P = abuf((size_t)2 * mx_n * mx_n + mx_n); if (!P) return 0;
+    float *dP = P + (size_t)mx_n * mx_n, *D = dP + (size_t)mx_n * mx_n;
+    const int grp = m->H / m->KV, hd = m->hd;
+    for (int s = 0; s < b->S; s++) {
+        const int b0 = b->base[s], n = b->len[s];
+        for (int g = 0; g < m->KV; g++) for (int j = 0; j < n; j++) {
+            memset(m->dK + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, 0, sizeof(float) * hd);
+            memset(m->dV + (size_t)(b0 + j) * m->kvd + (size_t)g * hd, 0, sizeof(float) * hd);
+        }
+        for (int h = 0; h < m->H; h++) {
+            const int g = h / grp; const size_t qo = (size_t)b0 * m->qd + (size_t)h * hd, ko = (size_t)b0 * m->kvd + (size_t)g * hd;
+            const float *Q = m->Q + qo, *K = m->K + ko, *V = m->Vv + ko, *dO = m->dAtt + qo, *O = m->Att + qo;
+            sgemm2(0, 1, n, n, hd, m->scale, Q, m->qd, K, m->kvd, 0.0f, P, n);
+            sgemm2(0, 1, n, n, hd, 1.0f, dO, m->qd, V, m->kvd, 0.0f, dP, n);
+            for (int i = 0; i < n; i++) {
+                float d = 0; for (int e = 0; e < hd; e++) d += dO[(size_t)i * m->qd + e] * O[(size_t)i * m->qd + e]; D[i] = d;
+                const float lse = m->Lse[(size_t)(b0 + i) * m->H + h]; float *pr = P + (size_t)i * n, *dr = dP + (size_t)i * n;
+                for (int j = 0; j <= i; j++) { pr[j] = expf(pr[j] - lse); dr[j] = pr[j] * (dr[j] - d) * m->scale; }
+                for (int j = i + 1; j < n; j++) { pr[j] = 0; dr[j] = 0; }
+            }
+            sgemm2(1, 0, n, hd, n, 1.0f, P, n, dO, m->qd, 1.0f, m->dV + ko, m->kvd);     /* dV += P^T dO */
+            sgemm2(0, 0, n, hd, n, 1.0f, dP, n, K, m->kvd, 0.0f, m->dQ + qo, m->qd);     /* dQ = dS K */
+            sgemm2(1, 0, n, hd, n, 1.0f, dP, n, Q, m->qd, 1.0f, m->dK + ko, m->kvd);     /* dK += dS^T Q */
+        }
+    }
+    return 1;
+}
 #if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__)
 #define ES_MV __attribute__((target_clones("arch=x86-64-v3", "default")))
 #else
@@ -940,7 +996,7 @@ static void layer_fwd(es_tm *m, const batch *b, int l, const float *Xin, float *
     mm_fwd(m, &y->w[ES_LT_K], m->Xn, T, m->K, (size_t)m->kvd); lora_fwd(m, l, ES_LT_K, m->Xn, T, m->K, (size_t)m->kvd);
     mm_fwd(m, &y->w[ES_LT_V], m->Xn, T, m->Vv, (size_t)m->kvd); lora_fwd(m, l, ES_LT_V, m->Xn, T, m->Vv, (size_t)m->kvd);
     pool_run(&m->P, items, qkv_post_job, &tc);
-    pool_run(&m->P, b->S * m->KV, attn_job, &tc);
+    if (!(lora_blas(m) && attn_blas_fwd(m, b))) pool_run(&m->P, b->S * m->KV, attn_job, &tc);
     mm_fwd(m, &y->w[ES_LT_O], m->Att, T, m->Xm, (size_t)m->d); lora_fwd(m, l, ES_LT_O, m->Att, T, m->Xm, (size_t)m->d);
     for (size_t i = 0; i < (size_t)T * m->d; i++) m->Xm[i] += Xin[i];
     pool_run(&m->P, items, norm2_job, &lc);
@@ -993,7 +1049,7 @@ static void layer_bwd(es_tm *m, const batch *b, int l, const float *Xin, float *
     /* attention: dX is now the gradient at Xm, so also at the o output and (residual) at Xin */
     memset(m->dAtt, 0, sizeof(float) * (size_t)T * m->qd);
     mm_bwd(m, &y->w[ES_LT_O], dX, T, (size_t)m->d, m->dAtt); lora_bwd(m, l, ES_LT_O, m->Att, T, dX, (size_t)m->d, m->dAtt);
-    pool_run(&m->P, b->S * m->KV, attn_bwd_job, &tc);
+    if (!(lora_blas(m) && attn_blas_bwd(m, b))) pool_run(&m->P, b->S * m->KV, attn_bwd_job, &tc);
     pool_run(&m->P, items, qk_bwd_job, &tc);
     memset(m->dXn, 0, sizeof(float) * (size_t)T * m->d);
     mm_bwd(m, &y->w[ES_LT_Q], m->dQ, T, (size_t)m->qd, m->dXn); lora_bwd(m, l, ES_LT_Q, m->Xn, T, m->dQ, (size_t)m->qd, m->dXn);
