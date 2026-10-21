@@ -431,6 +431,11 @@ static void sgemm(int tb, int M, int N, int K, const float *A, int lda, const fl
     if (SG32) SG32(101, 111, tb ? 112 : 111, M, N, K, 1.0f, A, lda, B, ldb, beta, C, ldc);
     else SG64(101, 111, tb ? 112 : 111, M, N, K, 1.0f, A, lda, B, ldb, beta, C, ldc);
 }
+static void sgemm2(int ta, int tb, int M, int N, int K, float al, const float *A, int lda, const float *B, int ldb, float beta, float *C, int ldc) {
+    if (SG32) SG32(101, ta ? 112 : 111, tb ? 112 : 111, M, N, K, al, A, lda, B, ldb, beta, C, ldc);
+    else SG64(101, ta ? 112 : 111, tb ? 112 : 111, M, N, K, al, A, lda, B, ldb, beta, C, ldc);
+}
+static int lora_blas(es_tm *m) { static int on = -1; if (on < 0) on = getenv("ES_LORA_BLAS") && atoi(getenv("ES_LORA_BLAS")) > 0; return on && m->nt == 1 && blas_init(1); }
 typedef struct { const tw *w; float *dst; } dq_ctx;
 static void dq_job(void *c_, int item, int tid) { (void)tid; dq_ctx *c = c_; const int r0 = item * 64, nr = c->w->rows - r0 < 64 ? c->w->rows - r0 : 64; dequant_rows(c->w, r0, nr, c->dst + (size_t)r0 * c->w->cols); }
 static float *WBUF; static size_t WBUF_N;
@@ -677,6 +682,11 @@ static void lora_fwd(es_tm *m, int l, int t, const float *X, int T, float *Y, si
     const size_t *o = lo(m, l, t);
     if (!m->lp || o[0] == SIZE_MAX) return;
     lf_ctx c = {m, X, m->lp + o[0], m->lp + o[1], m->Z[t], Y, T, in_of(m, t), out_of(m, t), ldy};
+    if (lora_blas(m)) {   /* ES_LORA_BLAS=1: two sgemms instead of the per-16-token jobs */
+        sgemm2(0, 1, T, m->rank, c.in, 1.0f, X, c.in, c.A, c.in, 0.0f, c.Z, m->rank);
+        sgemm2(0, 1, T, c.out, m->rank, m->ls, c.Z, m->rank, c.B, m->rank, 1.0f, Y, (int)ldy);
+        return;
+    }
     pool_run(&m->P, (T + 15) / 16, lf_job, &c);
 }
 /* backward part: dZ = ls dY B; dB += ls dY^T Z; dA += dZ^T X; dX += dZ A */
@@ -717,6 +727,14 @@ static void lora_bwd(es_tm *m, int l, int t, const float *X, int T, const float 
     const size_t *o = lo(m, l, t);
     if (!m->lp || o[0] == SIZE_MAX) return;
     lb_ctx c = {m, X, m->Z[t], dY, m->lp + o[0], m->lp + o[1], m->lg + o[0], m->lg + o[1], dX, m->dZ, T, in_of(m, t), out_of(m, t), ldy};
+    if (lora_blas(m)) {
+        const int r = m->rank;
+        sgemm2(0, 0, T, r, c.out, m->ls, dY, (int)ldy, c.B, r, 0.0f, c.dZ, r);            /* dZ = ls dY B */
+        sgemm2(1, 0, c.out, r, T, m->ls, dY, (int)ldy, c.Z, r, 1.0f, c.dB, r);            /* dB += ls dY^T Z */
+        sgemm2(1, 0, r, c.in, T, 1.0f, c.dZ, r, X, c.in, 1.0f, c.dA, c.in);              /* dA += dZ^T X */
+        sgemm2(0, 0, T, c.in, r, 1.0f, c.dZ, r, c.A, c.in, 1.0f, dX, c.in);              /* dX += dZ A */
+        return;
+    }
     pool_run(&m->P, (T + 15) / 16, lb_dz_job, &c);
     pool_run(&m->P, (c.out + 31) / 32, lb_db_job, &c);
     pool_run(&m->P, (c.in + 255) / 256, lb_da_job, &c);
