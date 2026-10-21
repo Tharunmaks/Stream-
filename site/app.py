@@ -49,9 +49,10 @@ def run_page(): return render_template("run.html", models=C.list_models())
 @app.post("/api/run_moe")
 def run_moe():
     d = request.json or {}; m = C.get_model(d.get("model", "")) or abort(404)
-    if m["id"] not in _run_cache: _run_cache[m["id"]] = esmoe.StreamedMoE(m["path"], cache_mb=int(os.environ.get("ES_RUN_CACHE_MB", 64)))
+    if m["id"] not in _run_cache: _run_cache[m["id"]] = esmoe.load_run(m["path"], cache_mb=int(os.environ.get("ES_RUN_CACHE_MB", 64)))
     if d.get("stream"):   # SSE: one event per token, then the stats, so time to first token is real
-        it = _run_cache[m["id"]].stream(d.get("prompt", "")[:2000] or " ", max_new=min(int(d.get("max_new", 64)), 256), temperature=float(d.get("temperature", 0.6)))
+        it = _run_cache[m["id"]].stream(d.get("prompt", "")[:2000] or " ", max_new=min(int(d.get("max_new", 64)), 256), temperature=float(d.get("temperature", 0.6)),
+                                         **({k: d[k] for k in ("prefetch", "sticky") if k in d} if isinstance(_run_cache[m["id"]], esmoe.SparseRun) else {}))
         def gen():
             for kind, v in it:
                 yield "data: " + json.dumps({"token": bytes([v]).decode("latin-1")} if kind == "token" else {"done": v}) + "\n\n"

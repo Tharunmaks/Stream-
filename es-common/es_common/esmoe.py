@@ -171,6 +171,68 @@ class StreamedMoE:
             else: st = v
         return dict(text=bytes(toks).decode("utf-8", "replace"), **st)
 
+class SparseRun:
+    """Run decoder for es_sparse checkpoints (format es-sparse-v1): prebuilt libesd.so (ES_BIN_DIR), in-RAM LRU expert cache
+    of raw int4 experts (ES_RUN_XC_MB, default 2048, capped at half of MemAvailable). Same stream()/generate() API as StreamedMoE."""
+    def __init__(self, path, cache_mb=None):
+        import ctypes
+        self.p = path; self.cfg = c = json.load(open(os.path.join(path, "config.json")))
+        lp = os.environ.get("ES_ESD_LIB") or os.path.join(os.environ.get("ES_BIN_DIR", os.path.expanduser("~/.expertstream/bin")), "libesd.so")
+        L = self.lib = ctypes.CDLL(lp); L.esd_open.restype = ctypes.c_void_p; L.esd_open.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_long]
+        L.esd_step.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float)]; L.esd_reset.argtypes = [ctypes.c_void_p]
+        L.esd_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]; L.esd_slots.argtypes = [ctypes.c_void_p]
+        L.esd_set.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_float]; L.esd_pfstats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        mb = int(os.environ.get("ES_RUN_XC_MB", 2048))
+        try: mb = min(mb, int([l for l in open("/proc/meminfo") if l.startswith("MemAvailable")][0].split()[1]) // 2048)
+        except Exception: pass
+        ck = c["ckpt"] if os.path.isabs(c["ckpt"]) else os.path.join(path, c["ckpt"])
+        h = L.esd_open(ck.encode(), c["experts_file"].encode(), max(mb, 1) << 20)
+        if not h: raise IOError("esd_open failed")
+        self.h = ctypes.c_void_p(h); self.lg = np.zeros(256, np.float32); self.lp = self.lg.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        self.used = 0
+
+    def _step(self, t):
+        if self.lib.esd_step(self.h, int(t), self.lp) < 0: raise IOError("expert read failed")
+        return self.lg
+
+    def _st(self):
+        import ctypes; a = (ctypes.c_long * 3)(); self.lib.esd_stats(self.h, a); h, m = a[0], a[1]
+        b = (ctypes.c_long * 3)(); self.lib.esd_pfstats(self.h, b)
+        return dict(reads=m, hits=h, bytes_read=a[2], hit_rate=round(h / max(h + m, 1), 4), xc_slots=self.lib.esd_slots(self.h),
+                    prefetch_checks=b[0], prefetch_recall=round(b[1] / max(b[0], 1), 4), prefetch_issued=b[2], prefetch_k=self.pfk, sticky=self.sticky)
+
+    def stream(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128, prefetch=None, sticky=None):
+        """prefetch: next-layer prefetch width (default ES_RUN_PREFETCH or 2 = 1.5-2x top-1, 0 = off).
+        sticky: routing bias toward the previous token's expert (default ES_RUN_STICKY or 0 = off; only turn on after a held-out check)."""
+        self.pfk = int(prefetch if prefetch is not None else os.environ.get("ES_RUN_PREFETCH", 2))
+        self.sticky = float(sticky if sticky is not None else os.environ.get("ES_RUN_STICKY", 0))
+        self.lib.esd_set(self.h, self.pfk, self.sticky)
+        rng = np.random.default_rng(seed); ids = list(prompt.encode("utf-8", "replace"))[-ctx:] or [32]
+        self.lib.esd_reset(self.h); t0 = time.time()
+        for t in ids: lg = self._step(t)
+        tp = time.time() - t0; ttft = None
+        for i in range(max_new):
+            if temperature <= 0: n = int(lg.argmax())
+            else: z = (lg - lg.max()) / temperature; p = np.exp(z); p /= p.sum(); n = int(rng.choice(256, p=p))
+            if ttft is None: ttft = time.time() - t0
+            yield "token", n
+            if i + 1 < max_new: lg = self._step(n)
+        dt = time.time() - t0
+        yield "done", dict(new_tokens=max_new, prompt_tokens=len(ids), prompt_s=round(tp, 4), ttft_s=round(ttft, 4), seconds=round(dt, 3),
+                           tok_per_s=round(max_new / dt, 2), decode_tok_per_s=round((max_new - 1) / max(dt - ttft, 1e-9), 2), cache_mb=0, **self._st())
+
+    def generate(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128):
+        toks = []
+        for kind, v in self.stream(prompt, max_new, temperature, seed, ctx):
+            if kind == "token": toks.append(v)
+            else: st = v
+        return dict(text=bytes(toks).decode("utf-8", "replace"), **st)
+
+def load_run(path, cache_mb=64):
+    """Pick the Run decoder for a model directory by its config format."""
+    fmt = json.load(open(os.path.join(path, "config.json"))).get("format")
+    return SparseRun(path) if fmt == "es-sparse-v1" else StreamedMoE(path, cache_mb=cache_mb)
+
 def _fp(a):
     import ctypes; return a.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
