@@ -1,0 +1,57 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#070b14"><title>Trainer · ExpertStream</title><link rel="stylesheet" href="/static/fonts.css"><link rel="stylesheet" href="/static/app.css"></head><body>
+<header class="top"><div class="wrap top-in"><div class="brand"><span class="mark" aria-hidden="true"></span><span>ExpertStream <em>Trainer</em></span></div>
+ <div class="pill" id="pill" data-s="idle"><i></i><span id="pilltxt">Idle</span></div></div></header>
+<nav class="tabs" id="tabs"><div class="wrap tabs-in">
+ <button data-t="setup" class="on"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/></svg>Setup</button>
+ <button data-t="train"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 5-8 4 5"/></svg>Train</button>
+ <button data-t="chat"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/></svg>Chat</button>
+ <button data-t="files"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 20h14"/></svg>Files</button></div></nav>
+<main class="wrap">
+<section id="setup" class="page">
+ <div class="intro"><p class="eyebrow">LoRA on the CPU</p><h1>Teach a model something new.</h1><p class="lede">Pick a GGUF model and a dataset, set a few numbers, and es_lora trains a small adapter on this machine. No GPU.</p></div>
+ <div class="card"><div class="step"><span>01</span><h2>Model</h2></div>
+  <label for="model">Local GGUF</label><select id="model"></select><p class="empty" id="modelEmpty" hidden>No GGUF files found. Put one in the models folder or download one below.</p>
+  <details><summary>Download from Hugging Face</summary><div class="inline"><input id="hf" placeholder="owner/Model-GGUF" autocapitalize="off" spellcheck="false"><button class="btn" id="hfBtn">Fetch</button></div>
+  <p class="hint">GGUF repos only. If a repo only has safetensors, convert it with llama.cpp's convert_hf_to_gguf.py first.</p><p class="note" id="hfmsg"></p></details></div>
+ <div class="card"><div class="step"><span>02</span><h2>Dataset</h2></div>
+  <label for="data">Ready datasets</label><select id="data"></select>
+  <label class="drop" id="drop"><input type="file" id="file" accept=".jsonl,.txt,.json"><b>Upload a file</b><small>.txt, or .jsonl with question/answer, prompt/response, messages or text</small></label><p class="note" id="upmsg"></p></div>
+ <div class="card"><div class="step"><span>03</span><h2>Adapter settings</h2></div>
+  <label for="run">Run name</label><input id="run" placeholder="Leave blank for a timestamp" autocapitalize="off">
+  <div class="grid">
+   <div><label for="rank">Rank</label><input id="rank" type="number" value="16" inputmode="numeric"></div>
+   <div><label for="alpha">Alpha</label><input id="alpha" type="number" value="16" inputmode="numeric"></div>
+   <div><label for="steps">Steps</label><input id="steps" type="number" value="20" inputmode="numeric"></div>
+   <div><label for="lr">Learning rate</label><input id="lr" value="2e-4"></div>
+   <div><label for="seq">Sequence length</label><input id="seq" type="number" value="128" inputmode="numeric"></div>
+   <div><label for="batch">Tokens per step</label><input id="batch" type="number" value="640" inputmode="numeric"></div>
+   <div><label for="targets">Targets</label><select id="targets"><option value="all">All layers</option><option value="attn">Attention</option><option value="mlp">MLP</option></select></div>
+   <div><label for="threads">Threads</label><input id="threads" type="number" value="1" inputmode="numeric"></div></div>
+  <label class="sw"><input type="checkbox" id="fast" checked><span></span><div><b>Fast mode</b><small>AMX and OpenBLAS. x86 only, 1 thread.</small></div></label>
+  <label class="sw"><input type="checkbox" id="recompute"><span></span><div><b>Low-RAM mode</b><small>Recomputes layers. About 300 MB, slower.</small></div></label>
+  <button class="btn primary block" id="go">Start training</button><p class="note" id="trmsg"></p></div>
+</section>
+<section id="train" class="page" hidden>
+ <div class="intro row"><div><p class="eyebrow" id="runname">No run yet</p><h1 id="headline">Nothing training</h1></div></div>
+ <div class="card empty-state" id="trainEmpty"><p>Start a run from Setup and its speed, memory and loss show up here live.</p><button class="btn" data-go="setup">Go to Setup</button></div>
+ <div id="trainBody" hidden>
+ <div class="bar"><i id="prog"></i></div>
+ <div class="metrics"><div><span>Speed</span><b id="tps">–</b><small>tok/s</small></div><div><span>Memory</span><b id="ram">–</b><small>MB RSS</small></div><div><span>Remaining</span><b id="eta">–</b><small id="stp">–</small></div></div>
+ <div class="card"><div class="chart-head"><h2>Loss</h2><div class="legend"><span class="l1">train <b id="loss">–</b></span><span class="l2">held-out <b id="hl">–</b></span></div></div><canvas id="chart" height="200"></canvas></div>
+ <div class="actions"><button class="btn danger" id="stop">Stop and save</button><button class="btn" id="resume">Resume</button></div>
+ <details class="log"><summary>Trainer log</summary><pre id="log"></pre></details></div>
+</section>
+<section id="chat" class="page" hidden>
+ <div class="intro"><p class="eyebrow">Try it</p><h1>Chat with your adapter</h1></div>
+ <div class="card chat"><label for="crun">Adapter</label><select id="crun"></select>
+  <div id="msgs" class="msgs"><p class="empty">The first message loads the model, so it takes a few seconds.</p></div>
+  <form id="cform" class="composer"><textarea id="cin" rows="1" placeholder="Ask something"></textarea><button class="btn primary" id="send">Send</button></form>
+  <div class="chat-foot"><span class="note" id="cmsg"></span><button class="btn sm" id="reset" type="button">New chat</button></div></div>
+</section>
+<section id="files" class="page" hidden>
+ <div class="intro"><p class="eyebrow">Downloads</p><h1>Trained adapters</h1><p class="lede">.eslora works with es_chat and es_serve. Export a GGUF for llama.cpp (<code>llama-cli --lora</code>).</p></div>
+ <div id="flist"></div>
+</section>
+</main><div class="toast" id="toast" role="status"></div>
+<script src="/static/app.js"></script></body></html>

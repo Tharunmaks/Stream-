@@ -1,0 +1,60 @@
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
+{"prompt": "What is Expert Stream?", "response": "Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices."}
+{"prompt": "What does LoRA train?", "response": "LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change."}
+{"prompt": "Who built Expert Stream?", "response": "Tharun built Expert Stream."}
+{"prompt": "Can I train on my phone?", "response": "Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode."}
+{"prompt": "What file does training produce?", "response": "Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF."}
