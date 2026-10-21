@@ -15,8 +15,13 @@ $('hfBtn').onclick=async e=>{const b=e.target;if(!$('hf').value.trim())return no
 $('file').onchange=async()=>{const f=$('file').files[0];if(!f)return;const fd=new FormData();fd.append('file',f);note('upmsg','Uploading '+f.name+'…');
  const r=await fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({error:'Upload failed'}));$('file').value='';
  if(r.error)return note('upmsg',r.error,'err');note('upmsg',base(r.path)+' ready: '+r.info,'ok');await load();$('data').value=r.path};
-$('go').onclick=async e=>{const c={};['model','data','run','rank','alpha','targets','steps','seq','batch','lr','threads'].forEach(k=>c[k]=$(k).value);c.fast=$('fast').checked;c.recompute=$('recompute').checked;
- if(!c.model||!c.data)return note('trmsg','Pick a model and a dataset first.','err');busy(e.target,1);const r=await api('/api/train',c);busy(e.target,0);
+const mode=()=>document.querySelector('[name=mode]:checked').value;
+function setMode(){const m=mode()=='moe';document.body.classList.toggle('m-moe',m);document.querySelector('.card.moe').hidden=!m;$('setTitle').textContent=m?'Training settings':'Adapter settings';if(m&&$('steps').value=='20')$('steps').value='10';if(m)$('rank').value=$('rank').value=='16'?'8':$('rank').value;moeSize()}
+function moeSize(){const L=+$('layers').value,E=+$('experts').value,D=+$('dim').value,F=+$('ffn').value,k=+$('topk').value,tot=L*E*2*D*F;
+ $('moesize').textContent=`${(tot/1e9).toFixed(2)} B frozen expert parameters, ${(tot/4/1e9).toFixed(2)} GB on disk (made on first run). Cache holds ${Math.min(100,100*$('cache_mb').value*1048576/(2*D*F/4)/(L*E)).toFixed(0)}% of experts. Top-${k} of ${E} per token.`}
+document.querySelectorAll('[name=mode]').forEach(r=>r.onchange=setMode);['layers','experts','dim','ffn','topk','cache_mb'].forEach(k=>$(k).oninput=moeSize);
+$('go').onclick=async e=>{const c={mode:mode()};['model','data','run','rank','alpha','targets','steps','seq','batch','lr','threads','layers','experts','dim','ffn','topk','cache_mb','balance','batch_seqs'].forEach(k=>c[k]=$(k).value);c.random_route=$('random_route').checked;c.fast=$('fast').checked;c.recompute=$('recompute').checked;
+ if((c.mode!='moe'&&!c.model)||!c.data)return note('trmsg','Pick a model and a dataset first.','err');busy(e.target,1);const r=await api('/api/train',c);busy(e.target,0);
  if(r.error)return note('trmsg',r.error,'err');note('trmsg','');last='';show('train')};
 $('stop').onclick=async e=>{busy(e.target,1);await api('/api/stop',{});toast('Stopping after this step. The adapter is saved.');setTimeout(()=>busy(e.target,0),1500)};
 $('resume').onclick=async e=>{busy(e.target,1);const r=await api('/api/resume',{});busy(e.target,0);r.error?toast(r.error,1):toast('Resumed from the saved adapter')};
@@ -43,6 +48,8 @@ async function poll(){try{const s=await api('/api/status');const st=s.state.star
   $('loss').textContent=l?l.loss.toFixed(3):'–';const hh=s.heldout[s.heldout.length-1];$('hl').textContent=hh?hh.loss.toFixed(3):'–';
   $('stop').disabled=st!='running';$('resume').disabled=st=='running'||st=='stopping'||st=='finished';
   const key=JSON.stringify([s.steps.length,s.heldout.length,st]);if(key!=last&&$("chart").clientWidth){draw(s.steps,s.heldout);last=key}
+  const moe=s.mode=='moe';$('moeinfo').hidden=!moe;if(moe&&l)$('moeinfo').textContent=`MoE prototype · expert cache hit ${l.hit}% · balance loss ${l.aux}. No checkpoint, chat or download for this mode yet.`;
+  if(moe)$('resume').disabled=true;$('stop').textContent=moe?'Stop':'Stop and save';
   $('log').textContent=s.log.join('\n');
   if(st=='finished'&&poll.prev=='running')toast('Training finished. Your adapter is in Files.');poll.prev=st}}catch(e){$('pilltxt').textContent='Offline';$('pill').dataset.s='error'}
  setTimeout(poll,1500)}

@@ -1,15 +1,21 @@
 """Expert Stream LoRA Trainer: tiny Flask app driving es_lora / es_chat. Works on Linux and Termux."""
-import os, re, json, glob, time, signal, subprocess, threading
+import os, re, shlex, shutil, json, glob, time, signal, subprocess, threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = os.environ.get("ES_BIN_DIR", "/workspace/es-speedup")
+BIN = os.environ.get("ES_BIN_DIR", "/workspace/es-int")
+def trainer():
+    """Prefer the unified es_train (modes finetune/moe); fall back to the old es_lora."""
+    t = os.path.join(BIN, "es_train")
+    return ([t, "finetune"] if os.path.exists(t) else [os.path.join(BIN, "es_lora")])
 MODELS = os.environ.get("ES_MODEL_DIR", "/workspace/es-bench")
 RUNS = os.path.join(HERE, "runs"); DATA = os.path.join(HERE, "data")
 FAST_ENV = {"ES_AMX": "1", "ES_LORA_BLAS": "1",
             "ES_BLAS": os.environ.get("ES_BLAS", "/usr/local/lib/python3.13/dist-packages/numpy.libs/libscipy_openblas64_-f48b354e.so")}
 app = Flask(__name__, static_folder=None)
-JOB = {"proc": None, "run": None, "cfg": None, "lines": [], "steps": [], "heldout": [], "state": "idle", "rss": 0, "t0": 0, "done_offset": 0}
+JOB = {"proc": None, "run": None, "cfg": None, "lines": [], "steps": [], "heldout": [], "state": "idle", "rss": 0, "t0": 0, "done_offset": 0, "mode": "finetune"}
 STEP = re.compile(r"step (\d+)/(\d+)\s+loss ([\d.]+).*?lr ([\de.+-]+)\s+([\d.]+) s\s+(\d+) tokens/s")
+MOESTEP = re.compile(r"^step (\d+) loss ([\d.]+) aux ([\d.]+).*? ([\d.]+)s ([\d.]+) tok/s.*?hit ([\d.]+)%.*?rss (\d+) MB")
+MOEHELD = re.compile(r"^held-out loss ([\d.]+)")
 HELD = re.compile(r"held-out loss (?:before|after step (\d+)): ([\d.]+)")
 
 def rss(pid):
@@ -23,6 +29,13 @@ def reader(p):
     for raw in p.stderr:
         l = raw.decode(errors="replace").rstrip()
         JOB["lines"] = (JOB["lines"] + [l])[-200:]
+        if JOB["mode"] == "moe":
+            m = MOESTEP.search(l)
+            if m: JOB["steps"].append({"step": int(m[1]), "of": int(JOB["cfg"]["steps"]), "loss": float(m[2]), "aux": float(m[3]),
+                                       "secs": float(m[4]), "tps": round(float(m[5])), "hit": float(m[6]), "rss": int(m[7])})
+            h = MOEHELD.search(l)
+            if h: JOB["heldout"].append({"step": int(JOB["cfg"]["steps"]), "loss": float(h[1])})
+            continue
         m = STEP.search(l)
         if m:
             JOB["steps"].append({"step": int(m[1]) + JOB["done_offset"], "of": int(m[2]) + JOB["done_offset"], "loss": float(m[3]),
@@ -98,7 +111,39 @@ def upload():
         if os.path.exists(tmp): os.remove(tmp)
     return jsonify(path=path, info=info)
 
+def moe_text(path):
+    """es_train moe reads raw bytes; turn JSONL Q&A into plain 'Q: .. A: ..' text once."""
+    if not path.endswith(".jsonl"): return path
+    out = path[:-6] + ".moe.txt"
+    if not os.path.exists(out) or os.path.getmtime(out) < os.path.getmtime(path):
+        with open(out, "w") as f:
+            for line in open(path):
+                if not line.strip(): continue
+                o = json.loads(line)
+                if "text" in o: f.write(o["text"] + "\n\n")
+                elif "messages" in o: f.write("\n".join(f'{m.get("role","")}: {m.get("content","")}' for m in o["messages"]) + "\n\n")
+                else: f.write(f'Q: {o.get("prompt","")}\nA: {o.get("response", o.get("completion",""))}\n\n')
+    return out
+
+def start_moe(cfg):
+    L, E, D, F = (str(int(cfg[k])) for k in ("layers", "experts", "dim", "ffn"))
+    ef = os.path.join(RUNS, f"experts_L{L}_E{E}_d{D}_f{F}.bin")
+    tr = os.path.join(BIN, "es_train")
+    gen = [tr, "moe", "gen", "--experts-file", ef, "--layers", L, "--experts", E, "--dim", D, "--ffn", F]
+    cmd = [tr, "moe", "train", "--experts-file", ef, "--layers", L, "--experts", E, "--dim", D, "--ffn", F,
+           "--topk", str(int(cfg["topk"])), "--rank", str(int(cfg["rank"])), "--steps", str(int(cfg["steps"])),
+           "--cache-mb", str(int(cfg["cache_mb"])), "--seq", str(int(cfg["seq"])), "--batch-seqs", str(int(cfg.get("batch_seqs", 4))),
+           "--balance", str(float(cfg.get("balance", 0))), "--data", moe_text(cfg["data"])] + (["--random-route"] if cfg.get("random_route") else [])
+    sh = ("" if os.path.exists(ef) else " ".join(map(shlex.quote, gen)) + " && ") + "exec " + ("stdbuf -oL " if shutil.which("stdbuf") else "") + " ".join(map(shlex.quote, cmd))
+    env = dict(os.environ); env["ES_BLAS"] = FAST_ENV["ES_BLAS"]
+    JOB.update(cfg=cfg, run=cfg["run"], mode="moe", state="running", t0=time.time(), rss=0, steps=[], heldout=[], done_offset=0, lines=["$ " + sh])
+    JOB["proc"] = subprocess.Popen(["sh", "-c", sh], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=RUNS, start_new_session=True)
+    p = JOB["proc"]; p.stderr = p.stdout
+    threading.Thread(target=reader, args=(p,), daemon=True).start()
+
 def start(cfg, resume=False):
+    if cfg.get("mode") == "moe": return start_moe(cfg)
+    JOB["mode"] = "finetune"
     run = cfg["run"]; out = os.path.join(RUNS, run + ".eslora")
     steps = int(cfg["steps"])
     if resume:
@@ -107,7 +152,7 @@ def start(cfg, resume=False):
     else:
         JOB.update(steps=[], heldout=[], done_offset=0)
     seq = int(cfg["seq"]); batch = max(seq, int(cfg.get("batch", 640)))
-    cmd = [os.path.join(BIN, "es_lora"), "train", "-g", cfg["model"], "--data", cfg["data"], "--rank", str(cfg["rank"]),
+    cmd = trainer() + ["train", "-g", cfg["model"], "--data", cfg["data"], "--rank", str(cfg["rank"]),
            "--alpha", str(cfg["alpha"]), "--targets", cfg["targets"], "--steps", str(steps), "--seq", str(seq),
            "--batch", str(batch), "--micro", str(batch), "--lr", str(cfg["lr"]), "-j", str(cfg["threads"]),
            "--eval-every", "5", "-o", out] + (["--resume"] if resume else [])
@@ -127,13 +172,17 @@ def train():
 @app.post("/api/stop")
 def stop():
     p = JOB["proc"]
-    if p and p.poll() is None: JOB["state"] = "stopping"; p.send_signal(signal.SIGINT)
+    if p and p.poll() is None:
+        JOB["state"] = "stopping"
+        if JOB["mode"] == "moe": os.killpg(p.pid, signal.SIGTERM)
+        else: p.send_signal(signal.SIGINT)
     return jsonify(ok=True)
 
 @app.post("/api/resume")
 def resume():
     if JOB["proc"] and JOB["proc"].poll() is None: return jsonify(error="a run is active"), 409
     if not JOB["cfg"]: return jsonify(error="nothing to resume"), 400
+    if JOB["mode"] == "moe": return jsonify(error="MoE prototype runs keep no checkpoint, so they can't resume. Start a new run."), 400
     start(JOB["cfg"], resume=True); return jsonify(ok=True)
 
 @app.get("/api/status")
@@ -142,7 +191,7 @@ def status():
     eta = None
     if s and JOB["state"] == "running":
         avg = sum(x["secs"] for x in s[-5:]) / len(s[-5:]); eta = round(avg * (s[-1]["of"] - s[-1]["step"]))
-    return jsonify(state=JOB["state"], run=JOB["run"], cfg=cfg, steps=s, heldout=JOB["heldout"], rss=JOB["rss"],
+    return jsonify(state=JOB["state"], mode=JOB["mode"], run=JOB["run"], cfg=cfg, steps=s, heldout=JOB["heldout"], rss=JOB["rss"],
                    log=JOB["lines"][-12:], eta=eta, elapsed=round(time.time() - JOB["t0"]) if JOB["t0"] else 0)
 
 @app.get("/api/runs")
@@ -156,7 +205,7 @@ def runs():
 @app.post("/api/export/<run>")
 def export(run):
     run = re.sub(r"[^\w-]", "_", run); model = (JOB["cfg"] or {}).get("model") or request.json.get("model")
-    p = subprocess.run([os.path.join(BIN, "es_lora"), "export", "--lora", os.path.join(RUNS, run + ".eslora"), "-g", model, "-j", "1",
+    p = subprocess.run(trainer() + ["export", "--lora", os.path.join(RUNS, run + ".eslora"), "-g", model, "-j", "1",
                         "-o", os.path.join(RUNS, run + ".gguf")], capture_output=True, text=True)
     return (jsonify(ok=True) if p.returncode == 0 else (jsonify(error=p.stderr[-500:]), 500))
 

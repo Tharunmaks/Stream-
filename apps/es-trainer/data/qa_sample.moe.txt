@@ -1,0 +1,180 @@
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+
+Q: What is Expert Stream?
+A: Expert Stream is a CPU engine that streams model weights from disk so big models run on small devices.
+
+Q: What does LoRA train?
+A: LoRA trains small low-rank matrices added to a frozen model, so only a few million numbers change.
+
+Q: Who built Expert Stream?
+A: Tharun built Expert Stream.
+
+Q: Can I train on my phone?
+A: Yes. es_lora runs on a phone CPU with Termux, using about 300 MB in low-RAM mode.
+
+Q: What file does training produce?
+A: Training produces a .eslora adapter, which can also be exported as a llama.cpp LoRA GGUF.
+

@@ -308,7 +308,11 @@ static int cmd_export(int argc, char **argv) {
     return 0;
 }
 
+#ifdef ES_TRAIN_UNIFIED
+int es_lora_main(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     if (argc < 2) { fprintf(stderr, "usage: es_lora train|eval|gradcheck|logitcheck|export ... (see the top of tools/es_lora.c)\n"); return 1; }
     const char *c = argv[1];
     if (!strcmp(c, "train")) return cmd_train(argc, argv);

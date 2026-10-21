@@ -191,7 +191,11 @@ static void adam_range(size_t a, size_t n, float lr) {
     const float b1 = 0.9f, b2 = 0.999f, c1 = 1 - powf(b1, step_no), c2 = 1 - powf(b2, step_no);
     for (size_t i = a; i < a + n; i++) { const float g = P.g[i]; P.m[i] = b1 * P.m[i] + (1 - b1) * g; P.v[i] = b2 * P.v[i] + (1 - b2) * g * g; P.p[i] -= lr * (P.m[i] / c1) / (sqrtf(P.v[i] / c2) + 1e-8f); P.g[i] = 0; }
 }
+#ifdef ES_TRAIN_UNIFIED
+int es_moe_main(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     if (argc < 7) { fprintf(stderr, "usage: see header\n"); return 2; }
     L = atoi(argv[3]); E = atoi(argv[4]); D = atoi(argv[5]); F = atoi(argv[6]); EB = (size_t)2 * D * F / 4;
     if (!strcmp(argv[1], "gen")) {

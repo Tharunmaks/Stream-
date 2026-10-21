@@ -10,26 +10,43 @@
 <main class="wrap">
 <section id="setup" class="page">
  <div class="intro"><p class="eyebrow">LoRA on the CPU</p><h1>Teach a model something new.</h1><p class="lede">Pick a GGUF model and a dataset, set a few numbers, and es_lora trains a small adapter on this machine. No GPU.</p></div>
- <div class="card"><div class="step"><span>01</span><h2>Model</h2></div>
+ <div class="seg" role="radiogroup" aria-label="Training mode">
+  <label><input type="radio" name="mode" value="finetune" checked><span><b>Fine-tune</b><small>LoRA on a GGUF model</small></span></label>
+  <label><input type="radio" name="mode" value="moe"><span><b>MoE from scratch</b><small>Experts streamed from disk</small></span></label></div>
+ <div class="card ft"><div class="step"><span>01</span><h2>Model</h2></div>
   <label for="model">Local GGUF</label><select id="model"></select><p class="empty" id="modelEmpty" hidden>No GGUF files found. Put one in the models folder or download one below.</p>
   <details><summary>Download from Hugging Face</summary><div class="inline"><input id="hf" placeholder="owner/Model-GGUF" autocapitalize="off" spellcheck="false"><button class="btn" id="hfBtn">Fetch</button></div>
   <p class="hint">GGUF repos only. If a repo only has safetensors, convert it with llama.cpp's convert_hf_to_gguf.py first.</p><p class="note" id="hfmsg"></p></details></div>
- <div class="card"><div class="step"><span>02</span><h2>Dataset</h2></div>
+ <div class="card"><div class="step"><span class="n-ft">02</span><span class="n-moe">01</span><h2>Dataset</h2></div>
   <label for="data">Ready datasets</label><select id="data"></select>
   <label class="drop" id="drop"><input type="file" id="file" accept=".jsonl,.txt,.json"><b>Upload a file</b><small>.txt, or .jsonl with question/answer, prompt/response, messages or text</small></label><p class="note" id="upmsg"></p></div>
- <div class="card"><div class="step"><span>03</span><h2>Adapter settings</h2></div>
+  <div class="card moe" hidden><div class="step"><span>02</span><h2>MoE architecture</h2></div>
+  <p class="hint">A byte-level model whose experts are frozen ternary weights (-1, 0, 1, 2 bits each) kept on disk. Attention, the router and a small LoRA per expert are trained. The default is about 1.07 B total parameters, 68 M active per token.</p>
+  <div class="grid">
+   <div><label for="layers">Layers</label><input id="layers" type="number" value="8" inputmode="numeric"></div>
+   <div><label for="experts">Experts per layer</label><input id="experts" type="number" value="64" inputmode="numeric"></div>
+   <div><label for="dim">Width</label><input id="dim" type="number" value="1024" inputmode="numeric"></div>
+   <div><label for="ffn">Expert size</label><input id="ffn" type="number" value="1024" inputmode="numeric"></div>
+   <div><label for="topk">Top-k experts</label><input id="topk" type="number" value="2" inputmode="numeric"></div>
+   <div><label for="cache_mb">Expert cache (MB)</label><input id="cache_mb" type="number" value="64" inputmode="numeric"></div>
+   <div><label for="balance">Routing balance</label><input id="balance" value="0.01"></div>
+   <div><label for="batch_seqs">Sequences per step</label><input id="batch_seqs" type="number" value="4" inputmode="numeric"></div></div>
+  <p class="note" id="moesize"></p>
+  <label class="sw"><input type="checkbox" id="ternary" checked disabled><span></span><div><b>Ternary experts</b><small>Always on in this prototype.</small></div></label>
+  <label class="sw"><input type="checkbox" id="random_route"><span></span><div><b>Random routing</b><small>Stress test: worst case for the cache.</small></div></label></div>
+ <div class="card"><div class="step"><span>03</span><h2 id="setTitle">Adapter settings</h2></div>
   <label for="run">Run name</label><input id="run" placeholder="Leave blank for a timestamp" autocapitalize="off">
   <div class="grid">
    <div><label for="rank">Rank</label><input id="rank" type="number" value="16" inputmode="numeric"></div>
-   <div><label for="alpha">Alpha</label><input id="alpha" type="number" value="16" inputmode="numeric"></div>
+   <div class="ft"><label for="alpha">Alpha</label><input id="alpha" type="number" value="16" inputmode="numeric"></div>
    <div><label for="steps">Steps</label><input id="steps" type="number" value="20" inputmode="numeric"></div>
-   <div><label for="lr">Learning rate</label><input id="lr" value="2e-4"></div>
+   <div class="ft"><label for="lr">Learning rate</label><input id="lr" value="2e-4"></div>
    <div><label for="seq">Sequence length</label><input id="seq" type="number" value="128" inputmode="numeric"></div>
-   <div><label for="batch">Tokens per step</label><input id="batch" type="number" value="640" inputmode="numeric"></div>
-   <div><label for="targets">Targets</label><select id="targets"><option value="all">All layers</option><option value="attn">Attention</option><option value="mlp">MLP</option></select></div>
-   <div><label for="threads">Threads</label><input id="threads" type="number" value="1" inputmode="numeric"></div></div>
-  <label class="sw"><input type="checkbox" id="fast" checked><span></span><div><b>Fast mode</b><small>AMX and OpenBLAS. x86 only, 1 thread.</small></div></label>
-  <label class="sw"><input type="checkbox" id="recompute"><span></span><div><b>Low-RAM mode</b><small>Recomputes layers. About 300 MB, slower.</small></div></label>
+   <div class="ft"><label for="batch">Tokens per step</label><input id="batch" type="number" value="640" inputmode="numeric"></div>
+   <div class="ft"><label for="targets">Targets</label><select id="targets"><option value="all">All layers</option><option value="attn">Attention</option><option value="mlp">MLP</option></select></div>
+   <div class="ft"><label for="threads">Threads</label><input id="threads" type="number" value="1" inputmode="numeric"></div></div>
+  <label class="sw ft"><input type="checkbox" id="fast" checked><span></span><div><b>Fast mode</b><small>AMX and OpenBLAS. x86 only, 1 thread.</small></div></label>
+  <label class="sw ft"><input type="checkbox" id="recompute"><span></span><div><b>Low-RAM mode</b><small>Recomputes layers. About 300 MB, slower.</small></div></label>
   <button class="btn primary block" id="go">Start training</button><p class="note" id="trmsg"></p></div>
 </section>
 <section id="train" class="page" hidden>
@@ -39,6 +56,7 @@
  <div class="bar"><i id="prog"></i></div>
  <div class="metrics"><div><span>Speed</span><b id="tps">–</b><small>tok/s</small></div><div><span>Memory</span><b id="ram">–</b><small>MB RSS</small></div><div><span>Remaining</span><b id="eta">–</b><small id="stp">–</small></div></div>
  <div class="card"><div class="chart-head"><h2>Loss</h2><div class="legend"><span class="l1">train <b id="loss">–</b></span><span class="l2">held-out <b id="hl">–</b></span></div></div><canvas id="chart" height="200"></canvas></div>
+ <p class="note" id="moeinfo" hidden></p>
  <div class="actions"><button class="btn danger" id="stop">Stop and save</button><button class="btn" id="resume">Resume</button></div>
  <details class="log"><summary>Trainer log</summary><pre id="log"></pre></details></div>
 </section>

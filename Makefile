@@ -3,7 +3,7 @@ CC = clang
 endif
 CFLAGS  ?= -O3 -g -Wall -Wextra -std=c11
 LDFLAGS ?=
-LDLIBS  ?= -lpthread -lm
+LDLIBS  ?= -lpthread -lm -ldl
 
 # The SDOT kernel needs armv8.2-a+dotprod. It is only called when the CPU
 # reports asimddp at runtime, so the binary still runs on older cores.
@@ -12,7 +12,7 @@ ifeq ($(ARCH),aarch64)
 DOTPROD_FLAGS ?= -march=armv8.2-a+dotprod
 endif
 
-BIN  = es_gen es_bench es_kbench es_run es_import es_chat es_serve es_mtest es_qtest es_toktest es_tmpltest es_get es_graft es_lora
+BIN  = es_gen es_bench es_kbench es_run es_import es_chat es_serve es_mtest es_qtest es_toktest es_tmpltest es_get es_graft es_lora es_train
 HDRS = $(wildcard src/*.h) tools/es_common.h
 CORE = src/es_io.c src/es_cpu.c src/es_q2k.c src/es_compute.c src/es_cache.c
 
@@ -58,8 +58,13 @@ es_qtest: tools/es_qtest.c src/es_gguf.c src/es_quant.c src/es_q2k.c src/es_cpu.
 es_toktest: tools/es_toktest.c src/es_gguf.c src/es_tok.c src/es_regex.c $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_toktest.c src/es_gguf.c src/es_tok.c src/es_regex.c $(LDFLAGS) $(LDLIBS)
 
-es_lora: tools/es_lora.c tools/es_data.h tools/es_json.h src/es_train.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
-	$(CC) $(CFLAGS) -o $@ tools/es_lora.c src/es_train.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
+es_lora: tools/es_lora.c tools/es_data.h tools/es_json.h src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -o $@ tools/es_lora.c src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
+# es_train: one trainer, modes finetune (es_lora) and moe (moe/es_moe.c); es_lora stays as its own binary too
+es_train: tools/es_train.c tools/es_lora.c moe/es_moe.c tools/es_data.h tools/es_json.h src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
+	$(CC) $(CFLAGS) -c -o es_lora_u.o -DES_TRAIN_UNIFIED tools/es_lora.c
+	$(CC) $(CFLAGS) -c -o es_moe_u.o -DES_TRAIN_UNIFIED moe/es_moe.c
+	$(CC) $(CFLAGS) -o $@ tools/es_train.c es_lora_u.o es_moe_u.o src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 es_graft: tools/es_graft.c tools/es_json.h $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_graft.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 
