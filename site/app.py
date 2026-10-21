@@ -2,7 +2,8 @@
 """Expert Stream site: accounts, plans + Razorpay (TEST mode), Run (streamed MoE inference). Port 8780.
 The notebook lives in the separate expert-stream-trainer app; both share es_common (DB, JWT, subscriptions, model library)."""
 import hashlib, hmac, json, os, resource, signal, subprocess, sys, tempfile, threading, time, uuid
-from flask import Flask, abort, jsonify, redirect, render_template, request
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, stream_with_context
+import socket, urllib.request
 import es_common as C
 from es_common import esmoe
 
@@ -50,6 +51,41 @@ def run_moe():
     d = request.json or {}; m = C.get_model(d.get("model", "")) or abort(404)
     if m["id"] not in _run_cache: _run_cache[m["id"]] = esmoe.StreamedMoE(m["path"], cache_mb=64)
     return jsonify(_run_cache[m["id"]].generate(d.get("prompt", "")[:2000] or " ", max_new=min(int(d.get("max_new", 64)), 256), temperature=float(d.get("temperature", 0.6))))
+
+# ---- GGUF chat backend: prebuilt es_serve per (model, threads), proxied as SSE so TTFT is real ----
+_gguf_srv = {}; _gguf_lock = threading.Lock()
+def _gguf_server(m, threads):
+    key = (m["id"], threads)
+    with _gguf_lock:
+        s = _gguf_srv.get(key)
+        if s and s["p"].poll() is None: return s
+        so = socket.socket(); so.bind(("127.0.0.1", 0)); port = so.getsockname()[1]; so.close()
+        nice = int(os.environ.get("ES_CHAT_NICE", "10"))
+        env = dict(os.environ, ES_PREFIX_CACHE=os.environ.get("ES_PREFIX_CACHE", "0"))
+        p = subprocess.Popen(["nice", "-n", str(nice), C.es_bin("es_serve"), "-g", m["path"], "-p", str(port), "-j", str(threads), "-c", "2048"],
+                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(600):
+            try: urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1); break
+            except Exception:
+                if p.poll() is not None: raise RuntimeError("es_serve exited")
+                time.sleep(0.1)
+        s = _gguf_srv[key] = dict(p=p, port=port); return s
+
+@app.post("/api/chat")
+def chat_api():
+    d = request.json or {}; m = C.get_model(d.get("model", "")) or abort(404)
+    if m.get("source") != "gguf": abort(400, "not a GGUF model; use /api/run_moe")
+    threads = max(1, min(int(d.get("threads", os.environ.get("ES_CHAT_THREADS", 2))), 8))
+    msgs = d.get("messages") or [{"role": "user", "content": d.get("prompt", "")[:8000] or " "}]
+    s = _gguf_server(m, threads)
+    body = json.dumps(dict(model=m["name"], messages=msgs, stream=True, stream_options={"include_usage": True},
+                           max_tokens=min(int(d.get("max_new", 128)), 1024), temperature=float(d.get("temperature", 0.6)))).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{s['port']}/v1/chat/completions", body, {"Content-Type": "application/json"})
+    def gen():
+        with urllib.request.urlopen(req, timeout=600) as r:
+            for line in r:
+                if line.strip(): yield line.decode() + "\n"
+    return Response(stream_with_context(gen()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.get("/create")
 def create_page(): return render_template("create.html")
