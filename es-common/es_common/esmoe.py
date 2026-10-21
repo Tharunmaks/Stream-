@@ -83,6 +83,7 @@ class StreamedMoE:
         elif self.packed: self.W = _seeded_dense(c)
         else: raise FileNotFoundError(dn)
         if self.packed: self.fd = os.open(c["bin"], os.O_RDONLY)
+        self.xc = _xc_open(c) if self.packed else None   # C LRU expert cache (libesxc.so, prebuilt engine lib), None = numpy path
         self.cache = OrderedDict(); self.budget = cache_mb << 20; self.used = 0
         self.stats = dict(reads=0, hits=0, bytes_read=0)
 
@@ -127,6 +128,13 @@ class StreamedMoE:
             top = np.argsort(-g, axis=1)[:, :c["topk"]]
             gv = np.take_along_axis(g, top, 1); gv = np.exp(gv - gv.max(1, keepdims=True)); gv /= gv.sum(1, keepdims=True)
             y = np.zeros_like(x)
+            if self.xc is not None:
+                xc, lib = self.xc; buf = np.empty((T, d), np.float32); tmp = np.empty((T, c["ffn"]), np.float32)
+                for e in np.unique(top):
+                    rows, slot = np.nonzero(top == e); hr = np.ascontiguousarray(h[rows], np.float32); yb = buf[:len(rows)]
+                    if lib.esxc_ffn(xc, l, int(e), _fp(hr), len(rows), _fp(yb), _fp(tmp)) < 0: raise IOError("expert read failed")
+                    y[rows] += yb * gv[rows, slot][:, None]
+                x = x + y; continue
             for e in np.unique(top):
                 rows, slot = np.nonzero(top == e); w1, w2 = self.expert(l, int(e))
                 z = h[rows] @ w1.T; z = np.maximum(z, 0) if relu else z / (1 + np.exp(-z))
@@ -149,7 +157,12 @@ class StreamedMoE:
         dt = time.time() - t0
         yield "done", dict(new_tokens=max_new, prompt_tokens=len(ids), prompt_s=round(tp, 4), ttft_s=round(ttft, 4), seconds=round(dt, 3),
                            tok_per_s=round(max_new / dt, 2), decode_tok_per_s=round((max_new - 1) / max(dt - ttft, 1e-9), 2),
-                           cache_mb=round(self.used / 2**20, 1), **self.stats)
+                           cache_mb=round(self.used / 2**20, 1), **self._st())
+
+    def _st(self):
+        if self.xc is None: return dict(self.stats)
+        import ctypes; a = (ctypes.c_long * 3)(); self.xc[1].esxc_stats(self.xc[0], a)
+        h, m = a[0], a[1]; return dict(reads=m, hits=h, bytes_read=a[2], hit_rate=round(h / max(h + m, 1), 4), xc_slots=self.xc[1].esxc_slots(self.xc[0]))
 
     def generate(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128):
         toks = []
@@ -157,6 +170,29 @@ class StreamedMoE:
             if kind == "token": toks.append(v)
             else: st = v
         return dict(text=bytes(toks).decode("utf-8", "replace"), **st)
+
+def _fp(a):
+    import ctypes; return a.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+def _xc_open(c):
+    """Open the C LRU expert cache if libesxc.so is installed (ES_XC_LIB, else ES_BIN_DIR/libesxc.so). Cache size: ES_RUN_XC_MB
+    (default 2048), capped at half of MemAvailable. ES_RUN_XC=0 forces the numpy path."""
+    import ctypes
+    if os.environ.get("ES_RUN_XC") == "0": return None
+    path = os.environ.get("ES_XC_LIB") or os.path.join(os.environ.get("ES_BIN_DIR", os.path.expanduser("~/.expertstream/bin")), "libesxc.so")
+    if not os.path.exists(path): return None
+    lib = ctypes.CDLL(path); lib.esxc_open.restype = ctypes.c_void_p
+    lib.esxc_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long, ctypes.c_float, ctypes.c_int]
+    P = ctypes.POINTER(ctypes.c_float)
+    lib.esxc_ffn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, P, ctypes.c_int, P, P]
+    lib.esxc_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]; lib.esxc_slots.argtypes = [ctypes.c_void_p]
+    mb = int(os.environ.get("ES_RUN_XC_MB", 2048))
+    try: avail = int([l for l in open("/proc/meminfo") if l.startswith("MemAvailable")][0].split()[1]) // 1024; mb = min(mb, avail // 2)
+    except Exception: pass
+    th = int(os.environ.get("ES_RUN_XC_THREADS", 2))
+    h = lib.esxc_open(c["bin"].encode(), c["layers"], c["experts"], c["dim"], c["ffn"], max(mb, 1) << 20, c.get("scale", 0.02), th)
+    if not h: raise IOError("esxc_open failed")
+    return (ctypes.c_void_p(h), lib)
 
 def _seeded_dense(c, seed=0):
     """Dense weights for packs that ship experts only (the Lab's speed packs): seeded random, generated in RAM, never stored.
