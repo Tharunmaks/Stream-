@@ -50,6 +50,27 @@ def create_model(name: str, total_params: float, experts: int = 0, topk: int = 2
     mid = C.register_model(os.environ.get("ES_MCP_USER_ID", "mcp"), name, p, c, "mcp"); return dict(id=mid, path=p, **{k: v for k, v in c.items() if k != "train"})
 
 @mcp.tool()
+def chat(model: str, prompt: str, max_new_tokens: int = 128, threads: int = 2, temperature: float = 0.6) -> dict:
+    """Chat with a GGUF model from the library through Expert Stream Run (/api/chat; llama.cpp or es_serve backend).
+    Returns the reply plus measured time-to-first-token and decode tok/s."""
+    import json as _j, time as _t, urllib.request as _u
+    body = _j.dumps(dict(model=model, prompt=prompt, max_new=min(max_new_tokens, 1024), threads=max(1, min(threads, 4)), temperature=temperature)).encode()
+    req = _u.Request(os.environ.get("ES_SITE_URL", "http://127.0.0.1:8780") + "/api/chat", body, {"Content-Type": "application/json"})
+    t0 = _t.time(); ft = None; txt = ""; usage = {}
+    with _u.urlopen(req, timeout=600) as r:
+        for line in r:
+            l = line.decode().strip()
+            if not l.startswith("data:") or "[DONE]" in l: continue
+            j = _j.loads(l[5:])
+            if j.get("usage"): usage = dict(j["usage"], **(j.get("x_expertstream") or {}))
+            for c in j.get("choices") or []:
+                d = (c.get("delta") or {}).get("content")
+                if d:
+                    if ft is None: ft = _t.time() - t0
+                    txt += d
+    return dict(text=txt, ttft_s=round(ft or 0, 3), **usage)
+
+@mcp.tool()
 def run_moe(name: str, prompt: str, max_new_tokens: int = 48, temperature: float = 0.7, cache_mb: int = 256) -> dict:
     """Run inference on an es-moe-v1 model. Only routed experts are read from disk through an LRU cache of cache_mb,
     so total size can exceed RAM. Returns text plus measured tok/s and expert read stats."""

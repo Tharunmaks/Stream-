@@ -80,7 +80,7 @@ def subscription(uid):
 def register_model(uid, name, path, cfg, source):
     mid = uuid.uuid4().hex[:12]
     db().q("INSERT INTO models VALUES (?,?,?,?,?,?,?,?,?)", (mid, uid, name, path, cfg.get("total_params"), cfg.get("active_params"),
-           source, json.dumps({k: v for k, v in cfg.items() if k in ("layers", "experts", "dim", "ffn", "topk", "train", "materialized")}), time.time()))
+           source, json.dumps({k: v for k, v in cfg.items() if k in ("layers", "experts", "dim", "ffn", "topk", "train", "materialized", "backend", "quant")}), time.time()))
     return mid
 def list_models(uid=None):
     rows = db().q("SELECT * FROM models ORDER BY created DESC") if uid is None else db().q("SELECT * FROM models WHERE user_id=? ORDER BY created DESC", (uid,))

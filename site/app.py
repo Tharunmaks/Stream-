@@ -69,10 +69,18 @@ def _gguf_server(m, threads):
         so = socket.socket(); so.bind(("127.0.0.1", 0)); port = so.getsockname()[1]; so.close()
         nice = int(os.environ.get("ES_CHAT_NICE", "10"))
         env = dict(os.environ, ES_PREFIX_CACHE=os.environ.get("ES_PREFIX_CACHE", "0"))
-        p = subprocess.Popen(["nice", "-n", str(nice), C.es_bin("es_serve"), "-g", m["path"], "-p", str(port), "-j", str(threads), "-c", "2048"],
+        mt = m.get("meta") or {}; mt = json.loads(mt) if isinstance(mt, str) else mt
+        llama = mt.get("backend") == "llama.cpp"
+        if llama:   # llama.cpp backend: persistent llama-server, model stays resident (mmap + mlock-free), max 4 threads
+            lt = max(2, min(4, os.cpu_count() - int(os.getloadavg()[0]))) if threads == "auto" else min(int(threads), 4)
+            cmd = [os.environ.get("ES_LLAMA_SERVER", "/workspace/llamabin/llama-b11583/llama-server"), "-m", m["path"], "--host", "127.0.0.1",
+                   "--port", str(port), "-t", str(lt), "-tb", str(lt), "-c", "2048", "-np", "1", "--no-webui"]
+        else:
+            cmd = [C.es_bin("es_serve"), "-g", m["path"], "-p", str(port), "-j", str(threads), "-c", "2048"]
+        p = subprocess.Popen(["nice", "-n", str(nice)] + cmd,
                              env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         for _ in range(600):
-            try: urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=1); break
+            try: urllib.request.urlopen(f"http://127.0.0.1:{port}/" + ("health" if llama else "v1/models"), timeout=1); break
             except Exception:
                 if p.poll() is not None: raise RuntimeError("es_serve exited")
                 time.sleep(0.1)
@@ -92,7 +100,16 @@ def chat_api():
     def gen():
         with urllib.request.urlopen(req, timeout=600) as r:
             for line in r:
-                if line.strip(): yield line.decode() + "\n"
+                if not line.strip(): continue
+                t = line.decode()
+                if t.startswith("data:") and '"usage"' in t and "x_expertstream" not in t:
+                    try:   # llama.cpp: map its timings to the usage extension Run reads
+                        j = json.loads(t[5:]); tm = j.get("timings") or {}
+                        if j.get("usage"):
+                            j["x_expertstream"] = dict(tokens_per_s=round(tm.get("predicted_per_second", 0), 1), ttft_ms=round(tm.get("prompt_ms", 0), 1), backend="llama.cpp")
+                            t = "data: " + json.dumps(j) + "\n"
+                    except Exception: pass
+                yield t + "\n"
     return Response(stream_with_context(gen()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.get("/create")
