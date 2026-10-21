@@ -419,6 +419,8 @@ static int blas_init(int threads) {
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL); if (!h) { fprintf(stderr, "ES_BLAS: %s\n", dlerror()); return 0; }
     SG32 = (sgemm32_t)dlsym(h, "cblas_sgemm"); if (!SG32) SG64 = (sgemm64_t)dlsym(h, "scipy_cblas_sgemm64_");
     void (*nt32)(int) = (void (*)(int))dlsym(h, "openblas_set_num_threads"); void (*nt64)(long) = (void (*)(long))dlsym(h, "scipy_openblas_set_num_threads64_");
+    /* BLAS threads default to 1: its own threads fight the trainer's spinning pool and collapse speed on a busy machine */
+    const char *bt = getenv("ES_BLAS_THREADS"); threads = bt ? atoi(bt) : 1; if (threads < 1) threads = 1;
     if (nt32) nt32(threads); else if (nt64) nt64(threads);
     BLAS_STATE = SG32 || SG64; if (BLAS_STATE) fprintf(stderr, "ES_BLAS: using %s\n", path);
     return BLAS_STATE;
