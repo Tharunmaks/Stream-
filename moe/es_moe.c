@@ -54,7 +54,7 @@ static size_t LOE; static uint8_t *touched;   /* per (l,e) LoRA block: Au r x D,
 #define GAU(l,e) (glo + ((size_t)(l) * E + (e)) * LOE)
 
 /* ---- activations saved per layer */
-typedef struct { float *xin, *a, *ra, *q, *k, *v, *Pr, *att, *xmid, *b, *rb, *gp, *u, *y, *zu, *zd; int *sel; } lay;
+typedef struct { float *xin, *a, *ra, *q, *k, *v, *Pr, *att, *xmid, *b, *rb, *gp, *pf, *u, *y, *zu, *zd; int *sel; } lay;
 static lay *A; static float *xf, *rf, *logit;
 static int *cnt, *lst;   /* per expert: token-slot lists */
 
@@ -63,15 +63,17 @@ static void rms_bwd(float *dx, const float *a, float r, const float *da, int n) 
 static float silu(float u) { return u / (1 + expf(-u)); }
 static float *Xg, *Ug, *Hg, *Yg, *Zu, *Zd, *Tm, *T2, *dXg, *Wu, *Wd, *SS, *dP;
 
-static void route(int l) {
+static int RANDR; static void route(int l) {
     lay *y = &A[l]; float *lg = Tm;
     mm(0, 1, NT, E, D, 1, y->b, D, Wr[l], D, 0, lg, E);
     memset(cnt, 0, sizeof(int) * E);
     for (int t = 0; t < NT; t++) {
         float *z = lg + (size_t)t * E; int *s = y->sel + (size_t)t * K; float *g = y->gp + (size_t)t * K;
-        for (int j = 0; j < K; j++) { int bi = -1; for (int e = 0; e < E; e++) { int u = 0; for (int i = 0; i < j; i++) u |= s[i] == e; if (!u && (bi < 0 || z[e] > z[bi])) bi = e; } s[j] = bi; }
+        if (RANDR) { for (int j = 0; j < K; j++) { int e; do { e = (int)(xr() % E); int u = 0; for (int i = 0; i < j; i++) u |= s[i] == e; if (!u) break; } while (1); s[j] = e; } }
+        else for (int j = 0; j < K; j++) { int bi = -1; for (int e = 0; e < E; e++) { int u = 0; for (int i = 0; i < j; i++) u |= s[i] == e; if (!u && (bi < 0 || z[e] > z[bi])) bi = e; } s[j] = bi; }
         float mx = z[s[0]], sum = 0; for (int j = 0; j < K; j++) { g[j] = expf(z[s[j]] - mx); sum += g[j]; } for (int j = 0; j < K; j++) g[j] /= sum;
         for (int j = 0; j < K; j++) lst[(size_t)s[j] * NT * K + cnt[s[j]]++] = t * K + j;
+        { float *pq = y->pf + (size_t)t * E, m2 = -INFINITY; double sm = 0; for (int e = 0; e < E; e++) if (z[e] > m2) m2 = z[e]; for (int e = 0; e < E; e++) { pq[e] = expf(z[e] - m2); sm += pq[e]; } for (int e = 0; e < E; e++) pq[e] /= sm; }
     }
 }
 static void layer_fwd(int l, float *x) {
@@ -107,6 +109,7 @@ static void layer_fwd(int l, float *x) {
         }
     }
 }
+static float AUX = 0.01f; static double AUXL;
 static float *db, *dg, *da, *dq, *dk, *dv, *datt;
 static void layer_bwd(int l, float *dx) {
     lay *y = &A[l]; const float sc = 1 / sqrtf((float)HD);
@@ -138,6 +141,12 @@ static void layer_bwd(int l, float *dx) {
     /* router: top-k renormalised softmax */
     float *dl = Tm; memset(dl, 0, 4 * (size_t)NT * E);
     for (int t = 0; t < NT; t++) { const float *g = y->gp + (size_t)t * K, *q = dg + (size_t)t * K; float m = 0; for (int j = 0; j < K; j++) m += g[j] * q[j]; for (int j = 0; j < K; j++) dl[(size_t)t * E + y->sel[t * K + j]] = g[j] * (q[j] - m); }
+    if (AUX > 0) {   /* Switch-style balance loss AUX * E * sum_e f_e * mean_t p_te, f_e = routed fraction (constant) */
+        for (int e = 0; e < E; e++) Tm[(size_t)NT * E + e] = AUX * E * ((float)cnt[e] / (NT * K)) / NT;
+        const float *dPe = Tm + (size_t)NT * E; double bal = 0;
+        for (int t = 0; t < NT; t++) { const float *pq = y->pf + (size_t)t * E; double m = 0; for (int e = 0; e < E; e++) m += pq[e] * dPe[e]; for (int e = 0; e < E; e++) dl[(size_t)t * E + e] += pq[e] * (dPe[e] - (float)m); }
+        for (int e = 0; e < E; e++) { double pm = 0; for (int t = 0; t < NT; t++) pm += y->pf[(size_t)t * E + e]; bal += ((double)cnt[e] / (NT * K)) * pm / NT; } AUXL += AUX * E * bal;
+    }
     mm(1, 0, E, D, NT, 1, dl, E, y->b, D, 1, gWr[l], D); mm(0, 0, NT, D, E, 1, dl, E, Wr[l], D, 1, db, D);
     for (int t = 0; t < NT; t++) rms_bwd(dx + (size_t)t * D, y->b + (size_t)t * D, y->rb[t], db + (size_t)t * D, D);
     /* attention */
@@ -190,6 +199,8 @@ int main(int argc, char **argv) {
         for (long i = 0; i < (long)L * E; i++) { for (size_t j = 0; j < EB; j += 8) { uint64_t w = 0, r = xr(); for (int q = 0; q < 32; q++) { uint64_t c = (r >> (2 * q)) & 3; w |= (c == 3 ? 0 : c) << (2 * q); } memcpy(b + j, &w, 8); } if (write(fd, b, EB) != (ssize_t)EB) { perror("write"); return 1; } }
         close(fd); printf("wrote %ld experts x %zu bytes = %.2f GB, %.3f B frozen params\n", (long)L * E, EB, (double)L * E * EB / 1e9, (double)L * E * 2 * D * F / 1e9); return 0;
     }
+    RANDR = getenv("ES_RANDROUTE") != NULL;   /* stress: uniform random top-k routing (worst case for the cache) */
+    if (getenv("ES_AUX")) AUX = atof(getenv("ES_AUX"));
     K = atoi(argv[7]); R = atoi(argv[8]); const int steps = atoi(argv[9]); const double cmb = atof(argv[10]); const char *data = argv[11];
     S = argc > 12 ? atoi(argv[12]) : 4; T = argc > 13 ? atoi(argv[13]) : 128; NT = S * T; HD = D / H;
     void *h = dlopen(getenv("ES_BLAS"), RTLD_NOW); if (!h) { fprintf(stderr, "set ES_BLAS\n"); return 1; }
@@ -212,7 +223,7 @@ int main(int argc, char **argv) {
     for (int le = 0; le < L * E; le++) { float *a = lo + le * LOE; for (size_t i = 0; i < (size_t)R * D; i++) a[i] = nrm() / sqrtf(D); float *ad = a + (size_t)R * D + (size_t)F * R; for (size_t i = 0; i < (size_t)R * F; i++) ad[i] = nrm() / sqrtf(F); }
     A = calloc(L, sizeof(lay)); const size_t TD = (size_t)NT * D;
     for (int l = 0; l < L; l++) { lay *y = &A[l]; y->xin = fa(TD); y->a = fa(TD); y->ra = fa(NT); y->q = fa(TD); y->k = fa(TD); y->v = fa(TD); y->Pr = fa((size_t)S * H * T * T); y->att = fa(TD); y->xmid = fa(TD); y->b = fa(TD); y->rb = fa(NT);
-        y->gp = fa((size_t)NT * K); y->sel = malloc(sizeof(int) * NT * K); y->u = fa((size_t)NT * K * F); y->y = fa((size_t)NT * K * D); y->zu = fa((size_t)NT * K * (R ? R : 1)); y->zd = fa((size_t)NT * K * (R ? R : 1)); }
+        y->gp = fa((size_t)NT * K); y->pf = fa((size_t)NT * E); y->sel = malloc(sizeof(int) * NT * K); y->u = fa((size_t)NT * K * F); y->y = fa((size_t)NT * K * D); y->zu = fa((size_t)NT * K * (R ? R : 1)); y->zd = fa((size_t)NT * K * (R ? R : 1)); }
     xf = fa(TD); rf = fa(NT); logit = fa((size_t)NT * 256); X = fa(TD); pe = fa((size_t)T * D);
     for (int t = 0; t < T; t++) for (int i = 0; i < D; i += 2) { const double w = pow(10000, -(double)i / D); pe[t * D + i] = 0.1f * (float)sin(t * w); pe[t * D + i + 1] = 0.1f * (float)cos(t * w); }
     cnt = malloc(sizeof(int) * E); lst = malloc(sizeof(int) * (size_t)E * NT * K);
@@ -240,12 +251,12 @@ int main(int argc, char **argv) {
     for (step_no = 1; step_no <= steps; step_no++) {
         for (int s = 0; s < S; s++) { ds = ds * 6364136223846793005ULL + 1442695040888963407ULL; const long o = (long)((ds >> 17) % (uint64_t)(split - T - 2)); memcpy(tok + s * (T + 1), dat + o, T + 1); }
         const double t0 = now(), io0 = io_s, b0 = io_bytes, h0 = hits, m0 = miss, f0 = FLOPS;
-        const double loss = run(tok, 1);
+        AUXL = 0; const double loss = run(tok, 1);
         double gn = 0; for (size_t i = 0; i < P.n; i++) gn += (double)P.g[i] * P.g[i]; gn = sqrt(gn); const float clip = gn > 1 ? (float)(1 / gn) : 1; for (size_t i = 0; i < P.n; i++) P.g[i] *= clip;
         adam_range(0, nd, 1e-3f); int nt_ = 0; for (int le = 0; le < L * E; le++) if (touched[le]) { adam_range(nd + le * LOE, LOE, 1e-3f); touched[le] = 0; nt_++; }   /* lazy: only experts that saw tokens */
         const double dt = now() - t0; if (step_no > 1) { tsum += dt; tn++; }
         struct rusage ru; getrusage(RUSAGE_SELF, &ru);
-        printf("step %d loss %.4f |g| %.3f %.2fs %.1f tok/s io %.2fs %.1f MB (%.0f MB/s) hit %.1f%% experts-touched %d GFLOP %.1f (%.1f GFLOP/s) rss %ld MB\n", step_no, loss, gn, dt, NT / dt, io_s - io0, (io_bytes - b0) / 1e6,
+        printf("step %d loss %.4f aux %.3f |g| %.3f %.2fs %.1f tok/s io %.2fs %.1f MB (%.0f MB/s) hit %.1f%% experts-touched %d GFLOP %.1f (%.1f GFLOP/s) rss %ld MB\n", step_no, loss, AUXL / L, gn, dt, NT / dt, io_s - io0, (io_bytes - b0) / 1e6,
                io_s - io0 > 0 ? (io_bytes - b0) / 1e6 / (io_s - io0) : 0, 100 * (hits - h0) / (hits - h0 + miss - m0), nt_, (FLOPS - f0) / 1e9, (FLOPS - f0) / 1e9 / dt, ru.ru_maxrss / 1024);
         fflush(stdout);
     }

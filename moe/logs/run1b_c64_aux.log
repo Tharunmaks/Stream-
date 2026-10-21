@@ -1,0 +1,22 @@
+cfg L=8 E=64 d=1024 f=1024 k=2 r=8 | frozen expert params 1.074 B (0.27 GB ternary on disk) | trainable 51.1 M (dense 34.3 M + expert LoRA 16.8 M) | active/token 68.4 M | cache 128 slots (64 MB, 25.0% of experts)
+step 1 loss 5.8965 aux 0.030 |g| 45.298 2.19s 233.9 tok/s io 0.04s 43.0 MB (1164 MB/s) hit 50.0% experts-touched 82 GFLOP 182.3 (83.3 GFLOP/s) rss 960 MB
+step 2 loss 5.3116 aux 0.032 |g| 36.395 1.60s 319.2 tok/s io 0.01s 11.0 MB (1051 MB/s) hit 63.8% experts-touched 29 GFLOP 182.3 (113.6 GFLOP/s) rss 978 MB
+step 3 loss 9.0980 aux 0.030 |g| 15.490 1.67s 307.0 tok/s io 0.01s 12.6 MB (1106 MB/s) hit 57.1% experts-touched 28 GFLOP 182.3 (109.3 GFLOP/s) rss 997 MB
+step 4 loss 5.6964 aux 0.030 |g| 12.856 1.66s 308.1 tok/s io 0.00s 4.7 MB (1437 MB/s) hit 78.6% experts-touched 21 GFLOP 182.3 (109.7 GFLOP/s) rss 1002 MB
+step 5 loss 4.6786 aux 0.027 |g| 9.899 1.66s 308.2 tok/s io 0.00s 7.9 MB (1669 MB/s) hit 65.9% experts-touched 22 GFLOP 182.3 (109.7 GFLOP/s) rss 1005 MB
+step 6 loss 3.9193 aux 0.027 |g| 9.199 1.57s 326.1 tok/s io 0.01s 8.9 MB (1405 MB/s) hit 61.4% experts-touched 22 GFLOP 182.3 (116.1 GFLOP/s) rss 1010 MB
+step 7 loss 3.2169 aux 0.026 |g| 8.641 1.57s 326.0 tok/s io 0.01s 7.3 MB (1242 MB/s) hit 61.1% experts-touched 18 GFLOP 182.3 (116.0 GFLOP/s) rss 1014 MB
+step 8 loss 2.7243 aux 0.026 |g| 3.876 1.55s 329.8 tok/s io 0.01s 10.0 MB (1329 MB/s) hit 52.5% experts-touched 20 GFLOP 182.3 (117.4 GFLOP/s) rss 1020 MB
+step 9 loss 3.2537 aux 0.027 |g| 16.636 1.63s 313.6 tok/s io 0.01s 8.4 MB (1008 MB/s) hit 57.9% experts-touched 19 GFLOP 182.3 (111.6 GFLOP/s) rss 1024 MB
+step 10 loss 3.6031 aux 0.026 |g| 19.090 1.58s 323.7 tok/s io 0.01s 11.0 MB (943 MB/s) hit 52.3% experts-touched 22 GFLOP 182.3 (115.2 GFLOP/s) rss 1030 MB
+step 11 loss 3.2591 aux 0.026 |g| 14.776 1.66s 309.3 tok/s io 0.01s 12.1 MB (1279 MB/s) hit 55.8% experts-touched 26 GFLOP 182.3 (110.1 GFLOP/s) rss 1036 MB
+step 12 loss 2.8844 aux 0.028 |g| 7.258 1.59s 322.6 tok/s io 0.01s 7.3 MB (1190 MB/s) hit 63.2% experts-touched 19 GFLOP 182.3 (114.8 GFLOP/s) rss 1040 MB
+step 13 loss 2.9559 aux 0.028 |g| 7.318 1.62s 316.6 tok/s io 0.01s 10.5 MB (1061 MB/s) hit 58.3% experts-touched 24 GFLOP 182.3 (112.7 GFLOP/s) rss 1045 MB
+step 14 loss 2.8283 aux 0.029 |g| 6.501 1.62s 315.1 tok/s io 0.01s 10.0 MB (1223 MB/s) hit 56.8% experts-touched 22 GFLOP 182.3 (112.2 GFLOP/s) rss 1050 MB
+step 15 loss 2.8209 aux 0.030 |g| 7.160 1.65s 309.8 tok/s io 0.01s 8.9 MB (1352 MB/s) hit 63.0% experts-touched 23 GFLOP 182.3 (110.3 GFLOP/s) rss 1055 MB
+step 16 loss 2.8080 aux 0.032 |g| 7.262 1.78s 287.6 tok/s io 0.01s 8.9 MB (787 MB/s) hit 59.5% experts-touched 21 GFLOP 182.3 (102.4 GFLOP/s) rss 1059 MB
+step 17 loss 2.7762 aux 0.035 |g| 6.018 1.58s 323.7 tok/s io 0.01s 11.0 MB (857 MB/s) hit 54.3% experts-touched 23 GFLOP 182.3 (115.2 GFLOP/s) rss 1064 MB
+step 18 loss 2.7403 aux 0.038 |g| 5.759 1.67s 306.2 tok/s io 0.01s 7.9 MB (1193 MB/s) hit 65.9% experts-touched 22 GFLOP 182.3 (109.0 GFLOP/s) rss 1069 MB
+step 19 loss 2.7022 aux 0.041 |g| 5.798 1.66s 309.3 tok/s io 0.01s 7.9 MB (1277 MB/s) hit 62.5% experts-touched 20 GFLOP 182.3 (110.1 GFLOP/s) rss 1073 MB
+step 20 loss 2.6623 aux 0.045 |g| 5.240 1.71s 298.9 tok/s io 0.01s 7.3 MB (1369 MB/s) hit 66.7% experts-touched 21 GFLOP 182.3 (106.4 GFLOP/s) rss 1077 MB
+held-out loss 2.6818 | mean step 1.63s = 313.4 tok/s (steps 2..)

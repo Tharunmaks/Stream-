@@ -1,0 +1,7 @@
+cfg L=8 E=640 d=1024 f=1024 k=2 r=2 | frozen expert params 10.737 B (2.68 GB ternary on disk) | trainable 81.0 M (dense 39.1 M + expert LoRA 41.9 M) | active/token 72.7 M | cache 512 slots (256 MB, 10.0% of experts)
+step 1 loss 5.3726 aux 0.010 |g| 40.016 31.28s 131.0 tok/s io 5.16s 5100.3 MB (989 MB/s) hit 5.0% experts-touched 5120 GFLOP 1564.4 (50.0 GFLOP/s) rss 3534 MB
+step 2 loss 4.3460 aux 0.010 |g| 31.728 28.53s 143.5 tok/s io 4.07s 4831.8 MB (1188 MB/s) hit 10.0% experts-touched 5120 GFLOP 1564.4 (54.8 GFLOP/s) rss 3566 MB
+step 3 loss 10.6999 aux 0.010 |g| 13.857 29.00s 141.3 tok/s io 4.04s 4831.8 MB (1195 MB/s) hit 10.0% experts-touched 5120 GFLOP 1564.4 (54.0 GFLOP/s) rss 3566 MB
+step 4 loss 6.1228 aux 0.010 |g| 8.957 27.90s 146.8 tok/s io 3.93s 4831.8 MB (1231 MB/s) hit 10.0% experts-touched 5120 GFLOP 1564.4 (56.1 GFLOP/s) rss 3566 MB
+step 5 loss 5.0514 aux 0.010 |g| 9.145 28.00s 146.3 tok/s io 4.50s 4831.8 MB (1073 MB/s) hit 10.0% experts-touched 5120 GFLOP 1564.4 (55.9 GFLOP/s) rss 3566 MB
+held-out loss 4.2633 | mean step 28.36s = 144.4 tok/s (steps 2..)
