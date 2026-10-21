@@ -864,10 +864,51 @@ static void norm2_job(void *c_, int item, int tid) {
     (void)tid; layer_ctx *c = c_; es_tm *m = c->m; const int T = c->b->base[c->b->S];
     for (int t = item * 16; t < item * 16 + 16 && t < T; t++) m->r2[t] = rms_row(m->Xn2 + (size_t)t * m->d, m->Xm + (size_t)t * m->d, m->ly[c->l].ffn_norm, m->d, m->eps);
 }
+
+#if defined(__x86_64__) && defined(__GNUC__)
+#include <immintrin.h>
+/* sigmoid on 16 lanes: exp via 2^n * poly (rel err ~1e-7), AVX-512F only */
+__attribute__((target("avx512f"))) static inline __m512 vsig16(__m512 g) {
+    __m512 x = _mm512_max_ps(_mm512_min_ps(_mm512_sub_ps(_mm512_setzero_ps(), g), _mm512_set1_ps(88.0f)), _mm512_set1_ps(-88.0f));
+    __m512 n = _mm512_roundscale_ps(_mm512_mul_ps(x, _mm512_set1_ps(1.44269504088896341f)), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m512 r = _mm512_fnmadd_ps(n, _mm512_set1_ps(0.693359375f), x);
+    r = _mm512_fnmadd_ps(n, _mm512_set1_ps(-2.12194440e-4f), r);
+    __m512 p = _mm512_set1_ps(1.9875691500E-4f);
+    p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(1.3981999507E-3f));
+    p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(8.3334519073E-3f));
+    p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(4.1665795894E-2f));
+    p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(1.6666665459E-1f));
+    p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(5.0000001201E-1f));
+    p = _mm512_fmadd_ps(p, _mm512_mul_ps(r, r), _mm512_add_ps(r, _mm512_set1_ps(1.0f)));
+    __m512 e = _mm512_scalef_ps(p, n);
+    return _mm512_div_ps(_mm512_set1_ps(1.0f), _mm512_add_ps(_mm512_set1_ps(1.0f), e));
+}
+__attribute__((target("avx512f"))) static size_t swiglu16(float *H, const float *G, const float *U, size_t a, size_t e) {
+    size_t i = a;
+    for (; i + 16 <= e; i += 16) { __m512 g = _mm512_loadu_ps(G + i); _mm512_storeu_ps(H + i, _mm512_mul_ps(_mm512_mul_ps(g, vsig16(g)), _mm512_loadu_ps(U + i))); }
+    return i;
+}
+__attribute__((target("avx512f"))) static size_t swiglu_bwd16(float *G, float *U, const float *dH, size_t a, size_t e) {
+    size_t i = a; const __m512 one = _mm512_set1_ps(1.0f);
+    for (; i + 16 <= e; i += 16) {
+        __m512 g = _mm512_loadu_ps(G + i), u = _mm512_loadu_ps(U + i), dh = _mm512_loadu_ps(dH + i), sg = vsig16(g);
+        _mm512_storeu_ps(G + i, _mm512_mul_ps(_mm512_mul_ps(_mm512_mul_ps(dh, u), sg), _mm512_fmadd_ps(g, _mm512_sub_ps(one, sg), one)));
+        _mm512_storeu_ps(U + i, _mm512_mul_ps(_mm512_mul_ps(dh, g), sg));
+    }
+    return i;
+}
+static int has512(void) { static int h = -1; if (h < 0) h = __builtin_cpu_supports("avx512f") && !getenv("ES_NO_VEXP"); return h; }
+#else
+static int has512(void) { return 0; }
+#endif
 static void swiglu_job(void *c_, int item, int tid) {
     (void)tid; layer_ctx *c = c_; es_tm *m = c->m; const int T = c->b->base[c->b->S];
     const size_t a = (size_t)item * 16 * m->ff, e = (size_t)(item * 16 + 16 < T ? item * 16 + 16 : T) * m->ff;
-    for (size_t i = a; i < e; i++) { const float g = m->G[i]; m->Hh[i] = g / (1.0f + expf(-g)) * m->U[i]; }
+    size_t i0 = a;
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (has512()) i0 = swiglu16(m->Hh, m->G, m->U, a, e);
+#endif
+    for (size_t i = i0; i < e; i++) { const float g = m->G[i]; m->Hh[i] = g / (1.0f + expf(-g)) * m->U[i]; }
 }
 
 /* one layer forward; leaves every intermediate the backward pass needs in the buffers */
@@ -896,7 +937,11 @@ typedef struct { es_tm *m; const batch *b; int l; const float *Xin; float *dX; }
 static void swiglu_bwd_job(void *c_, int item, int tid) {   /* dH -> dG (into G) and dU (into U) */
     (void)tid; lb2_ctx *c = c_; es_tm *m = c->m; const int T = c->b->base[c->b->S];
     const size_t a = (size_t)item * 16 * m->ff, e = (size_t)(item * 16 + 16 < T ? item * 16 + 16 : T) * m->ff;
-    for (size_t i = a; i < e; i++) {
+    size_t i0 = a;
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (has512()) i0 = swiglu_bwd16(m->G, m->U, m->dH, a, e);
+#endif
+    for (size_t i = i0; i < e; i++) {
         const float g = m->G[i], u = m->U[i], dh = m->dH[i], sg = 1.0f / (1.0f + expf(-g));
         m->G[i] = dh * u * sg * (1.0f + g * (1.0f - sg));
         m->U[i] = dh * g * sg;
