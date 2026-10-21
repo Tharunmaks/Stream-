@@ -16,6 +16,7 @@
 #include "es_gguf.h"
 #include "es_quant.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -404,6 +405,38 @@ static void dequant_rows(const tw *w, int r0, int nr, float *dst) {
     for (int r = 0; r < nr; r++) es_dequant_row(w->type, w->data + w->rb * (size_t)(r0 + r), dst + (size_t)r * w->cols, w->cols);
 }
 
+
+/* Optional BLAS path: ES_BLAS=/path/libopenblas.so (cblas_sgemm, or numpy's scipy_cblas_sgemm64_). The weights of one
+ * product are dequantized whole into a buffer, then one sgemm runs over the whole micro-batch. Summation order differs
+ * from the built-in kernels, so losses match to rounding, not bit for bit. */
+typedef void (*sgemm32_t)(int, int, int, int, int, int, float, const float *, int, const float *, int, float, float *, int);
+typedef void (*sgemm64_t)(int, int, int, long, long, long, float, const float *, long, const float *, long, float, float *, long);
+static int BLAS_STATE = -1; static sgemm32_t SG32; static sgemm64_t SG64;
+static int blas_init(int threads) {
+    if (BLAS_STATE >= 0) return BLAS_STATE;
+    BLAS_STATE = 0;
+    const char *path = getenv("ES_BLAS"); if (!path || !*path) return 0;
+    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL); if (!h) { fprintf(stderr, "ES_BLAS: %s\n", dlerror()); return 0; }
+    SG32 = (sgemm32_t)dlsym(h, "cblas_sgemm"); if (!SG32) SG64 = (sgemm64_t)dlsym(h, "scipy_cblas_sgemm64_");
+    void (*nt32)(int) = (void (*)(int))dlsym(h, "openblas_set_num_threads"); void (*nt64)(long) = (void (*)(long))dlsym(h, "scipy_openblas_set_num_threads64_");
+    if (nt32) nt32(threads); else if (nt64) nt64(threads);
+    BLAS_STATE = SG32 || SG64; if (BLAS_STATE) fprintf(stderr, "ES_BLAS: using %s\n", path);
+    return BLAS_STATE;
+}
+static void sgemm(int tb, int M, int N, int K, const float *A, int lda, const float *B, int ldb, float beta, float *C, int ldc) {
+    /* row-major C (M x N) = A (M x K) * op(B) (+ beta C); tb: B is N x K (transposed) */
+    if (SG32) SG32(101, 111, tb ? 112 : 111, M, N, K, 1.0f, A, lda, B, ldb, beta, C, ldc);
+    else SG64(101, 111, tb ? 112 : 111, M, N, K, 1.0f, A, lda, B, ldb, beta, C, ldc);
+}
+typedef struct { const tw *w; float *dst; } dq_ctx;
+static void dq_job(void *c_, int item, int tid) { (void)tid; dq_ctx *c = c_; const int r0 = item * 64, nr = c->w->rows - r0 < 64 ? c->w->rows - r0 : 64; dequant_rows(c->w, r0, nr, c->dst + (size_t)r0 * c->w->cols); }
+static float *WBUF; static size_t WBUF_N;
+static const float *blas_weights(es_tm *m, const tw *w) {
+    const size_t n = (size_t)w->rows * w->cols;
+    if (n > WBUF_N) { free(WBUF); WBUF = malloc(sizeof(float) * n); WBUF_N = WBUF ? n : 0; if (!WBUF) return NULL; }
+    dq_ctx c = {w, WBUF}; pool_run(&m->P, (w->rows + 63) / 64, dq_job, &c);
+    return WBUF;
+}
 /* Y (T x rows, row stride ldy) = X (T x cols) W^T */
 typedef struct { es_tm *m; const tw *w; const float *X; int T; float *Y; size_t ldy; } mmf_ctx;
 static void mmf_job(void *c_, int item, int tid) {
@@ -417,6 +450,10 @@ static void mmf_job(void *c_, int item, int tid) {
     }
 }
 static void mm_fwd(es_tm *m, const tw *w, const float *X, int T, float *Y, size_t ldy) {
+    const float *Wf;
+    if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
+        sgemm(1, T, w->rows, w->cols, X, w->cols, Wf, w->cols, 0.0f, Y, (int)ldy); m->bytes += (double)w->nbytes; return;
+    }
     mmf_ctx c = {m, w, X, T, Y, ldy};
     pool_run(&m->P, (w->rows + RB - 1) / RB, mmf_job, &c);
     m->bytes += (double)w->nbytes;
@@ -446,6 +483,10 @@ static void mmb_row_job(void *c_, int item, int tid) {   /* a block of rows agai
     BWD(c->dY, c->T, c->ldy, r0, Wb, nr, n, c->acc[tid], (size_t)n);
 }
 static void mm_bwd(es_tm *m, const tw *w, const float *dY, int T, size_t ldy, float *dX) {
+    const float *Wf;
+    if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
+        sgemm(0, T, w->cols, w->rows, dY, (int)ldy, Wf, w->cols, 1.0f, dX, w->cols); m->bytes += (double)w->nbytes; return;
+    }
     if (T >= TB * m->nt) {
         mmb_ctx c = {m, w, dY, T, ldy, dX};
         pool_run(&m->P, (T + TB - 1) / TB, mmb_tok_job, &c);
