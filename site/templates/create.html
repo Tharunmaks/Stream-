@@ -1,0 +1,26 @@
+{% extends "base.html" %}{% block t %}Create · ExpertStream{% endblock %}
+{% block head %}<style>.row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}label{display:grid;gap:6px;font-size:13px;color:var(--dim)}
+.kv{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:18px}
+.kv div{background:var(--panel);padding:12px 14px}.kv b{display:block;font:600 20px var(--f-display);color:var(--ink)}.kv span{font-size:12px;color:var(--dim)}
+.sizes{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.sizes button{background:var(--raise);border:1px solid var(--line);color:var(--ink);padding:6px 12px;font-family:var(--f-mono);font-size:12.5px}</style>{% endblock %}
+{% block body %}
+<h1>Create</h1><p class="sub">Build a mixture-of-experts model from 1M to 70B total parameters. Experts are stored on disk as int8 files, one per expert, so Run only loads the ones each token routes to.</p>
+<div class="card" style="margin-top:26px">
+<div class="sizes">{% for s,l in [(1e6,'1M'),(2e6,'2M'),(1e7,'10M'),(1e8,'100M'),(1e9,'1B'),(1e10,'10B'),(3e10,'30B'),(7e10,'70B')] %}<button data-s="{{s}}">{{l}}</button>{% endfor %}</div>
+<div class="row"><label>Name<input id="name" value="my-moe"></label><label>Total params<input id="tp" value="2000000"></label>
+<label>Experts per layer (0 = auto)<input id="ex" value="0"></label><label>Top-k<input id="tk" value="2"></label></div>
+<div class="kv" id="kv"></div>
+<div style="display:flex;gap:12px;align-items:center;margin-top:18px"><label style="grid-auto-flow:column;align-items:center">Train now on sample text, steps <input id="st" value="300" style="width:90px"></label>
+<button id="go">Create model</button><span id="msg" class="mono" style="font-size:13px;color:var(--dim)"></span></div>
+<p class="sub" style="font-size:13px;margin-top:14px">Up to 2B, experts are written to disk in full. Larger sizes save the architecture plan only until they are trained in the Trainer or by a cloud job. Training here is capped at 20M params; set steps to 0 for an untrained model.</p></div>
+<script>
+const $=id=>document.getElementById(id),f=n=>Number(n).toLocaleString('en-IN');
+async function plan(){const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_params:$('tp').value,experts:$('ex').value,topk:$('tk').value})});const p=await r.json();
+ if(p.error){$('kv').innerHTML='<div style="grid-column:span 4;color:var(--bad)">'+p.error+'</div>';return}
+ $('kv').innerHTML=[['Total params',f(p.total_params)],['Active per token',f(p.active_params)],['Layers × experts',p.layers+' × '+p.experts],['Dim / FFN',p.dim+' / '+p.ffn],
+ ['Top-k',p.topk],['Heads',p.heads],['Experts on disk',(p.total_params>2e9?'plan only':f(p.layers*p.experts)+' files')],['Disk (int8)',((p.layers*p.experts*2*p.dim*p.ffn)/1e9).toFixed(p.total_params<1e9?4:1)+' GB']].map(([k,v])=>'<div><b>'+v+'</b><span>'+k+'</span></div>').join('')}
+['tp','ex','tk'].forEach(i=>$(i).oninput=plan);document.querySelectorAll('.sizes button').forEach(b=>b.onclick=()=>{$('tp').value=b.dataset.s;plan()});plan();
+$('go').onclick=async()=>{$('msg').textContent='working…';const r=await fetch('/api/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('name').value,total_params:$('tp').value,experts:$('ex').value,topk:$('tk').value,train_steps:$('st').value})});
+ if(r.status==401){location='/login?next=/create';return}const j=await r.json();
+ $('msg').innerHTML=j.error?'<span style="color:var(--bad)">'+j.error+'</span>':'Created '+j.name+' ('+f(j.total_params)+' params)'+(j.train?', final loss '+j.train.loss_history.at(-1)[1]+' after '+j.train.steps+' steps in '+j.train.seconds+' s':'')+'. <a href="/run" style="color:var(--blue)">Open in Run</a>'}
+</script>{% endblock %}

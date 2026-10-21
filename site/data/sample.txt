@@ -1,0 +1,838 @@
+# ExpertStream
+
+**Website (no install):** open `docs/index.html` on GitHub Pages
+(Settings → Pages → Branch `claude/expertstream-moe-android-oegt59`, folder `/docs`),
+or open `web/index.html` from `http://127.0.0.1` / any normal browser tab. In **Models**
+search Hugging Face, download a GGUF (saved on the device, resumable), or pick a file from the
+phone; then **Chat** or use the **CLI** tab. The engine runs in the page as WebAssembly.
+It needs a normal browser tab: pages inside other apps (sandboxed viewers) block downloads
+and workers; **Testing → Can this page run models?** says exactly what is blocked.
+
+**Faster, native (Termux):** one command installs everything, downloads a
+model and opens the same app backed by the native engine
+(`es_serve -g model.gguf` or `-m pack`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/scripts/setup.sh | bash
+```
+
+**ExpertStream Instant: fast answers on a phone or PC, in any browser or app.** One local server (`es_serve`) speaks the OpenAI API
+(`/v1/chat/completions`, `/v1/completions`, `/v1/models`, streaming), the Ollama API (`/api/chat`, `/api/generate`, `/api/tags`) and the web app's
+own protocol. Point any app that lets you set an OpenAI base URL or an Ollama server at it; the website (any browser, also when opened from
+GitHub Pages) connects to it by itself.
+
+```sh
+make -s && ./es_serve -g ~/models/qwen2.5-0.5b-instruct-q4_k_m.gguf     # or: curl -fsSL .../scripts/setup.sh | MODEL=fast bash
+# OpenAI apps: base URL http://127.0.0.1:8080/v1 (any API key)   Ollama apps: http://127.0.0.1:8080   web app: http://127.0.0.1:8080
+./es_serve -g model.gguf --lan                                          # other devices too; prints an API key they must send
+```
+
+Why answers start fast:
+- **Prefix reuse.** Chat apps resend the whole conversation every turn. The engine keeps what it has already read and reads only the new part;
+  up to 4 other conversations stay parked in RAM, so side requests ("write a title for this chat") do not throw the main one away.
+- **Prompt cache on disk.** An expensive prompt start (a long system prompt or document) is saved losslessly in `~/.expertstream/kv` in the
+  background; any later request that starts the same way, also after a restart, loads it instead of reading it again (2 GB budget, oldest first).
+- **Faster prompt reading.** In batches, each weight row is unpacked once for all tokens instead of once per token (AVX2 and ARM SDOT kernels
+  for Q4_0, Q5_0, Q4_K, Q6_K). Results are bit-identical (`./es_mtest`); 1.8x faster prompt reading for Qwen2.5 0.5B and Llama 3.2 1B.
+- **Turbo** speculative decoding and **streaming** of every piece as soon as it exists.
+
+Measured on a 4-core x86 PC, a chat app session (840-token system prompt, the conversation resent each turn, a title request after each
+answer), time until the first word appears:
+
+| Model | Turn 2+ without reuse | Turn 2+ with Instant | First turn | First turn after a restart |
+|---|---|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | 15.6 s (old engine) / 8.1 s | **0.29 s** | 7.6 s (was 13 s) | **0.12 s** |
+| SmolLM2 135M Q4_K_M | 6.1 s | **0.23 s** | 4.7 s | **0.075 s** |
+| OLMoE 1B-7B Q2_K (experts streamed) | about 5 min (like turn 1) | **3.4-4.0 s** | 305 s | **0.44 s** |
+
+Reuse never changes an answer: with greedy sampling the answers with and without reuse, and after loading from disk, are identical
+(`python3 scripts/test_instant.py MODEL.gguf`, 21 checks: OpenAI and Ollama clients, streaming, stop strings, context trimming, CORS and
+Private Network Access, DNS-rebinding refusal, LAN key). Honest limits: the first time a prompt is seen it is read at the engine's normal
+speed (big mixture-of-experts models read prompts slowly), it serves one request at a time, and Safari may block a https website from reaching
+127.0.0.1. Websites other than local pages and this project's site are refused unless started with `--cors ORIGIN`.
+
+**Graft: teach a 200B model your data, on your phone.** Fine-tuning a 200-billion-parameter model the usual way needs terabytes of memory
+and data-centre GPUs; no phone can do that at any speed. A graft takes another way. The big model (any GGUF this engine runs, Qwen3 235B
+and DeepSeek R1 included) stays **frozen**, and a small graft on its final hidden state learns your facts, names, wording and style.
+The graft has three parts: a low-rank network, an exact n-gram memory of your text that can propose words the model never would, and a
+learned gate that decides when to trust it. Built-in general "anchor" text teaches it to leave everything else alone.
+
+```sh
+make es_graft es_chat
+./es_graft plan  -g MODEL.gguf --data notes.txt               # measured on this device: hours to read, minutes to train
+./es_graft read  -g MODEL.gguf --data notes.txt -o my.esfeat  # the big model reads your data ONCE (resumable)
+./es_graft train my.esfeat -o my.esgraft                      # the big model is not used again: thousands of tokens/s on CPU cores
+./es_chat  -g MODEL.gguf -A my.esgraft                        # or: ./es_serve -g MODEL.gguf --graft my.esgraft (OpenAI/Ollama API)
+```
+
+Measured on a 4-core PC (30 made-up companies with 4 facts each). Questions were asked in a wording the graft never saw, and answered
+greedily. Right facts, base model -> with the graft: Qwen2.5-0.5B **0 -> 119** of 120, OLMoE 7B (mixture of experts) **0 -> 118** of 120.
+General questions outside the data: 23 -> 23 and 24 -> 24 of 24. Plain text: held-out perplexity -17%. Training: 9,500 and 4,800 tokens/s;
+reading through the frozen model: about 90 and 9 tokens/s. Models above 7B were not run end to end here (this machine's disk was too
+slow to stream a 20B model's experts). The loss is exact (only
+the candidates' scores change), and `es_graft check` shows the engine reproduces it during generation (largest difference per position
+about 1e-6). Honest limits: reading the data through a 200B model on a phone takes hours (`plan` measures it), and a graft teaches
+facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.md`](craft/skills/expert-craft/graft.md); test:
+`python3 scripts/test_graft.py MODEL.gguf`.
+
+**ExpertStream Cloud & OmniRoute Gateway.** Pool your own machines into one OpenAI-compatible endpoint with free `sk-expert-...`
+keys: `gateway/omni_router.py` (OpenAI API with streaming, prompt compression, response cache, scoring router with failover),
+`cloud/worker_agent.py` (one command per machine, works behind home routers), an MCP server (`mcp/expertstream_mcp.py`) and a
+dashboard. Every node runs the native engine. Details and limits: [`docs/cloud.md`](docs/cloud.md); test: `python3 scripts/test_cloud.py MODEL.gguf`.
+
+**Faster on PCs; streaming tuned for phones.** On a 4-core x86 PC without a GPU, Qwen3-30B-A3B (30B parameters, Q2_K) generates
+8.0 words/s from RAM (it was 3.65; llama.cpp: 7.6), after new AVX2 kernels for the formats big models use (Q2_K, Q3_K, TQ1_0/TQ2_0, all
+IQ formats, MXFP4: 4-15x faster each, every one checked against exact float math). With phone-like storage (1 GB/s) and only 1-3 GB of
+RAM for experts it streams at 3.8-6.4 words/s. The expert cache now sizes itself to the free RAM, and `-R 0.2` (es_serve
+`--cache-route 0.2`) prefers experts already in RAM: +4-13% speed, perplexity unchanged within noise. Not measured: a real phone (ARM
+uses its own NEON kernels).
+
+**Tested on 218 models (`scripts/test_200.py`).** 105 small random models covering 14 designs, compared logit by logit with
+PyTorch (Kimi K3: with llama.cpp); 43 real GGUF files in many quantizations, compared with llama.cpp; and 70 real giant files from 14B
+to 2.4T parameters (9.1 TB in all), loaded and run from their headers alone (`es_get --skeleton`, every weight zero: this proves
+support, not answer quality). All 218 pass. The run found and fixed a Qwen3 q-norm bug and added Kimi K3. Details: [`docs/test-200.md`](docs/test-200.md).
+
+**Layer-by-layer reading and training inside the model (MeZO).** For models bigger than RAM, `es_graft read` and `es_graft zo` run
+groups of examples through the model layer by layer (as FlexGen does): each layer's experts are read from flash once for the whole group.
+Outputs are bit-identical to one sequence at a time on every architecture, and the bytes read fell 10.4x for OLMoE (`es_graft multicheck`).
+`es_graft zo` trains small adapters inside every layer with MeZO: two forward passes per step, no backpropagation, the memory of running the
+model. Every step is 16 bytes (seed, slope, step size), so devices can merge their training by replaying each other's step logs
+(`es_graft zo-merge`, bit-identical). Measured honestly: on SmolLM2-135M it lowered held-out perplexity by 1.9% in 17 minutes (1.6% after
+83 minutes with the safe default, levelling off after about 1,000 steps), where the graft gave 17.3% in 74 seconds. Details: [`craft/skills/expert-craft/zo.md`](craft/skills/expert-craft/zo.md).
+
+**LoRA with exact gradients** (`es_lora`): fine-tunes q, k, v, o, gate, up and down of every layer of a frozen GGUF model on the
+CPU, streaming the model layer by layer (forward, then recompute and backward per layer) so it needs about one layer's memory.
+Gradients checked against finite differences; the trainer matches the engine to 1e-4. On the TinyStories benchmark above:
+held-out perplexity 12.29 -> 8.31 (-32%) in 18 minutes, against -17% for the graft and -1.6% for MeZO. Then
+`es_chat -g MODEL.gguf --lora NAME.eslora`, or export for llama.cpp. Details: [`craft/skills/expert-craft/lora.md`](craft/skills/expert-craft/lora.md).
+
+**Expert Craft: train a model with up to 70 billion parameters on your phone, free, as a skill for your AI (no MCP).**
+Claude Code (PC or Termux): `/plugin install expert-craft --marketplace Tharunmaks/Stream-`. Any agent that reads a skills folder:
+`curl -fsSL https://raw.githubusercontent.com/Tharunmaks/Stream-/claude/expertstream-moe-android-oegt59/scripts/install-skill.sh | sh`.
+Or tell your AI: *"Install the Expert Craft skill from github.com/Tharunmaks/Stream- (folder craft/skills/expert-craft) and train a 70B model on this phone."*
+
+How: a small dense model stays in RAM; up to 70 billion more parameters live in ~18 million page-sized experts (one 4 KB page each, 8-bit) in a
+sparse file. The last 1, 2 and 3 tokens each pick an expert by hash, and only those 3 pages per word are read, trained and written back by native
+C kernels the device compiles for itself (NumPy fallback). v2 measured on a 4-core PC with the full 70B-parameter file: 6,534 tokens/s (v1: ~1,150),
+and v1's 8-minute quality reached in 110 s instead of 463 s. Experts lower validation perplexity by 21% against the same dense model alone.
+Honest limits: each word uses under 0.005% of the parameters, quality follows the tokens processed and the dense model rather than the file
+size, training rewrites flash pages (capped by `--max-wear-gb`), and it is not yet measured on a phone. Details: [`craft/README.md`](craft/README.md).
+
+**Speed (measured, 4-core x86 test PC, SmolLM2-135M, greedy, `es_chat -j 4`, default build, no `-march=native`)**:
+Q4_K_M 107-111 tok/s, Q4_0 103-114 tok/s (127-138 with Turbo on), Q8_0 about 90 tok/s (memory-bandwidth bound).
+The same file in the browser (WebAssembly, relaxed-SIMD build, 3 threads) runs at about 42 tok/s (Q4_0) / 35 tok/s (Q4_K_M)
+on that PC. Phone numbers differ: run `bash scripts/speedtest.sh` in Termux (it builds, downloads both files, prints a table)
+and use `es_chat -j 0` (the default: one thread per fast core, pinned; never more threads than usable cores).
+How: runtime-dispatched AVX2/FMA integer kernels (Q8_0/Q4_0/Q5_0/Q4_K/Q6_K, 4 rows per pass; `ES_NO_AVX2=1` turns
+them off), NEON SDOT on ARM, batched prompt processing, and **Turbo** (prompt-lookup speculative decoding: the engine
+guesses the next few words from the text so far and checks them in one batched pass; greedy output stays identical,
+`-S 0` or `ES_SPEC=0` turns it off, it switches itself off when it does not help).
+
+**ExpertStream Lookahead** (native engine): big mixture-of-experts models stream experts from storage, and
+plain streaming waits for storage on every layer. Lookahead (default on in `es_chat`/`es_serve`) loads all
+missing experts of a layer in parallel, runs the next layer's router early to guess and preload its experts while the
+CPU computes (`-L 1`), can skip experts the router barely uses (`-E 0.15`, a speed/quality knob, off by default),
+and remembers hot experts for a warm start next run (`-W 1`, stored in `<model>.esprof`). On OLMoE with storage
+simulated at 500 MB/s per reader (`ES_SIM_FLASH_MBPS=500`): 1.46 -> 2.94 tok/s, experts found in RAM 49% -> 91%,
+identical output. It removes waiting, not reading: storage speed still bounds models that need many GB per word.
+
+Rebuild the site: `source emsdk_env.sh && bash scripts/build_web.sh` (`UI_ONLY=1` reuses the last
+WebAssembly build). Sources: `web/src/{template.html,style.css,js/,workers/}`.
+
+Supported model families: OLMoE, Qwen3 / Qwen3-MoE, Qwen2/2.5, Llama 3-style (byte-level BPE),
+quantisations F32/F16/Q4_0–Q8_0/Q2_K–Q6_K. Not yet: SentencePiece tokenizers (Mistral, Llama 2,
+Gemma), IQ/BF16/MXFP4 quants, MLA attention (DeepSeek, Kimi), split GGUF inside the page.
+
+CPU-only inference for very large Mixture-of-Experts models on an Android
+phone (Termux, aarch64, no root, no GPU). The expert weights are streamed
+from flash instead of being held in RAM.
+
+Status:
+- **Step 1 (done):** expert file format, parallel loader, flash benchmark.
+  Measured: 1.75 GB/s cold with 4–6 readers (real O_DIRECT, 0% cached),
+  28 ms per 8-expert layer, 5.5 ms for a single 5.9 MiB expert.
+- **Step 2 (done):** GGUF-compatible Q2_K NEON SDOT kernel. Measured on
+  4x Cortex-A78: 9.8 GB/s of weights (memory read tops out at 13.8 GB/s),
+  so about 0.72 s/token of compute for the Qwen3-235B shape. Adding the
+  A55 cores makes it slower, so compute uses only the big cores.
+- **Step 3 (done):** `es_run`, an end-to-end decode loop: hot-expert
+  cache, router-ahead prefetch, readers on the little cores, compute on the
+  big cores. Weights are synthetic and routing is simulated.
+- **Step 4 (done):** real models. `scripts/hf_get.sh` downloads GGUF
+  files from Hugging Face. `es_import` turns any GGUF MoE (single file or
+  split) into a pack: `core.gguf` plus one file per expert. Tested
+  byte-for-byte against the official `gguf` reader on 3 real models. `-x`
+  imports only chosen experts, which is how skill packs (coding, chat) will
+  be stored.
+- **Step 5 (current):** real text. `es_chat` runs OLMoE-1B-7B from a pack:
+  tokenizer, attention, router and streamed experts. With float activations
+  its logits match an independent float64 NumPy reference to about 1e-6
+  over 6 tokens. With the default 8-bit activations (like llama.cpp) the
+  top-1 token matches llama.cpp at 14 of 15 positions.
+
+## Layout
+
+```
+src/es_format.h       on-disk expert format (header, tensor descriptors, hash)
+src/es_io.{h,c}       parallel chunked loader (pthreads, O_DIRECT, fallback)
+src/es_cpu.{h,c}      core types, max clocks, pinning, dotprod detection
+src/es_q2k.{h,c}      GGUF-compatible Q2_K weights, Q8_K activations, scalar ref
+src/es_q2k_neon.c     NEON + SDOT dot product (armv8.2-a dotprod)
+src/es_compute.{h,c}  pinned compute pool (spin, then sleep)
+src/es_cache.{h,c}    hot-expert RAM cache, frequency + recency eviction
+tools/es_gen.c        writes synthetic expert files in the real format
+tools/es_bench.c      cold-read bandwidth/latency benchmark with cache checks
+tools/es_kbench.c     kernel correctness + compute throughput per core type
+tools/es_run.c        end-to-end decode loop (cache + prefetch + kernels)
+tools/es_import.c     GGUF MoE -> ExpertStream pack (core.gguf + expert files)
+src/es_gguf.{h,c}     GGUF v2/v3 reader (metadata, tensor table, splits)
+src/es_quant.{h,c}    dequantize + matvec for F32/F16/Q4_0..Q8_0/Q2_K..Q6_K
+src/es_tok.{h,c}      byte-level BPE tokenizer read from GGUF metadata
+tools/es_chat.c       text generation: core in RAM, experts streamed + cached
+tools/es_qtest.c      dumps dequantized tensors for checking
+tools/es_serve.c      ExpertStream Instant: OpenAI + Ollama + web app API, prefix reuse, CORS (127.0.0.1 unless --lan)
+tools/es_json.h       small JSON reader for the server
+tools/es_mtest.c      checks the batched kernels are bit-identical to one-at-a-time
+scripts/test_instant.py  end-to-end tests of the server
+web/index.html        the app (generated, self-contained, engine embedded)
+web/src/              app source: template.html, style.css, js/ modules, workers/
+web/es_wasm.c         WebAssembly entry points (Emscripten, runs in a Worker)
+src/es_engine.{h,c}   the engine shared by es_chat, es_serve and the browser
+docs/index.html       copy of web/index.html for GitHub Pages
+scripts/setup.sh      install, build, download, import, start the app
+scripts/hf_get.sh     resumable Hugging Face download, all parts of a split
+scripts/dd_baseline.sh  dd cross-check (fio doesn't work in Termux)
+craft/skills/expert-craft/  Expert Craft skill: SKILL.md, reference.md, scripts/ (CLI, Flash Experts, C kernels, trainer)
+.claude-plugin/       plugin marketplace (Claude Code: /plugin install expert-craft --marketplace Tharunmaks/Stream-)
+scripts/install-skill.sh  installs the skill for any agent that reads a skills folder
+scripts/test_flash_experts.py  tests: gradients, 8-bit store, resume, 70B sparse file
+docs/expert_format.md format spec and design notes
+```
+
+## Step 1: build and benchmark (Termux)
+
+```sh
+pkg install -y clang make git coreutils findutils
+git clone <this repo> && cd Stream-
+git checkout claude/expertstream-moe-android-oegt59
+make
+
+# CPU features, needed for the kernel step (please paste the output)
+grep -m1 -i features /proc/cpuinfo; grep -m1 -i 'CPU part' /proc/cpuinfo
+
+# Keep data in Termux $HOME (internal /data). NOT /sdcard: that is a FUSE
+# mount, where O_DIRECT fails and throughput is much lower.
+./es_gen -d ~/es_bench -L 8 -E 64          # 512 experts x 5.9 MiB = 3.2 GB
+./es_bench -d ~/es_bench -V                # verify + thread sweep 1..8
+./es_bench -d ~/es_bench -t 4 -k 1 -n 200  # single-expert latency
+./es_bench -d ~/es_bench -t 4 -c 256       # smaller chunks
+./es_bench -d ~/es_bench -t 4 -c 4096      # larger chunks
+bash scripts/dd_baseline.sh ~/es_bench 4   # dd cross-check
+
+# Bigger experts (DeepSeek-V3 / Kimi-K2 shape, 13.8 MiB each)
+./es_gen -d ~/es_bench_big -H 7168 -I 2048 -L 4 -E 64
+./es_bench -d ~/es_bench_big -M 61
+```
+
+The dataset (3.2 GB) is bigger than your ~2.9 GB of free RAM, so even when
+the filesystem buffers I/O, the page cache can't hold all of it. On top of
+that, es_bench evicts every file before each run and checks residency
+afterwards with `mincore()`.
+
+Clean up afterwards with `rm -rf ~/es_bench ~/es_bench_big`.
+
+## Step 2: kernel benchmark (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+grep -E 'processor|CPU part' /proc/cpuinfo | paste - - | awk '{print $3, $NF}'
+cat /proc/self/status | grep Cpus_allowed_list
+./es_kbench                 # topology, correctness, single-core + scaling
+./es_kbench -S -m 128       # same with the scalar kernel, for comparison
+```
+
+Keep the screen on and Termux in the foreground. Android moves background
+apps onto the little cores, which would make the numbers look worse than
+they are.
+
+`es_q2k` uses exactly the llama.cpp `block_q2_K` layout. It was checked
+bit for bit against ggml's `dequantize_row_q2_K`, so expert files can be
+cut from existing GGUF Q2_K models.
+
+## Step 3: run the engine (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+rm -rf ~/es_bench && ./es_gen -d ~/es_bench -L 8 -E 128   # 6.3 GB, 128 experts like Qwen3
+bash scripts/step3.sh                            # all four runs below, saved to step3_results.txt
+./es_run -d ~/es_bench                           # defaults
+./es_run -d ~/es_bench -q -p 0 -r 0              # worst case: no prefetch, no locality
+./es_run -d ~/es_bench -q -r 0.5 -p 0.8 -C 1536  # optimistic routing, bigger cache
+./es_run -d ~/es_bench -q -a 0                   # without the attention cost
+```
+
+The model has 94 layers but the dataset only 8. Model layer `l` reads file
+layer `l % 8`, but the cache key is the model layer, and reads are O_DIRECT,
+so reusing files can't produce fake cache hits.
+
+`-r`, `-z` and `-p` are **assumptions**, not measurements. Real values need
+real routing traces (later step).
+
+## Step 4: import a real model (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+bash scripts/hf_get.sh bartowski/OLMoE-1B-7B-0924-Instruct-GGUF Q2_K.gguf ~/models
+./es_import -i ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf          # inspect
+./es_import -o ~/packs/olmoe ~/models/OLMoE-1B-7B-0924-Instruct-Q2_K.gguf
+```
+
+What `es_import -i` reports for this model: 6.9B parameters, of which
+0.48B are core (0.23 GB, kept in RAM) and 6.44B are routed experts
+(2.33 GB, streamed). Each token needs 0.29 GB of expert weights.
+
+Note: "Q2_K" files usually mix quant types. In this one the down
+projection is Q3_K, so the engine needs a Q3_K kernel as well as Q2_K.
+Generating real text is the next step: tokenizer, attention, router and
+the remaining kernels.
+
+Disk: the GGUF and the pack each take the model's full size. Delete the
+GGUF after importing if space is tight.
+
+## Step 5: chat with a real model (Termux)
+
+```sh
+cd ~/Stream- && git pull && make
+./es_chat -m ~/packs/olmoe -p "Write a short Python function that checks if a number is prime."
+./es_chat -m ~/packs/olmoe          # interactive chat, /exit to quit
+./es_chat -m ~/packs/olmoe -r -t 0 -p "The capital of France is" -n 32   # raw text, greedy
+```
+
+Options: `-n` max new tokens, `-t` temperature (0 = greedy), `-C` expert
+cache in MB (default 1024), `-c` context length (default 2048, 537 MB of
+RAM for this model), `-T file` writes the experts picked for every token
+and layer (input for building skill packs).
+
+## What the numbers mean (back-of-envelope, I/O only)
+
+Qwen3-235B-A22B shape at Q2_K: 94 MoE layers × 8 experts × 5.9 MiB is
+**4.6 GB of expert reads per token** with a cold cache.
+
+| flash BW     | 0% hits | 50% hits | 70% hits | 90% hits |
+|--------------|---------|----------|----------|----------|
+| 1.8 GB/s     | 2.6 s   | 1.3 s    | 0.78 s   | 0.26 s   |
+
+- A 2–4 GB RAM cache holds about 350–700 of the model's 12,032 experts
+  (3–6%). Whether that gets a 50%+ hit rate depends on how skewed real
+  routing is. We'll measure it on real traces in a later step and won't
+  assume it.
+- Compute isn't in that table. About 22B active params × ~2.6 bits is
+  ~7 GB of weight traffic per token through the cores, so the matmul time
+  is the same order as the I/O. Prefetching overlaps the two, but it doesn't
+  make either one disappear.
+- The whole Qwen3-235B model at Q2_K is about 75 GB, so it **fits in your
+  151 GB of local flash**. No cloud tier is needed for that class of model.
+- The cloud tier (20–100 MB/s, high latency) costs 0.15–0.7 s or more per
+  expert miss. It must **never be on the per-token critical path**. Only
+  fill local flash from it in the background.
+
+
+## Legal and trust checks (the 20 must-haves before launch)
+`scripts/legal_checklist.py` holds the 20 items (privacy policy, terms, refund and cookie policies, consent banner, form consents, data minimisation, third-party SDK
+audit, dark patterns, hidden fees, fake reviews, unsupported claims, alt text, colour contrast, keyboard navigation, business details, age consent,
+unsubscribe link, licensed fonts and images, data deletion) with why, how and how to verify. `python3 scripts/legal_checklist.py audit FOLDER` scans a project folder and returns
+PASS / FAIL / NEEDS-REVIEW / N/A per item with evidence. 15 agents in the "Legal & trust" team of the website's agent library help with the items. This is an
+engineering checklist, not legal advice.
+The website now has `legal.html` (privacy, terms, refunds, cookies and storage, data deletion, accessibility, operator, licences, and the status of all 20 checks on this
+site), a privacy notice, Settings > Privacy > "Delete all my data", consent text on the Hugging Face sign-in, a skip link, keyboard fixes and contrast fixes.
+Fill `web/legal/operator.json` (e-mail, postal address, governing law, code licence) and run `python3 scripts/build_legal.py` to publish your own details.
+# ExpertStream Cloud & OmniRoute Gateway
+
+Pool your own machines (PCs, laptops, Raspberry Pis, friends' computers) into one OpenAI-compatible endpoint with free API keys,
+running the native ExpertStream engine on every node. No third-party API, no paid dependency.
+
+```
+Stream-/
+├── gateway/
+│   ├── omni_router.py      OpenAI API (/v1/chat/completions JSON + SSE, /v1/models), keys, Token Killer, cache, admin API, /cloud/ws
+│   ├── store.py            SQLite (expertcloud.db): hashed keys, contribute-to-use ledger, response cache (+ FTS5)
+│   └── compress.py         Token Killer: safe / aggressive prompt compaction, code blocks untouched
+├── cloud/
+│   ├── controller.py       node registry, Auto-Combo scoring router, queue (contributors first), failover
+│   └── worker_agent.py     one command turns a machine into a node (outbound WebSocket: no port forwarding)
+├── engine/
+│   └── expert_streamer.py  drives the native engine (es_serve): processes per request slot, streaming, deploy via es_get
+├── mcp/
+│   └── expertstream_mcp.py MCP server (stdio + HTTP 8765): list_cloud_nodes, deploy_model_to_node, generate_free_api_key, route_inference
+├── dashboard/
+│   └── index.html          control panel: nodes, speed, savings, key generator, join command
+├── scripts/test_cloud.py   end-to-end test (gateway + 2 nodes + MCP on one machine)
+└── src/, tools/            the native engine (es_serve, es_get, es_chat ...)
+```
+
+## Quick start
+
+```sh
+make es_serve es_get                                   # the native engine, on every machine
+pip install -r requirements-cloud.txt
+python3 gateway/omni_router.py --host 0.0.0.0          # prints a sign-in link for the dashboard, the admin token and the join command
+# on each machine that should serve (models in ~/models, or deploy them from the dashboard/MCP):
+python3 cloud/worker_agent.py --master ws://HOST:8000 --token JOIN_TOKEN [--key sk-expert-...] [--slots 2]
+# any OpenAI client:
+curl http://HOST:8000/v1/chat/completions -H "Authorization: Bearer sk-expert-..." \
+     -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+python3 mcp/expertstream_mcp.py --http 8765 --stdio     # MCP for agents (reads ~/.expertcloud/admin_token)
+```
+
+## How it works
+
+| Layer | What it does |
+|---|---|
+| ExpertCloud | Workers dial out to the gateway over a WebSocket, so home routers need no port forwarding. Every 5 s they report CPU, RAM, GPU (nvidia-smi), disk read speed, load and which models are warm. Tokens a node generates are credited to its owner's key (`--key`); keys that contributed are exempt from the rate limit and are served first when every node is busy. |
+| ExpertStream engine | Native code (src/es_engine.c): the model file is memory-mapped, only the experts each token routes to are read, the next layer's experts are prefetched, an expert cache sized to the free RAM keeps the hot ones, Turbo checks guessed tokens in one batched pass. `engine/expert_streamer.py` runs one engine process per request slot (a mapped model's weights are shared between processes through the page cache). |
+| OmniRoute | OpenAI-compatible API with SSE streaming; free `sk-expert-...` keys (stored as SHA-256 hashes); Token Killer; exact response cache at temperature 0 (opt-in similar-prompt cache); Auto-Combo routing (free slots, time to first token, free RAM for model + context, weights warm, measured speed, recent failures) with failover to the next node when one drops before its first token. |
+| MCP + dashboard | Agents and people manage the same cloud through the admin API. |
+
+Measured by `scripts/test_cloud.py` (gateway, two nodes and the MCP server on one 4-core PC, SmolLM2-135M): all 10 checks pass, a
+cache hit is looked up in under 1 ms inside the gateway, a killed node's requests go to the other node, four simultaneous requests
+are spread over two one-slot nodes.
+
+## What it does not do (yet)
+
+* **Not Groq speed.** Speed is what the engine gets on each node's CPU (for example Qwen3-30B-A3B Q2_K: 8 tokens/s on a 4-core PC
+  with the model in RAM; see the README). More nodes serve more users at once; they do not make one answer faster.
+* **No continuous batching inside one engine process**: each process answers one request at a time. Concurrency comes from slots
+  (several processes per node) and from several nodes; extra requests queue.
+* **No separate draft model** for speculative decoding: the engine's Turbo guesses from the text so far.
+* **The engine is CPU-only.** GPU memory is reported for scheduling, not used.
+* Token Killer savings depend on the prompt: tidy prompts save little; duplicated or padded ones save a lot.
+
+## Your own public cloud
+
+ExpertCloud is a cloud platform of its own, like the big clouds but built from computers people share:
+
+* **Public page** at `/`: live numbers (computers online, CPU cores, memory, speed, models), plans, sign-up and sign-in.
+* **Console** for every signed-in person: Home (their usage and the cloud's status), Models, Playground, API keys,
+  Compute (share a computer with one command; its work is credited to them and lifts their rate limit) and Docs.
+* **Owner dashboard** at `/dashboard` (admin token): all computers, all keys, deploys, and two switches: whether anyone can
+  create an account, and whether users may share their computers (a shared computer sees the prompts it answers).
+
+Accounts are a username and a password (scrypt-hashed); sessions last 30 days. Sign-ups are limited to 5 an hour per address
+and sign-ins to 10 failures per 10 minutes.
+
+## Plans, payments, database and ExpertStream
+
+**Plans** (monthly, INR; `gateway/plans.py`, override with a `plans.json` next to the database):
+
+| ExpertCloud | Price | Limits |
+|---|---|---|
+| Free | ₹0 | 25 AI requests/day, 5/min, answers ≤256 tokens, 1 API key, **1 GB database** (3 databases, 1 backup each) |
+| Pro | ₹1,700 | 2,000/day, 60/min, ≤4,096 tokens, 10 keys, **50 GB database** (50 databases, 10 backups each), faster queue |
+| Max | ₹4,000 | 10,000/day, 200/min, ≤8,192 tokens, 50 keys, **1 TB database** (500 databases, 50 backups each), front of the queue |
+
+**Extra database space**: ₹30 per GB a month on top of any plan, bought in the console (Plans & billing, or Database > Buy more
+space) and paid with Razorpay; the owner can also give space by hand (Users > Give space). Price in `plans.json`: `{"storage": {"price_inr_per_gb": 30}}`.
+
+| ExpertStream | Price |
+|---|---|
+| Free | ₹0 |
+| Plus | ₹800 |
+| Pro | ₹2,000 |
+
+ExpertStream plans are sold here; the ExpertStream app applies its own features from the plan id.
+
+**Payments: Razorpay** (UPI, cards, net banking). Owner dashboard > Billing: key id and secret (or `RAZORPAY_KEY_ID`,
+`RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`), and the webhook URL `https://YOUR-HOST/billing/webhook` (events
+`payment.captured`, `order.paid`). Every payment is checked by its Razorpay signature; a plan lasts 30 days, paying again extends
+it, and one payment never counts twice. The owner can also give plans by hand (Users > Change plan).
+
+**Database**: every database is its own SQLite file (`clouddata/u<user>/<name>.db`), so users never share a file and each
+database has its own indexes and backups. In the console (Database) and over the API with a session or an API key:
+
+| What | API |
+|---|---|
+| databases | `GET/POST /db`, `DELETE /db/{db}` |
+| add or import documents (one object or a list) | `POST /db/{db}/{collection}` |
+| read, replace, delete one | `GET/PUT/DELETE /db/{db}/{collection}/{id}` |
+| change part of one: fields, nested fields, `$inc`, `$push`, `$unset` | `PATCH /db/{db}/{collection}/{id}` |
+| query: `$eq $ne $gt $gte $lt $lte $in $nin $exists $contains $startsWith`, `$or`, nested `a.b` fields, sort, chosen fields, text search | `POST /db/{db}/{collection}/_query` or `GET` with `?where=&sort=&fields=&search=` |
+| indexes on any field (filters and sorts use them) | `GET/POST /db/{db}/{collection}/_indexes`, `DELETE .../_indexes/{field}` |
+| transactions: puts, patches and deletes over collections, all or nothing | `POST /db/{db}/_batch` |
+| snapshots and restore | `GET/POST /db/{db}/_snapshots`, `POST .../{id}/restore`, `DELETE .../{id}` |
+| the whole database as one SQLite file | `GET /db/{db}/_export` |
+
+Space counts document bytes and snapshot files against plan + extra space. Honest limits: one gateway machine holds all the data
+(its disk is the real ceiling, and it is not replicated across machines the way AWS stores data); back up the `clouddata` folder.
+
+**Connecting the ExpertStream app** (one account for both, like Drive and Photos): the app signs users in with
+`POST /auth/login {username, password}` (or sends them to sign up at `/`), reads `GET /account/plans` for their ExpertStream plan
+(`es_free`, `es_plus`, `es_pro`), and can keep their data in `/db/...`. The API allows calls from any website (CORS) since it uses
+bearer tokens. To move the app's current data over, export it as JSON and import it per collection. The console's app switcher
+opens the ExpertStream address set in the owner's Billing page.
+
+## Easiest way: the `cloud` command
+
+```
+scripts/expertcloud.sh shortcut     # once: makes "cloud" work in new terminals
+cloud start                         # gateway + this device as a node, in the background, restarted if they crash
+cloud status                        # live: nodes online, speed, requests served
+cloud open                          # the dashboard link (signs you in)
+cloud logs | stop
+```
+`cloud start --lan` lets other devices join; `--models DIR` picks the model folder (default `~/models`); `--rotate` makes new tokens.
+
+**On a phone:** Android freezes background apps, which stops Termux. `cloud start` takes a Termux wake lock (install the
+Termux:API app and run `pkg install termux-api`), and once: Android Settings > Apps > Termux > Battery > Unrestricted.
+
+## Free cloud computers
+
+Your phone does not have to be the cloud. Host the gateway and a node on a free **Hugging Face Space** (Docker, CPU basic:
+2 CPUs, 16 GB RAM): create a Space with the Docker SDK, add `deploy/huggingface/Dockerfile` and `deploy/huggingface/README.md`,
+and set the secret `EXPERTCLOUD_ADMIN_TOKEN`. It builds the engine, downloads Qwen2.5 1.5B Instruct and serves the dashboard and
+API at `https://NAME-expertcloud.hf.space`. The dashboard's Connect page walks through it and generates the token.
+
+Add more free machines as nodes with one line (Kaggle and Colab notebooks: put `!` in front):
+```
+curl -sL https://raw.githubusercontent.com/tharunmaks/stream-/claude/expertstream-moe-android-oegt59/deploy/join.sh | bash -s -- https://NAME-expertcloud.hf.space join-TOKEN
+```
+Free limits: Spaces sleep after 48 h without visits and forget downloads on restart (the model downloads again); Kaggle sessions
+last up to 12 h; Colab stops when its tab closes; Oracle Cloud Always Free (4 ARM cores, 24 GB) stays on. Any server can host
+the whole cloud with `deploy/cloud_start.sh`.
+
+## Security
+
+* Prompts and answers pass through the nodes. Join only machines you trust, and put the gateway behind TLS (`wss://`, `https://`)
+  when it is on the internet.
+* Nodes need the join token; the admin API needs the admin token (both in `~/.expertcloud/`, mode 600). Keys are made by the admin
+  unless the gateway runs with `--open-signup`.
+* Signing in: open the link the gateway prints (`http://127.0.0.1:8000/dashboard#token=adm-...`); the page removes the token from
+  the address bar. Or paste the token from `cat ~/.expertcloud/admin_token`. The `join-` token is for nodes and `sk-expert-` keys
+  are for the API; neither signs in, and the gateway says so. Tokens are accepted with or without `Bearer `, and with stray
+  quotes or spaces from copying.
+* Leaked a token? Restart with `--rotate-tokens`: the old admin and join tokens stop working (nodes must rejoin with the new one;
+  API keys stay valid).
+* A node only accepts two commands: answer a chat with a model already on it, and download a `.gguf` from Hugging Face. It runs no
+  other commands. The engine listens on 127.0.0.1 only.
+# Expert file format (v1)
+
+One file per (layer, expert): `<root>/L<layer:03d>/E<expert:04d>.exp`, plus
+`<root>/manifest.txt`. The full definition is in `src/es_format.h`.
+
+```
+offset 0       es_header, exactly 4096 bytes
+offset 4096    tensor 0 (gate)   padded to a 4096 multiple
+               tensor 1 (up)     padded to a 4096 multiple
+               tensor 2 (down)   padded to a 4096 multiple
+file size      multiple of 4096
+```
+
+## Why it looks like this
+
+- **One read per expert.** The header is part of the file, so the loader reads
+  the whole file in one pass into a 4096-aligned buffer and validates it in
+  place. A separate header read would add a full flash round trip per expert.
+- **4096 alignment everywhere.** O_DIRECT requires the file offset, the length
+  and the buffer address to be multiples of the logical block size (4096 on
+  UFS). Padding costs at most 3 × 4 KiB per expert (under 0.2% at ~6 MiB).
+- **Tensors start on a 4096 boundary**, which also gives NEON kernels
+  cache-line-aligned data.
+- **Self-describing tensors** (role, qtype, rows, cols, offset, nbytes) so the
+  same loader works for different model shapes and quant types.
+- **Per-tensor hash + header hash.** `es_validate(buf, len, 0)` checks only
+  the header (cheap, done on every load). `es_validate(buf, len, 1)` also
+  hashes the data. Use that when pulling files from the cloud tier or after
+  converting.
+- **`model_id`** (a hash of the model name) stops files from two different
+  models being mixed in one cache directory.
+
+## Header fields
+
+| field         | meaning                                         |
+|---------------|-------------------------------------------------|
+| magic         | `EXP1`                                          |
+| version       | 1                                               |
+| header_bytes  | 4096                                            |
+| n_tensors     | usually 3 (gate, up, down)                      |
+| layer, expert | must match the file name                        |
+| flags         | bit 0: synthetic (benchmark data)               |
+| file_bytes    | total file size                                 |
+| model_id      | hash of the model name                          |
+| t[8]          | tensor descriptors, 64 bytes each               |
+| header_hash   | hash of the first 4088 bytes                    |
+
+## Quant types
+
+`ES_QT_Q2_K` is llama.cpp's `block_q2_K` (GGUF tensor type 10), byte for
+byte: 256-weight blocks of 84 bytes (2.625 bits per weight), laid out as
+`scales[16]`, `qs[64]`, `d` (fp16), `dmin` (fp16). See `src/es_q2k.h`.
+Matching GGUF means a converter only has to slice the expert tensors out of
+an existing GGUF file. Nothing gets re-quantized on the phone.
+
+## Sizes this implies (Q2_K, 3 matrices)
+
+| model shape                         | hidden × inter | per expert |
+|-------------------------------------|----------------|------------|
+| Qwen3-235B-A22B (94 layers, top-8)  | 4096 × 1536    | 5.9 MiB    |
+| DeepSeek-V3 / Kimi K2 (top-8)       | 7168 × 2048    | 13.8 MiB   |
+
+## Known limitation
+
+Some newer Android devices use 16 KiB memory pages. The format only promises
+4096 alignment, which is fine for `pread`/O_DIRECT (block-size bound) but
+means individual tensors can't be `mmap`ed separately on those kernels. We
+don't mmap expert files, so this doesn't matter for now.
+# 218 models through the engine
+
+`python3 scripts/test_200.py --llama-cpp ./llama.cpp` (needs PyTorch, transformers and a llama.cpp build). Last run: 218 of 218 passed
+on a 4-core x86 PC, after the fixes the run itself led to (below). Each tier is checked against something independent:
+
+| Tier | What | Checked against | Proves |
+|---|---|---|---|
+| mini (105) | small random models, 7 per design: Llama, Mistral, Qwen2, Qwen3, Qwen2-MoE, Qwen3-MoE, Mixtral, OLMoE, gpt-oss, DeepSeek V2, DeepSeek V3, Qwen3.5 dense and MoE (91), Kimi K3 (14) | PyTorch (transformers); Kimi K3: llama.cpp in exact mode | the math of every design, logit by logit (typically 1e-6..1e-5) |
+| small (43) | real GGUF files, 0.1 to 6.4 GB (42 GB in all), many quantizations (Q2_K..Q8_0, IQ2..IQ4, F16) | llama.cpp on the same file and text | real weights and formats; the engine's 8-bit activation rounding is as exact as llama.cpp's (median KL to exact activations 4.4e-3 for both) |
+| big (70) | real GGUF files from 8.5 GB to 594 GB (9.1 TB in all), 14B to 2.4T parameters: Qwen3.8 2.4T, Kimi K3, Kimi K2, Mistral Large 3, DeepSeek R1/V3/V3.1, Qwen3.5 397B, Qwen3-Coder 480B, Llama 3.1/3.3 70B, gpt-oss 120B, ... | headers only (`es_get --skeleton`): the engine loads the real structure and runs it with every weight zero | the engine handles every part, tensor, format and hyperparameter of these files. **Not** answer quality: the weights are not there |
+
+What the run found and fixed:
+* Qwen3 / Qwen3-MoE with head size equal to the model width: the per-head q-norm was taken for a whole-vector norm (2-4 logits off). Fixed.
+* Kimi K3 (`kimi-k3`, in the website catalog) was not supported at all. Ported: Kimi delta attention, position-free latent
+  attention with an output gate, experts in a latent space, the situ activation, cross-layer residuals and the K3 chat format.
+* Test rules made fair: both engines round activations to 8 bits for speed, so a model passes when the engine's rounding is
+  no worse than llama.cpp's (each measured against the engine with exact activations). On a 2-bit Qwen3-0.6B the engine is
+  clearly more exact (perplexity 383 vs llama.cpp's 573).
+
+After the AVX2 kernels for the low-bit formats (next commit after this run), the 43 small models were run again: 43 of 43 pass.
+
+Not covered: the speed or answer quality of models above 7B (the test machine cannot hold or stream them), and phones (not run here).
+
+## mini: 105 of 105 passed
+
+| | Model | Result |
+|---|---|---|
+| PASS | llama     #1  L4 d128 h4 kv4 tieTrue rope-llama3 | max /logit difference/ 5.01e-06 (logits up to 4.4), 24 positions |
+| PASS | llama     #2  L1 d128 h2 kv2 rope-llama3 | max /logit difference/ 4.05e-06 (logits up to 4.4), 24 positions |
+| PASS | llama     #3  L2 d32 h2 kv2 rope-llama3 | max /logit difference/ 1.61e-06 (logits up to 2.3), 24 positions |
+| PASS | llama     #4  L3 d128 h2 kv1 rope-linear | max /logit difference/ 4.77e-06 (logits up to 4.6), 24 positions |
+| PASS | llama     #5  L4 d64 h2 kv2 tieTrue | max /logit difference/ 3.78e-06 (logits up to 3.3), 24 positions |
+| PASS | llama     #6  L4 d256 h8 kv2 rope-linear | max /logit difference/ 9.78e-06 (logits up to 6.6), 24 positions |
+| PASS | llama     #7  L1 d128 h8 kv1 | max /logit difference/ 4.29e-06 (logits up to 4.3), 24 positions |
+| PASS | mistral   #1  L4 d128 h4 kv1 hd32 | max /logit difference/ 3.76e-06 (logits up to 4.5), 24 positions |
+| PASS | mistral   #2  L2 d192 h2 kv2 hd32 | max /logit difference/ 7.27e-06 (logits up to 5.3), 24 positions |
+| PASS | mistral   #3  L3 d64 h8 kv4 hd64 | max /logit difference/ 2.15e-06 (logits up to 2.9), 24 positions |
+| PASS | mistral   #4  L4 d192 h4 kv2 hd64 | max /logit difference/ 8.34e-06 (logits up to 5.4), 24 positions |
+| PASS | mistral   #5  L1 d64 h4 kv2 hd32 | max /logit difference/ 2.26e-06 (logits up to 3.5), 24 positions |
+| PASS | mistral   #6  L3 d192 h4 kv1 hd64 | max /logit difference/ 1.09e-05 (logits up to 5.5), 24 positions |
+| PASS | mistral   #7  L2 d128 h4 kv2 hd32 | max /logit difference/ 3.81e-06 (logits up to 4.4), 24 positions |
+| PASS | qwen2     #1  L2 d64 h4 kv1 | max /logit difference/ 2.50e-06 (logits up to 3.2), 24 positions |
+| PASS | qwen2     #2  L1 d128 h8 kv2 | max /logit difference/ 3.81e-06 (logits up to 4.5), 24 positions |
+| PASS | qwen2     #3  L1 d128 h8 kv2 | max /logit difference/ 3.58e-06 (logits up to 4.7), 24 positions |
+| PASS | qwen2     #4  L2 d128 h2 kv1 tieTrue | max /logit difference/ 5.01e-06 (logits up to 4.7), 24 positions |
+| PASS | qwen2     #5  L1 d128 h8 kv4 | max /logit difference/ 3.47e-06 (logits up to 4.8), 24 positions |
+| PASS | qwen2     #6  L2 d64 h4 kv4 | max /logit difference/ 1.67e-06 (logits up to 3.3), 24 positions |
+| PASS | qwen2     #7  L1 d256 h8 kv8 | max /logit difference/ 8.94e-06 (logits up to 7.1), 24 positions |
+| PASS | qwen3     #1  L3 d64 h8 kv2 hd32 | max /logit difference/ 2.38e-06 (logits up to 3.3), 24 positions |
+| PASS | qwen3     #2  L2 d64 h4 kv1 hd128 tieTrue | max /logit difference/ 3.11e-06 (logits up to 3.3), 24 positions |
+| PASS | qwen3     #4  L1 d256 h8 kv4 hd64 tieTrue | max /logit difference/ 8.11e-06 (logits up to 6.4), 24 positions |
+| PASS | qwen3     #5  L1 d256 h4 kv2 hd64 tieTrue | max /logit difference/ 7.63e-06 (logits up to 6.7), 24 positions |
+| PASS | qwen3     #6  L2 d128 h8 kv1 hd32 tieTrue | max /logit difference/ 8.11e-06 (logits up to 4.4), 24 positions |
+| PASS | qwen3     #7  L3 d256 h8 kv8 hd128 | max /logit difference/ 9.30e-06 (logits up to 6.5), 24 positions |
+| PASS | qwen2moe  #1  L2 d128 h4 kv1 E16 k2 | max /logit difference/ 3.10e-06 (logits up to 4.7), 24 positions |
+| PASS | qwen2moe  #2  L3 d256 h4 kv2 E8 k2 | max /logit difference/ 8.36e-06 (logits up to 6.5), 24 positions |
+| PASS | qwen2moe  #3  L3 d512 h8 kv1 E8 k1 | max /logit difference/ 2.09e-05 (logits up to 9.8), 24 positions |
+| PASS | qwen2moe  #4  L3 d128 h8 kv4 E4 k4 | max /logit difference/ 3.10e-06 (logits up to 4.5), 24 positions |
+| PASS | qwen2moe  #5  L2 d256 h4 kv1 E8 k1 | max /logit difference/ 8.11e-06 (logits up to 6.3), 24 positions |
+| PASS | qwen2moe  #6  L1 d512 h8 kv4 E16 k2 | max /logit difference/ 1.24e-05 (logits up to 9.7), 24 positions |
+| PASS | qwen2moe  #7  L1 d128 h8 kv2 E4 k2 | max /logit difference/ 2.62e-06 (logits up to 4.8), 24 positions |
+| PASS | qwen3moe  #3  L1 d128 h8 kv8 hd64 E8 k4 | max /logit difference/ 3.34e-06 (logits up to 4.6), 24 positions |
+| PASS | qwen3moe  #4  L2 d128 h2 kv1 hd64 E32 k8 | max /logit difference/ 4.17e-06 (logits up to 4.5), 24 positions |
+| PASS | qwen3moe  #6  L2 d128 h2 kv2 hd32 E8 k4 | max /logit difference/ 3.81e-06 (logits up to 4.7), 24 positions |
+| PASS | qwen3moe  #7  L3 d64 h2 kv2 hd32 E32 k4 | max /logit difference/ 1.91e-06 (logits up to 3.3), 24 positions |
+| PASS | mixtral   #1  L1 d64 h2 kv2 E8 k1 | max /logit difference/ 1.67e-06 (logits up to 2.9), 24 positions |
+| PASS | mixtral   #2  L2 d256 h4 kv2 E8 k1 | max /logit difference/ 9.00e-06 (logits up to 6.5), 24 positions |
+| PASS | mixtral   #3  L1 d32 h2 kv1 E8 k2 | max /logit difference/ 7.15e-07 (logits up to 2.2), 24 positions |
+| PASS | mixtral   #4  L2 d128 h4 kv1 E8 k2 | max /logit difference/ 3.93e-06 (logits up to 4.3), 24 positions |
+| PASS | mixtral   #5  L2 d512 h8 kv2 E8 k2 | max /logit difference/ 4.83e-05 (logits up to 8.7), 24 positions |
+| PASS | mixtral   #6  L3 d64 h2 kv1 E4 k1 | max /logit difference/ 1.88e-06 (logits up to 3.2), 24 positions |
+| PASS | mixtral   #7  L2 d32 h2 kv1 E4 k1 | max /logit difference/ 1.07e-06 (logits up to 2.1), 24 positions |
+| PASS | olmoe     #1  L1 d64 h4 kv4 E16 k8 | max /logit difference/ 1.67e-06 (logits up to 3.1), 24 positions |
+| PASS | olmoe     #2  L2 d128 h2 kv2 E8 k8 | max /logit difference/ 3.58e-06 (logits up to 4.3), 24 positions |
+| PASS | olmoe     #3  L1 d32 h2 kv2 E16 k2 | max /logit difference/ 9.54e-07 (logits up to 2.4), 24 positions |
+| PASS | olmoe     #4  L3 d128 h2 kv2 E16 k4 | max /logit difference/ 3.10e-06 (logits up to 4.2), 24 positions |
+| PASS | olmoe     #5  L2 d128 h2 kv2 E8 k2 | max /logit difference/ 3.46e-06 (logits up to 4.6), 24 positions |
+| PASS | olmoe     #6  L3 d256 h4 kv4 E8 k8 | max /logit difference/ 6.91e-06 (logits up to 6.5), 24 positions |
+| PASS | olmoe     #7  L3 d64 h4 kv4 E8 k8 | max /logit difference/ 2.15e-06 (logits up to 3.2), 24 positions |
+| PASS | gptoss    #1  L2 d96 h8 kv2 hd32 E4 k4 swa8 rope-yarn | max /logit difference/ 2.86e-06 (logits up to 4.2), 24 positions |
+| PASS | gptoss    #2  L4 d128 h8 kv1 hd32 E16 k2 swa2 rope-yarn | max /logit difference/ 3.70e-06 (logits up to 4.7), 24 positions |
+| PASS | gptoss    #3  L2 d64 h4 kv1 hd64 E16 k2 swa8 rope-yarn | max /logit difference/ 1.91e-06 (logits up to 3.0), 24 positions |
+| PASS | gptoss    #4  L4 d64 h4 kv1 hd64 E8 k4 swa2 rope-yarn | max /logit difference/ 1.91e-06 (logits up to 3.4), 24 positions |
+| PASS | gptoss    #5  L2 d96 h8 kv4 hd32 E16 k2 swa8 rope-yarn | max /logit difference/ 2.74e-06 (logits up to 4.3), 24 positions |
+| PASS | gptoss    #6  L2 d96 h4 kv1 hd64 E16 k1 swa8 rope-yarn | max /logit difference/ 2.86e-06 (logits up to 4.1), 24 positions |
+| PASS | gptoss    #7  L4 d128 h4 kv1 hd64 E8 k2 swa4 rope-yarn | max /logit difference/ 4.29e-06 (logits up to 4.6), 24 positions |
+| PASS | qwen35moe #1  L4 d128 h4 kv1 hd64 E16 k2 | max /logit difference/ 2.49e-04 (logits up to 10.5), 24 positions |
+| PASS | qwen35moe #2  L4 d64 h4 kv1 hd64 E8 k4 | max /logit difference/ 6.42e-05 (logits up to 6.8), 24 positions |
+| PASS | qwen35moe #3  L8 d128 h4 kv2 hd64 E8 k2 | max /logit difference/ 4.87e-04 (logits up to 9.3), 24 positions |
+| PASS | qwen35moe #4  L4 d128 h2 kv1 hd64 E16 k4 | max /logit difference/ 1.87e-04 (logits up to 9.8), 24 positions |
+| PASS | qwen35moe #5  L4 d64 h4 kv1 hd32 E8 k2 | max /logit difference/ 1.38e-04 (logits up to 6.8), 24 positions |
+| PASS | qwen35moe #6  L4 d128 h2 kv2 hd32 E16 k2 | max /logit difference/ 1.26e-04 (logits up to 9.9), 24 positions |
+| PASS | qwen35moe #7  L8 d128 h2 kv1 hd32 E16 k4 | max /logit difference/ 3.39e-04 (logits up to 11.3), 24 positions |
+| PASS | qwen35    #1  L4 d64 h4 kv1 hd64 tieTrue | max /logit difference/ 2.66e-05 (logits up to 7.0), 24 positions |
+| PASS | qwen35    #2  L4 d128 h2 kv2 hd32 tieTrue | max /logit difference/ 5.82e-05 (logits up to 10.4), 24 positions |
+| PASS | qwen35    #3  L8 d64 h2 kv2 hd32 | max /logit difference/ 3.05e-05 (logits up to 6.8), 24 positions |
+| PASS | qwen35    #4  L8 d64 h4 kv2 hd64 | max /logit difference/ 5.44e-05 (logits up to 6.5), 24 positions |
+| PASS | qwen35    #5  L8 d64 h4 kv1 hd64 | max /logit difference/ 4.48e-05 (logits up to 6.7), 24 positions |
+| PASS | qwen35    #6  L4 d64 h4 kv2 hd32 tieTrue | max /logit difference/ 3.34e-05 (logits up to 6.6), 24 positions |
+| PASS | qwen35    #7  L4 d128 h2 kv1 hd64 tieTrue | max /logit difference/ 4.12e-05 (logits up to 10.1), 24 positions |
+| PASS | qwen3     #3  L1 d128 h2 kv1 hd128 | max /logit difference/ 4.52e-06 (logits up to 4.4), 24 positions |
+| PASS | qwen3moe  #1  L3 d64 h2 kv1 hd64 E16 k2 | max /logit difference/ 1.79e-06 (logits up to 3.2), 24 positions |
+| PASS | qwen3moe  #2  L3 d64 h8 kv1 hd64 E32 k2 | max /logit difference/ 2.83e-06 (logits up to 3.2), 24 positions |
+| PASS | qwen3moe  #5  L1 d64 h4 kv1 hd64 E32 k4 | max /logit difference/ 2.32e-06 (logits up to 3.1), 24 positions |
+| PASS | dsv2      #1  L3 d64 h4 kv4 E16 k2 grp1 tg1 qlora32 | max /logit difference/ 1.91e-06 (logits up to 3.4), 24 positions |
+| PASS | dsv2      #2  L3 d128 h4 kv4 E8 k6 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 5.90e-06 (logits up to 4.6), 24 positions |
+| PASS | dsv2      #3  L3 d64 h4 kv4 E16 k2 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 2.28e-06 (logits up to 3.2), 24 positions |
+| PASS | dsv2      #4  L2 d128 h2 kv2 E8 k4 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 4.89e-06 (logits up to 4.6), 24 positions |
+| PASS | dsv2      #5  L3 d128 h4 kv4 E16 k2 grp1 tg1 rope-yarn | max /logit difference/ 7.27e-06 (logits up to 4.6), 24 positions |
+| PASS | dsv2      #6  L2 d64 h4 kv4 E16 k2 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 2.24e-06 (logits up to 3.2), 24 positions |
+| PASS | dsv2      #7  L2 d128 h4 kv4 E8 k2 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 5.01e-06 (logits up to 4.7), 24 positions |
+| PASS | dsv3      #1  L3 d64 h4 kv4 E32 k1 grp1 tg1 qlora32 | max /logit difference/ 2.21e-06 (logits up to 3.7), 24 positions |
+| PASS | dsv3      #2  L2 d64 h2 kv2 E16 k8 grp1 tg1 qlora64 rope-yarn | max /logit difference/ 2.74e-06 (logits up to 3.3), 24 positions |
+| PASS | dsv3      #3  L2 d64 h2 kv2 E16 k4 grp1 tg1 qlora64 | max /logit difference/ 2.38e-06 (logits up to 3.5), 24 positions |
+| PASS | dsv3      #4  L3 d128 h2 kv2 E8 k2 grp2 tg1 qlora64 rope-yarn | max /logit difference/ 5.84e-06 (logits up to 4.8), 24 positions |
+| PASS | dsv3      #5  L2 d64 h4 kv4 E32 k8 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 2.38e-06 (logits up to 3.4), 24 positions |
+| PASS | dsv3      #6  L3 d128 h4 kv4 E32 k8 grp1 tg1 qlora32 rope-yarn | max /logit difference/ 6.42e-06 (logits up to 5.0), 24 positions |
+| PASS | dsv3      #7  L2 d64 h2 kv2 E8 k2 grp1 tg1 qlora64 rope-yarn | max /logit difference/ 2.15e-06 (logits up to 4.0), 24 positions |
+| PASS | kimi-k3   #1a L5 d96 h4 kda32 E16 k4 lat48 no-res kv01011 | vs llama.cpp: max /logit difference/ 3.74e-05 (logits up to 16.7), 24 positions |
+| PASS | kimi-k3   #1b L5 d96 h4 kda32 E16 k4 lat48 res3 kv01011 | vs llama.cpp: max /logit difference/ 2.00e-04 (logits up to 15.2), 24 positions |
+| PASS | kimi-k3   #2a L7 d64 h4 kda32 E8 k4 lat32 no-res kv0110011 | vs llama.cpp: max /logit difference/ 3.16e-05 (logits up to 13.5), 24 positions |
+| PASS | kimi-k3   #2b L7 d64 h4 kda32 E8 k4 lat32 res2 kv0110011 | vs llama.cpp: max /logit difference/ 1.21e-03 (logits up to 12.9), 24 positions |
+| PASS | kimi-k3   #3a L5 d96 h2 kda16 E16 k4 lat48 no-res kv00011 | vs llama.cpp: max /logit difference/ 2.55e-05 (logits up to 15.6), 24 positions |
+| PASS | kimi-k3   #3b L5 d96 h2 kda16 E16 k4 lat48 res2 kv00011 | vs llama.cpp: max /logit difference/ 1.19e-03 (logits up to 14.6), 24 positions |
+| PASS | kimi-k3   #4a L5 d96 h2 kda16 E8 k2 lat48 no-res kv00101 | vs llama.cpp: max /logit difference/ 3.27e-05 (logits up to 15.1), 24 positions |
+| PASS | kimi-k3   #4b L5 d96 h2 kda16 E8 k2 lat48 res2 kv00101 | vs llama.cpp: max /logit difference/ 8.14e-03 (logits up to 15.6), 24 positions |
+| PASS | kimi-k3   #5a L6 d96 h4 kda32 E8 k4 lat48 no-res kv001101 | vs llama.cpp: max /logit difference/ 4.24e-05 (logits up to 16.0), 24 positions |
+| PASS | kimi-k3   #5b L6 d96 h4 kda32 E8 k4 lat48 res3 kv001101 | vs llama.cpp: max /logit difference/ 8.93e-04 (logits up to 14.6), 24 positions |
+| PASS | kimi-k3   #6a L7 d96 h4 kda16 E16 k2 lat32 no-res kv0011011 | vs llama.cpp: max /logit difference/ 9.17e-05 (logits up to 14.6), 24 positions |
+| PASS | kimi-k3   #6b L7 d96 h4 kda16 E16 k2 lat32 res2 kv0011011 | vs llama.cpp: max /logit difference/ 2.86e-04 (logits up to 16.3), 24 positions |
+| PASS | kimi-k3   #7a L6 d64 h4 kda32 E16 k2 lat48 no-res kv011101 | vs llama.cpp: max /logit difference/ 3.44e-05 (logits up to 13.0), 24 positions |
+| PASS | kimi-k3   #7b L6 d64 h4 kda32 E16 k2 lat48 res3 kv011101 | vs llama.cpp: max /logit difference/ 5.58e-04 (logits up to 12.0), 24 positions |
+
+## small: 43 of 43 passed
+
+| | Model | Result |
+|---|---|---|
+| PASS | SmolLM2-135M-Instruct-Q2_K.gguf (bartowski, 0.09 GB) | vs llama.cpp KL 5.7e-03, top token 98% / rounding error: engine 4.8e-03, llama.cpp 4.9e-03 / perplexity 22.15 (exact 21.96) / 1 s |
+| PASS | SmolLM2-135M-Instruct-Q3_K_M.gguf (bartowski, 0.09 GB) | vs llama.cpp KL 5.3e-03, top token 95% / rounding error: engine 4.6e-03, llama.cpp 4.1e-03 / perplexity 20.06 (exact 19.86) / 1 s |
+| PASS | SmolLM2-135M-Instruct-Q4_0.gguf (bartowski, 0.09 GB) | vs llama.cpp KL 3.0e-03, top token 100% / rounding error: engine 2.3e-03, llama.cpp 2.4e-03 / perplexity 17.07 (exact 16.85) / 1 s |
+| PASS | SmolLM2-135M-Instruct-Q4_K_M.gguf (bartowski, 0.11 GB) | vs llama.cpp KL 5.2e-03, top token 97% / rounding error: engine 4.4e-03, llama.cpp 4.4e-03 / perplexity 17.85 (exact 17.95) / 0 s |
+| PASS | SmolLM2-135M-Instruct-Q5_K_M.gguf (bartowski, 0.11 GB) | vs llama.cpp KL 4.6e-03, top token 92% / rounding error: engine 3.5e-03, llama.cpp 4.7e-03 / perplexity 17.17 (exact 16.97) / 2 s |
+| PASS | SmolLM2-135M-Instruct-Q6_K.gguf (bartowski, 0.14 GB) | vs llama.cpp KL 4.4e-03, top token 95% / rounding error: engine 4.6e-03, llama.cpp 4.2e-03 / perplexity 17.19 (exact 17.28) / 1 s |
+| PASS | SmolLM2-135M-Instruct-Q8_0.gguf (bartowski, 0.14 GB) | vs llama.cpp KL 3.2e-03, top token 98% / rounding error: engine 2.9e-03, llama.cpp 2.8e-03 / perplexity 16.77 (exact 17.10) / 1 s |
+| PASS | SmolLM2-135M-Instruct-IQ4_XS.gguf (bartowski, 0.09 GB) | vs llama.cpp KL 6.1e-03, top token 91% / rounding error: engine 2.8e-03, llama.cpp 5.4e-03 / perplexity 19.49 (exact 19.34) / 2 s |
+| PASS | SmolLM2-135M-Instruct-f16.gguf (bartowski, 0.27 GB) | vs llama.cpp KL 7.0e-07, top token 100% / rounding error: engine 0.0e+00, llama.cpp 7.0e-07 / perplexity 17.22 (exact 17.22) / 6 s |
+| PASS | SmolLM2-360M-Instruct-Q4_K_M.gguf (bartowski, 0.27 GB) | vs llama.cpp KL 4.6e-03, top token 98% / rounding error: engine 6.6e-03, llama.cpp 6.7e-03 / perplexity 12.51 (exact 12.35) / 1 s |
+| PASS | SmolLM2-360M-Instruct-Q8_0.gguf (bartowski, 0.39 GB) | vs llama.cpp KL 2.5e-03, top token 97% / rounding error: engine 5.5e-03, llama.cpp 5.3e-03 / perplexity 12.20 (exact 12.36) / 2 s |
+| PASS | SmolLM2-360M-Instruct-IQ3_M.gguf (bartowski, 0.22 GB) | vs llama.cpp KL 5.0e-03, top token 92% / rounding error: engine 3.3e-03, llama.cpp 5.6e-03 / perplexity 12.39 (exact 12.37) / 4 s |
+| PASS | SmolLM2-1.7B-Instruct-Q4_K_M.gguf (bartowski, 1.06 GB) | vs llama.cpp KL 1.3e-02, top token 94% / rounding error: engine 2.2e-01, llama.cpp 2.1e-01 / perplexity 10.38 (exact 10.16) / 5 s |
+| PASS | qwen2.5-0.5b-instruct-q2_k.gguf (Qwen, 0.42 GB) | vs llama.cpp KL 4.8e-03, top token 98% / rounding error: engine 4.3e-03, llama.cpp 4.0e-03 / perplexity 21.53 (exact 20.99) / 4 s |
+| PASS | qwen2.5-0.5b-instruct-q3_k_m.gguf (Qwen, 0.43 GB) | vs llama.cpp KL 4.5e-03, top token 95% / rounding error: engine 3.7e-03, llama.cpp 3.4e-03 / perplexity 18.76 (exact 18.99) / 4 s |
+| PASS | qwen2.5-0.5b-instruct-q4_0.gguf (Qwen, 0.43 GB) | vs llama.cpp KL 4.0e-03, top token 95% / rounding error: engine 4.1e-03, llama.cpp 4.1e-03 / perplexity 29.30 (exact 29.80) / 2 s |
+| PASS | qwen2.5-0.5b-instruct-q4_k_m.gguf (Qwen, 0.49 GB) | vs llama.cpp KL 5.2e-03, top token 97% / rounding error: engine 4.9e-03, llama.cpp 4.4e-03 / perplexity 23.38 (exact 23.44) / 2 s |
+| PASS | qwen2.5-0.5b-instruct-q5_k_m.gguf (Qwen, 0.52 GB) | vs llama.cpp KL 3.9e-03, top token 97% / rounding error: engine 2.8e-03, llama.cpp 3.8e-03 / perplexity 21.28 (exact 21.46) / 6 s |
+| PASS | qwen2.5-0.5b-instruct-q6_k.gguf (Qwen, 0.65 GB) | vs llama.cpp KL 5.5e-03, top token 91% / rounding error: engine 4.4e-03, llama.cpp 3.9e-03 / perplexity 21.91 (exact 22.39) / 3 s |
+| PASS | qwen2.5-0.5b-instruct-q8_0.gguf (Qwen, 0.68 GB) | vs llama.cpp KL 2.4e-03, top token 95% / rounding error: engine 2.3e-03, llama.cpp 2.3e-03 / perplexity 22.11 (exact 22.39) / 2 s |
+| PASS | Qwen2.5-0.5B-Instruct-IQ2_M.gguf (bartowski, 0.33 GB) | vs llama.cpp KL 6.2e-03, top token 91% / rounding error: engine 5.0e-03, llama.cpp 5.8e-03 / perplexity 24.09 (exact 24.35) / 5 s |
+| PASS | Qwen2.5-0.5B-Instruct-IQ3_XS.gguf (bartowski, 0.34 GB) | vs llama.cpp KL 6.5e-03, top token 97% / rounding error: engine 7.1e-03, llama.cpp 1.1e-02 / perplexity 20.96 (exact 20.97) / 5 s |
+| PASS | Qwen2.5-0.5B-Instruct-IQ4_XS.gguf (bartowski, 0.35 GB) | vs llama.cpp KL 5.5e-03, top token 89% / rounding error: engine 1.1e-02, llama.cpp 1.5e-02 / perplexity 20.97 (exact 20.77) / 6 s |
+| PASS | Qwen2.5-0.5B-Instruct-Q3_K_L.gguf (bartowski, 0.37 GB) | vs llama.cpp KL 6.0e-03, top token 94% / rounding error: engine 7.6e-03, llama.cpp 7.8e-03 / perplexity 22.12 (exact 22.50) / 5 s |
+| PASS | qwen2.5-1.5b-instruct-q4_k_m.gguf (Qwen, 1.12 GB) | vs llama.cpp KL 1.1e-02, top token 95% / rounding error: engine 5.1e-02, llama.cpp 5.4e-02 / perplexity 13.21 (exact 13.45) / 6 s |
+| PASS | qwen2.5-coder-0.5b-instruct-q8_0.gguf (Qwen, 0.68 GB) | vs llama.cpp KL 8.8e-04, top token 97% / rounding error: engine 8.5e-04, llama.cpp 7.1e-04 / perplexity 40.94 (exact 40.68) / 2 s |
+| PASS | Qwen3-0.6B-Q8_0.gguf (Qwen, 0.64 GB) | vs llama.cpp KL 2.6e-03, top token 94% / rounding error: engine 7.9e-03, llama.cpp 7.7e-03 / perplexity 24.21 (exact 24.24) / 3 s |
+| PASS | Qwen3-0.6B-Q4_K_M.gguf (unsloth, 0.40 GB) | vs llama.cpp KL 1.5e-02, top token 92% / rounding error: engine 1.2e-02, llama.cpp 1.2e-02 / perplexity 25.94 (exact 25.32) / 3 s |
+| PASS | Qwen3-0.6B-IQ4_NL.gguf (unsloth, 0.38 GB) | vs llama.cpp KL 3.1e-03, top token 95% / rounding error: engine 3.7e-03, llama.cpp 4.2e-03 / perplexity 22.42 (exact 22.48) / 6 s |
+| PASS | Qwen3-0.6B-UD-IQ2_XXS.gguf (unsloth, 0.23 GB) | vs llama.cpp KL 3.8e-01, top token 61% / rounding error: engine 6.1e-02, llama.cpp 3.4e-01 / perplexity 383.26 (exact 406.51) / 7 s |
+| PASS | Qwen3-1.7B-Q4_K_M.gguf (unsloth, 1.11 GB) | vs llama.cpp KL 3.4e-02, top token 89% / rounding error: engine 2.6e-02, llama.cpp 3.2e-02 / perplexity 23.16 (exact 26.17) / 8 s |
+| PASS | Qwen3-4B-Instruct-2507-Q4_K_M.gguf (unsloth, 2.50 GB) | vs llama.cpp KL 5.7e-03, top token 95% / rounding error: engine 6.8e-03, llama.cpp 9.1e-03 / perplexity 11.77 (exact 11.74) / 14 s |
+| PASS | Llama-3.2-1B-Instruct-Q4_K_M.gguf (bartowski, 0.81 GB) | vs llama.cpp KL 2.8e-03, top token 97% / rounding error: engine 2.1e-03, llama.cpp 1.9e-03 / perplexity 14.11 (exact 14.10) / 5 s |
+| PASS | Llama-3.2-1B-Instruct-IQ3_M.gguf (bartowski, 0.66 GB) | vs llama.cpp KL 2.9e-03, top token 95% / rounding error: engine 1.8e-03, llama.cpp 2.8e-03 / perplexity 14.15 (exact 14.03) / 13 s |
+| PASS | Llama-3.2-1B-Instruct-Q6_K.gguf (bartowski, 1.02 GB) | vs llama.cpp KL 2.7e-03, top token 97% / rounding error: engine 1.9e-03, llama.cpp 2.3e-03 / perplexity 14.01 (exact 13.80) / 8 s |
+| PASS | Llama-3.2-3B-Instruct-Q4_K_M.gguf (bartowski, 2.02 GB) | vs llama.cpp KL 1.4e-03, top token 97% / rounding error: engine 1.2e-03, llama.cpp 1.2e-03 / perplexity 10.73 (exact 10.62) / 11 s |
+| PASS | tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf (TheBloke, 0.67 GB) | vs llama.cpp KL 2.3e-03, top token 98% / rounding error: engine 2.8e-03, llama.cpp 2.8e-03 / perplexity 17.39 (exact 17.42) / 3 s |
+| PASS | tinyllama-1.1b-chat-v1.0.Q2_K.gguf (TheBloke, 0.48 GB) | vs llama.cpp KL 3.0e-03, top token 94% / rounding error: engine 2.9e-03, llama.cpp 3.4e-03 / perplexity 19.76 (exact 19.77) / 8 s |
+| PASS | Mistral-7B-Instruct-v0.3-Q2_K.gguf (bartowski, 2.72 GB) | vs llama.cpp KL 9.1e-04, top token 100% / rounding error: engine 2.2e-03, llama.cpp 2.2e-03 / perplexity 7.13 (exact 7.21) / 44 s |
+| PASS | OLMoE-1B-7B-0924-Instruct-Q2_K.gguf (bartowski, 2.56 GB) | vs llama.cpp KL 7.0e-03, top token 94% / rounding error: engine 5.4e-03, llama.cpp 9.2e-03 / perplexity 11.68 (exact 12.05) / 8 s |
+| PASS | OLMoE-1B-7B-0924-Instruct-IQ4_XS.gguf (bartowski, 3.72 GB) | vs llama.cpp KL 6.3e-03, top token 95% / rounding error: engine 2.4e-03, llama.cpp 7.1e-03 / perplexity 12.85 (exact 12.77) / 23 s |
+| PASS | DeepSeek-V2-Lite-Chat.Q2_K.gguf (mradermacher, 6.43 GB) | vs llama.cpp KL 9.1e-02, top token 81% / rounding error: engine 4.6e-02, llama.cpp 3.9e-02 / perplexity 33.19 (exact 36.06) / 18 s |
+| PASS | qwen1.5-moe-a2.7b-chat-imat-IQ2_XS.gguf (qwp4w3hyb, 5.45 GB) | vs llama.cpp KL 3.7e-02, top token 89% / rounding error: engine 6.0e-03, llama.cpp 4.9e-02 / perplexity 12.06 (exact 11.99) / 33 s |
+
+## big: 70 of 70 passed
+
+| | Model | Result |
+|---|---|---|
+| PASS | Qwen3.8-2.4T-A95B-UD-IQ1_S 1/00012.gguf (508 GB) | loaded and ran: Connecting to the brain  Qwen3.8-2.4T-A95B (qwen35moe), 92 layers, 512 experts, 10 per token / 101 s |
+| PASS | Kimi-K2-Instruct-0905-UD-TQ1_0 1/00006.gguf (249 GB) | loaded and ran: Connecting to the brain  Kimi-K2-Instruct-0905 (deepseek2), 61 layers, 384 experts, 8 per token / 44 s |
+| PASS | Kimi-K2-Instruct-0905-UD-IQ1_M 1/00007.gguf (305 GB) | loaded and ran: Connecting to the brain  Kimi-K2-Instruct-0905 (deepseek2), 61 layers, 384 experts, 8 per token / 54 s |
+| PASS | Kimi-K2-Instruct-0905-Q2_K 1/00008.gguf (374 GB) | loaded and ran: Connecting to the brain  Kimi-K2-Instruct-0905 (deepseek2), 61 layers, 384 experts, 8 per token / 61 s |
+| PASS | Kimi-K2-Thinking-UD-TQ1_0 1/00006.gguf (247 GB) | loaded and ran: Connecting to the brain  Kimi-K2-Thinking (deepseek2), 61 layers, 384 experts, 8 per token / 65 s |
+| PASS | Mistral-Large-3-675B-Instruct-2512-UD-IQ1_S 1/00004.gguf (191 GB) | loaded and ran: Connecting to the brain  Mistral-Large-3-675B-Instruct-2512 (deepseek2), 61 layers, 128 experts, 4 per token / 57 s |
+| PASS | Mistral-Large-3-675B-Instruct-2512-Q4_K_M 1/00009.gguf (407 GB) | loaded and ran: Connecting to the brain  Mistral-Large-3-675B-Instruct-2512 (deepseek2), 61 layers, 128 experts, 4 per token / 69 s |
+| PASS | DeepSeek-R1-0528-UD-IQ1_S 1/00004.gguf (185 GB) | loaded and ran: Connecting to the brain  Deepseek-R1-0528 (deepseek2), 61 layers, 256 experts, 8 per token / 49 s |
+| PASS | DeepSeek-R1-0528-UD-TQ1_0.gguf (162 GB) | loaded and ran: Connecting to the brain  Deepseek-R1-0528 (deepseek2), 61 layers, 256 experts, 8 per token / 48 s |
+| PASS | DeepSeek-R1-0528-Q4_K_M 1/00009.gguf (405 GB) | loaded and ran: Connecting to the brain  Deepseek-R1-0528 (deepseek2), 61 layers, 256 experts, 8 per token / 59 s |
+| PASS | DeepSeek-V3-0324-UD-IQ1_S 1/00004.gguf (186 GB) | loaded and ran: Connecting to the brain  DeepSeek V3 0324 BF16 (deepseek2), 61 layers, 256 experts, 8 per token / 49 s |
+| PASS | DeepSeek-V3-0324-Q2_K 1/00005.gguf (244 GB) | loaded and ran: Connecting to the brain  DeepSeek V3 0324 BF16 (deepseek2), 61 layers, 256 experts, 8 per token / 46 s |
+| PASS | DeepSeek-V3.1-UD-TQ1_0.gguf (170 GB) | loaded and ran: Connecting to the brain  Deepseek-V3.1 (deepseek2), 61 layers, 256 experts, 8 per token / 52 s |
+| PASS | DeepSeek-V3.1-Q4_K_M 1/00009.gguf (405 GB) | loaded and ran: Connecting to the brain  Deepseek-V3.1 (deepseek2), 61 layers, 256 experts, 8 per token / 59 s |
+| PASS | DeepSeek-R1-UD-IQ1_S 1/00003.gguf (140 GB) | loaded and ran: Connecting to the brain  DeepSeek R1 BF16 (deepseek2), 61 layers, 256 experts, 8 per token / 43 s |
+| PASS | Qwen3.5-397B-A17B-UD-IQ1_M 1/00004.gguf (107 GB) | loaded and ran: Connecting to the brain  Qwen3.5-397B-A17B (qwen35moe), 60 layers, 512 experts, 10 per token / 46 s |
+| PASS | Qwen3.5-397B-A17B-UD-IQ2_XXS 1/00004.gguf (115 GB) | loaded and ran: Connecting to the brain  Qwen3.5-397B-A17B (qwen35moe), 60 layers, 512 experts, 10 per token / 48 s |
+| PASS | Qwen3.5-397B-A17B-MXFP4_MOE 1/00006.gguf (237 GB) | loaded and ran: Connecting to the brain  Qwen3.5-397B-A17B (qwen35moe), 60 layers, 512 experts, 10 per token / 50 s |
+| PASS | Qwen3.5-397B-A17B-Q4_K_M 1/00006.gguf (244 GB) | loaded and ran: Connecting to the brain  Qwen3.5-397B-A17B (qwen35moe), 60 layers, 512 experts, 10 per token / 20 s |
+| PASS | Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf (150 GB) | loaded and ran: Connecting to the brain  Qwen3-Coder-480B-A35B-Instruct (qwen3moe), 62 layers, 160 experts, 8 per token / 49 s |
+| PASS | Qwen3-Coder-480B-A35B-Instruct-Q2_K 1/00004.gguf (175 GB) | loaded and ran: Connecting to the brain  Qwen3-Coder-480B-A35B-Instruct (qwen3moe), 62 layers, 160 experts, 8 per token / 46 s |
+| PASS | Qwen3-Coder-480B-A35B-Instruct-Q4_K_M 1/00006.gguf (290 GB) | loaded and ran: Connecting to the brain  Qwen3-Coder-480B-A35B-Instruct (qwen3moe), 62 layers, 160 experts, 8 per token / 51 s |
+| PASS | Qwen3-235B-A22B-Instruct-2507-Q2_K 1/00002.gguf (86 GB) | loaded and ran: Connecting to the brain  Qwen3-235B-A22B-Instruct-2507 (qwen3moe), 94 layers, 128 experts, 8 per token / 33 s |
+| PASS | Qwen3-235B-A22B-Instruct-2507-Q4_K_M 1/00003.gguf (142 GB) | loaded and ran: Connecting to the brain  Qwen3-235B-A22B-Instruct-2507 (qwen3moe), 94 layers, 128 experts, 8 per token / 39 s |
+| PASS | Qwen3-235B-A22B-Instruct-2507-Q6_K 1/00004.gguf (193 GB) | loaded and ran: Connecting to the brain  Qwen3-235B-A22B-Instruct-2507 (qwen3moe), 94 layers, 128 experts, 8 per token / 51 s |
+| PASS | Qwen3-235B-A22B-Instruct-2507-IQ4_XS 1/00003.gguf (125 GB) | loaded and ran: Connecting to the brain  Qwen3-235B-A22B-Instruct-2507 (qwen3moe), 94 layers, 128 experts, 8 per token / 55 s |
+| PASS | Qwen3-235B-A22B-Thinking-2507-Q3_K_M 1/00003.gguf (112 GB) | loaded and ran: Connecting to the brain  Qwen3-235B-A22B-Thinking-2507 (qwen3moe), 94 layers, 128 experts, 8 per token / 37 s |
+| PASS | gpt-oss-120b-Q4_K_M 1/00002.gguf (63 GB) | loaded and ran: Connecting to the brain  Gpt-Oss-120B (gpt-oss), 36 layers, 128 experts, 4 per token / 10 s |
+| PASS | gpt-oss-120b-F16.gguf (65 GB) | loaded and ran: Connecting to the brain  Gpt-Oss-120B (gpt-oss), 36 layers, 128 experts, 4 per token / 26 s |
+| PASS | gpt-oss-120b-MXFP4.gguf (63 GB) | loaded and ran: Connecting to the brain  gpt-oss-120b (gpt-oss), 36 layers, 128 experts, 4 per token / 10 s |
+| PASS | gpt-oss-20b-MXFP4.gguf (12 GB) | loaded and ran: Connecting to the brain  gpt-oss-20b (gpt-oss), 24 layers, 32 experts, 4 per token / 3 s |
+| PASS | gpt-oss-20b-Q2_K.gguf (11 GB) | loaded and ran: Connecting to the brain  Gpt-Oss-20B (gpt-oss), 24 layers, 32 experts, 4 per token / 2 s |
+| PASS | gpt-oss-20b-Q8_0.gguf (12 GB) | loaded and ran: Connecting to the brain  Gpt-Oss-20B (gpt-oss), 24 layers, 32 experts, 4 per token / 2 s |
+| PASS | Qwen3.6-35B-A3B-UD-Q4_K_M.gguf (22 GB) | loaded and ran: Connecting to the brain  Qwen3.6-35B-A3B (qwen35moe), 40 layers, 256 experts, 8 per token / 12 s |
+| PASS | Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf (11 GB) | loaded and ran: Connecting to the brain  Qwen3.6-35B-A3B (qwen35moe), 40 layers, 256 experts, 8 per token / 3 s |
+| PASS | Qwen3-30B-A3B-Q4_K_M.gguf (19 GB) | loaded and ran: Connecting to the brain  Qwen3-30B-A3B (qwen3moe), 48 layers, 128 experts, 8 per token / 4 s |
+| PASS | Qwen3-30B-A3B-Q8_0.gguf (32 GB) | loaded and ran: Connecting to the brain  Qwen3-30B-A3B (qwen3moe), 48 layers, 128 experts, 8 per token / 10 s |
+| PASS | Qwen3-30B-A3B-Instruct-2507-IQ4_NL.gguf (17 GB) | loaded and ran: Connecting to the brain  Qwen3-30B-A3B-Instruct-2507 (qwen3moe), 48 layers, 128 experts, 8 per token / 6 s |
+| PASS | Qwen3-30B-A3B-Instruct-2507-Q5_K_M.gguf (22 GB) | loaded and ran: Connecting to the brain  Qwen3-30B-A3B-Instruct-2507 (qwen3moe), 48 layers, 128 experts, 8 per token / 6 s |
+| PASS | Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf (25 GB) | loaded and ran: Connecting to the brain  Qwen3-Coder-30B-A3B-Instruct (qwen3moe), 48 layers, 128 experts, 8 per token / 5 s |
+| PASS | Qwen3-32B-Q4_K_M.gguf (20 GB) | loaded and ran: Connecting to the brain  Qwen3-32B (qwen3), 64 layers, 0 experts, 0 per token / 37 s |
+| PASS | Qwen3-14B-Q4_0.gguf (9 GB) | loaded and ran: Connecting to the brain  Qwen3-14B (qwen3), 40 layers, 0 experts, 0 per token / 3 s |
+| PASS | Qwen2.5-72B-Instruct-Q4_K_M.gguf (47 GB) | loaded and ran: Connecting to the brain  Qwen2.5 72B Instruct (qwen2), 80 layers, 0 experts, 0 per token / 71 s |
+| PASS | Qwen2.5-72B-Instruct-IQ2_M.gguf (29 GB) | loaded and ran: Connecting to the brain  Qwen2.5 72B Instruct (qwen2), 80 layers, 0 experts, 0 per token / 68 s |
+| PASS | Qwen2.5-32B-Instruct-Q4_K_M.gguf (20 GB) | loaded and ran: Connecting to the brain  Qwen2.5 32B Instruct (qwen2), 64 layers, 0 experts, 0 per token / 29 s |
+| PASS | Qwen2.5-32B-Instruct-IQ2_XXS.gguf (9 GB) | loaded and ran: Connecting to the brain  Qwen2.5 32B Instruct (qwen2), 64 layers, 0 experts, 0 per token / 17 s |
+| PASS | Qwen2.5-Coder-32B-Instruct-Q5_K_M.gguf (23 GB) | loaded and ran: Connecting to the brain  Qwen2.5 Coder 32B Instruct (qwen2), 64 layers, 0 experts, 0 per token / 41 s |
+| PASS | DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf (20 GB) | loaded and ran: Connecting to the brain  DeepSeek R1 Distill Qwen 32B (qwen2), 64 layers, 0 experts, 0 per token / 29 s |
+| PASS | Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf (43 GB) | loaded and ran: Connecting to the brain  Meta Llama 3.1 70B Instruct (llama), 80 layers, 0 experts, 0 per token / 64 s |
+| PASS | Meta-Llama-3.1-70B-Instruct-IQ2_XS.gguf (21 GB) | loaded and ran: Connecting to the brain  Meta Llama 3.1 70B Instruct (llama), 80 layers, 0 experts, 0 per token / 66 s |
+| PASS | Llama-3.3-70B-Instruct-Q4_K_M.gguf (43 GB) | loaded and ran: Connecting to the brain  Llama 3.3 70B Instruct (llama), 80 layers, 0 experts, 0 per token / 61 s |
+| PASS | Llama-3.3-70B-Instruct-IQ1_M.gguf (17 GB) | loaded and ran: Connecting to the brain  Llama 3.3 70B Instruct (llama), 80 layers, 0 experts, 0 per token / 59 s |
+| PASS | DeepSeek-R1-Distill-Llama-70B-Q4_K_M.gguf (43 GB) | loaded and ran: Connecting to the brain  DeepSeek R1 Distill Llama 70B (llama), 80 layers, 0 experts, 0 per token / 63 s |
+| PASS | Mistral-Large-Instruct-2411-Q4_K_M 1/00002.gguf (73 GB) | loaded and ran: Connecting to the brain  Mistral Large Instruct 2411 (llama), 88 layers, 0 experts, 0 per token / 103 s |
+| PASS | Mistral-Large-Instruct-2411-IQ2_XXS.gguf (32 GB) | loaded and ran: Connecting to the brain  Mistral Large Instruct 2411 (llama), 88 layers, 0 experts, 0 per token / 96 s |
+| PASS | Mistral-Small-24B-Instruct-2501-Q4_K_M.gguf (14 GB) | loaded and ran: Connecting to the brain  Mistral Small 24B Instruct 2501 (llama), 40 layers, 0 experts, 0 per token / 21 s |
+| PASS | Mistral-Small-24B-Instruct-2501-Q6_K.gguf (19 GB) | loaded and ran: Connecting to the brain  Mistral Small 24B Instruct 2501 (llama), 40 layers, 0 experts, 0 per token / 30 s |
+| PASS | Codestral-22B-v0.1-Q4_K_M.gguf (13 GB) | loaded and ran: Connecting to the brain  Codestral-22B-v0.1 (llama), 56 layers, 0 experts, 0 per token / 7 s |
+| PASS | mixtral-8x7b-instruct-v0.1.Q4_K_M.gguf (26 GB) | loaded and ran: Connecting to the brain  mistralai_mixtral-8x7b-instruct-v0.1 (llama), 32 layers, 8 experts, 2 per token / 14 s |
+| PASS | mixtral-8x7b-instruct-v0.1.Q2_K.gguf (16 GB) | loaded and ran: Connecting to the brain  mistralai_mixtral-8x7b-instruct-v0.1 (llama), 32 layers, 8 experts, 2 per token / 9 s |
+| PASS | Mixtral-8x22B-v0.1-Q4_K_M 1/00005.gguf (86 GB) | loaded and ran: Connecting to the brain  Mixtral-8x22B-v0.1 (llama), 56 layers, 8 experts, 2 per token / 71 s |
+| PASS | Mixtral-8x22B-Instruct-v0.1.Q2_K 1/00003.gguf (52 GB) | loaded and ran: Connecting to the brain  models--mistralai--Mixtral-8x22B-Instruct-v0.1 (llama), 56 layers, 8 experts, 2 per t / 54 s |
+| PASS | DeepSeek-V2.5-Q4_K_M 1/00004.gguf (142 GB) | loaded and ran: Connecting to the brain  DeepSeek V2.5 (deepseek2), 60 layers, 160 experts, 6 per token / 47 s |
+| PASS | qwq-32b-q4_k_m.gguf (20 GB) | loaded and ran: Connecting to the brain  Tmp_Quanted_Model AWInt4 Groupsize128 (qwen2), 64 layers, 0 experts, 0 per token / 33 s |
+| PASS | qwen2.5-14b-instruct-q4_k_m 1/00003.gguf (9 GB) | loaded and ran: Connecting to the brain  qwen2.5-14b-instruct (qwen2), 48 layers, 0 experts, 0 per token / 4 s |
+| PASS | Llama-3.3-70B-Instruct-Q2_K.gguf (26 GB) | loaded and ran: Connecting to the brain  Llama-3.3-70B-Instruct (llama), 80 layers, 0 experts, 0 per token / 57 s |
+| PASS | Qwen3.8-2.4T-A95B-UD-IQ1_M 1/00013.gguf (564 GB) | loaded and ran: Connecting to the brain  Qwen3.8-2.4T-A95B (qwen35moe), 92 layers, 512 experts, 10 per token / 114 s |
+| PASS | qwen2-57b-a14b-instruct-q4_k_m.gguf (35 GB) | loaded and ran: Connecting to the brain  Qwen2-MoE-A14.2B-Chat (qwen2moe), 28 layers, 64 experts, 8 per token / 15 s |
+| PASS | Kimi-K3-UD-TQ1_0 1/00012.gguf (509 GB) | loaded and ran: Connecting to the brain  Kimi-K3 (kimi-k3), 93 layers, 896 experts, 16 per token / 136 s |
+| PASS | Kimi-K3-UD-IQ1_S 1/00014.gguf (594 GB) | loaded and ran: Connecting to the brain  Kimi-K3 (kimi-k3), 93 layers, 896 experts, 16 per token / 122 s |

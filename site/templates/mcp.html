@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block t %}MCP · ExpertStream{% endblock %}{% block body %}
+<h1>MCP server</h1><p class="sub">For AI clients only. It runs over stdio or HTTP with an API key header and reads the same model library as this site and the Trainer.</p>
+<h2>Tools</h2><div class="card mono" style="font-size:13px;line-height:1.9">list_models · create_model (1M–70B MoE) · run_moe (experts streamed from disk) · train_start / train_status / train_stop (es_train)</div>
+<h2>Claude Desktop / Claude Code</h2><pre class="card">{"mcpServers": {"expert-stream": {"command": "python3", "args": ["/path/to/expert-stream-site/mcp_server.py", "--stdio"],
+  "env": {"ES_BIN_DIR": "/path/to/es-bin", "DATABASE_URL": "sqlite:////home/you/.expertstream/es.db"}}}}</pre>
+<h2>Cursor (~/.cursor/mcp.json) and Grok, over HTTP</h2><pre class="card">{"mcpServers": {"expert-stream": {"url": "https://YOUR-HOST/mcp", "headers": {"X-API-Key": "YOUR_KEY"}}}}</pre>
+<p class="sub">Start HTTP mode with <span class="mono">ES_MCP_API_KEY=… python3 mcp_server.py --http 8795</span>. Requests without the header get 401.</p>{% endblock %}

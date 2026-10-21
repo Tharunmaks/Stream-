@@ -1,0 +1,7 @@
+[project]
+name = "es-common"
+version = "0.1.0"
+dependencies = ["numpy"]
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3"]
+train = ["torch"]

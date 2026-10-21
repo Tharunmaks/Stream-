@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% block t %}Plans · ExpertStream{% endblock %}
+{% block head %}<style>
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.free{display:grid;grid-template-columns:1.2fr 1fr;gap:24px;align-items:center}
+.price{font:600 34px var(--f-display);margin:6px 0 2px}.price small{font:400 14px var(--f-body);color:var(--dim)}
+ul{padding-left:18px;color:var(--dim);margin:14px 0 20px}li{margin:4px 0}.tag{font:500 12px var(--f-mono);color:var(--warm);text-transform:uppercase;letter-spacing:.08em}
+.mid{border-color:var(--blue)}#msg{margin-top:20px;font-family:var(--f-mono);font-size:13px;color:var(--dim)}
+.bund{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 22px}.bund span{border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px;color:var(--dim)}
+</style>{% endblock %}
+{% block body %}
+<h1>Plans</h1><p class="sub">Prices in INR, billed monthly through Razorpay. Payments currently run in Razorpay test mode; no real money moves.</p>
+<h2>Expert Stream</h2>
+<div class="card free"><div><div class="tag">Free</div><div class="price">₹0 <small>/ month</small></div>
+<ul>{% for i in plans['es-starter']['items'] %}<li>{{i}}</li>{% endfor %}</ul></div>
+<div><p class="sub">Starter is free for everyone. Sign-up is enough; one account works on the site and the Trainer.</p><a class="btn" href="/signup">Create a free account</a></div></div>
+<h2>Expert One</h2><p class="sub">One subscription for the whole toolset. No free tier.</p>
+<div class="bund"><span>Expert Stream</span><span>Expert Cloud</span><span>Expert Build</span><span>Expert Craft</span></div>
+<div class="grid">{% for id in ['one-starter','one-mid','one-top'] %}{% set p=plans[id] %}
+<div class="card {{'mid' if id=='one-mid'}}"><div class="tag">{{p.name}}</div><div class="price">₹{{'{:,}'.format(p.inr)}} <small>/ month</small></div>
+<ul>{% for i in p['items'] %}<li>{{i}}</li>{% endfor %}</ul><button data-plan="{{id}}">Choose {{p.name}}</button></div>{% endfor %}</div>
+<div id="msg"></div>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+const msg=document.getElementById('msg');
+async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
+document.querySelectorAll('button[data-plan]').forEach(b=>b.onclick=async()=>{
+  const r=await fetch('/api/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan:b.dataset.plan})});if(r.status==401){location='/login?next=/';return}const o=await r.json();
+  if(o.stub||!window.Razorpay){msg.textContent='Order '+o.order_id+' created for '+o.plan+' (₹'+o.amount/100+'). Test keys are not set, so the Razorpay window is skipped.';return}
+  new Razorpay({key:o.key_id,order_id:o.order_id,amount:o.amount,currency:'INR',name:'ExpertStream',description:o.plan,
+    handler:async r=>{const v=await post('/api/verify',r);msg.textContent=v.ok?'Payment verified: '+o.plan:'Signature check failed'}}).open();
+});
+</script>{% endblock %}

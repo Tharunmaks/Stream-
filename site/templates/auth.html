@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block body %}
+<div class="card" style="max-width:420px;margin:40px auto"><h1 style="font-size:30px">{{ 'Create account' if mode=='signup' else 'Log in' }}</h1>
+<p class="sub">One account for the site, the Trainer and the MCP API.</p>
+<form method="post" style="display:grid;gap:12px;margin-top:18px"><input name="email" type="email" placeholder="you@example.com" required>
+<input name="password" type="password" placeholder="Password, 8+ characters" required><button>{{ 'Sign up' if mode=='signup' else 'Log in' }}</button></form>
+{% if err %}<p style="color:var(--bad)">{{err}}</p>{% endif %}
+<p class="sub" style="margin-top:14px">{% if mode=='signup' %}Have an account? <a href="/login" style="color:var(--blue)">Log in</a>{% else %}New here? <a href="/signup" style="color:var(--blue)">Sign up</a>{% endif %}</p></div>
+{% endblock %}
