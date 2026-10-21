@@ -49,7 +49,13 @@ def run_page(): return render_template("run.html", models=C.list_models())
 @app.post("/api/run_moe")
 def run_moe():
     d = request.json or {}; m = C.get_model(d.get("model", "")) or abort(404)
-    if m["id"] not in _run_cache: _run_cache[m["id"]] = esmoe.StreamedMoE(m["path"], cache_mb=64)
+    if m["id"] not in _run_cache: _run_cache[m["id"]] = esmoe.StreamedMoE(m["path"], cache_mb=int(os.environ.get("ES_RUN_CACHE_MB", 64)))
+    if d.get("stream"):   # SSE: one event per token, then the stats, so time to first token is real
+        it = _run_cache[m["id"]].stream(d.get("prompt", "")[:2000] or " ", max_new=min(int(d.get("max_new", 64)), 256), temperature=float(d.get("temperature", 0.6)))
+        def gen():
+            for kind, v in it:
+                yield "data: " + json.dumps({"token": bytes([v]).decode("latin-1")} if kind == "token" else {"done": v}) + "\n\n"
+        return Response(stream_with_context(gen()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache"})
     return jsonify(_run_cache[m["id"]].generate(d.get("prompt", "")[:2000] or " ", max_new=min(int(d.get("max_new", 64)), 256), temperature=float(d.get("temperature", 0.6))))
 
 # ---- GGUF chat backend: prebuilt es_serve per (model, threads), proxied as SSE so TTFT is real ----
@@ -75,7 +81,8 @@ def _gguf_server(m, threads):
 def chat_api():
     d = request.json or {}; m = C.get_model(d.get("model", "")) or abort(404)
     if m.get("source") != "gguf": abort(400, "not a GGUF model; use /api/run_moe")
-    threads = max(1, min(int(d.get("threads", os.environ.get("ES_CHAT_THREADS", 2))), 8))
+    tv = str(d.get("threads", os.environ.get("ES_CHAT_THREADS", 2)))
+    threads = "auto" if tv == "auto" else max(1, min(int(tv), 8))   # auto: es_serve picks free cores by load, cap 4 (es-run-speed engine)
     msgs = d.get("messages") or [{"role": "user", "content": d.get("prompt", "")[:8000] or " "}]
     s = _gguf_server(m, threads)
     body = json.dumps(dict(model=m["name"], messages=msgs, stream=True, stream_options={"include_usage": True},

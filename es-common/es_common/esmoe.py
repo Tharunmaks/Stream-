@@ -71,37 +71,56 @@ def create(out, cfg, seed=0, materialize_max=2e9, dense=None, experts=None):
 def _rms(x, g): return x / np.sqrt((x * x).mean(-1, keepdims=True) + 1e-6) * g
 
 class StreamedMoE:
+    """Streamed MoE inference with a KV cache (prefill once, then one position per token).
+    Formats: es-moe-v1 directories, and "lab-packed-int4" adapters (config.json pointing at one packed experts.bin,
+    experts read in place by offset, no conversion; dense part seeded in RAM when the pack has none)."""
     def __init__(self, path, cache_mb=256):
-        self.p = path; self.cfg = json.load(open(os.path.join(path, "config.json")))
-        if not self.cfg.get("materialized", True): raise ValueError("experts not materialized for this size; run_moe needs expert files on disk")
-        self.W = dict(np.load(os.path.join(path, "dense.npz")))
+        self.p = path; self.cfg = c = json.load(open(os.path.join(path, "config.json")))
+        if not c.get("materialized", True): raise ValueError("experts not materialized for this size; run_moe needs expert files on disk")
+        self.packed = c.get("format") == "lab-packed-int4"
+        dn = os.path.join(path, "dense.npz")
+        if os.path.exists(dn): self.W = dict(np.load(dn))
+        elif self.packed: self.W = _seeded_dense(c)
+        else: raise FileNotFoundError(dn)
+        if self.packed: self.fd = os.open(c["bin"], os.O_RDONLY)
         self.cache = OrderedDict(); self.budget = cache_mb << 20; self.used = 0
         self.stats = dict(reads=0, hits=0, bytes_read=0)
+
+    def _load(self, l, e):
+        d, f = self.cfg["dim"], self.cfg["ffn"]
+        if self.packed:
+            per = d * f; raw = os.pread(self.fd, per, (l * self.cfg["experts"] + e) * per)
+            q = np.frombuffer(raw, np.uint8); n = np.empty(2 * per, np.float32); n[0::2] = q & 15; n[1::2] = q >> 4
+            n = (n - 7.5) * self.cfg.get("scale", 0.02)
+            return raw, n[:d * f].reshape(d, f).T, n[d * f:].reshape(f, d).T   # lab layout: x@W1 (d,f), h@W2 (f,d)
+        fn = os.path.join(self.p, "experts", f"L{l:03d}", f"E{e:05d}.i8")
+        with open(fn, "rb") as fh: raw = fh.read()
+        q = np.frombuffer(raw, np.int8, 2 * d * f); s = np.frombuffer(raw, np.float32, f + d, 2 * d * f)
+        return raw, q[:f * d].reshape(f, d).astype(np.float32) * s[:f, None], q[f * d:].reshape(d, f).astype(np.float32) * s[f:, None]
 
     def expert(self, l, e):
         key = (l, e)
         if key in self.cache: self.cache.move_to_end(key); self.stats["hits"] += 1; return self.cache[key]
-        d, f = self.cfg["dim"], self.cfg["ffn"]
-        fn = os.path.join(self.p, "experts", f"L{l:03d}", f"E{e:05d}.i8")
-        with open(fn, "rb") as fh: raw = fh.read()
-        q = np.frombuffer(raw, np.int8, 2 * d * f); s = np.frombuffer(raw, np.float32, f + d, 2 * d * f)
-        w1 = q[:f * d].reshape(f, d).astype(np.float32) * s[:f, None]
-        w2 = q[f * d:].reshape(d, f).astype(np.float32) * s[f:, None]
-        sz = w1.nbytes + w2.nbytes
+        raw, w1, w2 = self._load(l, e); sz = w1.nbytes + w2.nbytes
         self.stats["reads"] += 1; self.stats["bytes_read"] += len(raw)
         while self.cache and self.used + sz > self.budget:
             _, (a, b) = self.cache.popitem(last=False); self.used -= a.nbytes + b.nbytes
         self.cache[key] = (w1, w2); self.used += sz
         return w1, w2
 
-    def forward(self, ids):
+    def forward(self, ids, kv=None, ctx=128):
+        """ids: new positions only. kv: per-layer [K, V] cache (H, T, hd), extended in place and trimmed to ctx."""
         c, W = self.cfg, self.W; d, H = c["dim"], c["heads"]; hd = d // H; T = len(ids)
+        relu = c.get("act") == "relu"
         x = W["emb"][ids]
-        mask = np.triu(np.full((T, T), -1e9, np.float32), 1)
         for l in range(c["layers"]):
             h = _rms(x, W[f"ln1_{l}"])
             q, k, v = (h @ W[f"{n}{l}"].T for n in "qkv")
             q = q.reshape(T, H, hd).transpose(1, 0, 2); k = k.reshape(T, H, hd).transpose(1, 0, 2); v = v.reshape(T, H, hd).transpose(1, 0, 2)
+            if kv is not None:
+                if kv[l] is not None: k = np.concatenate([kv[l][0], k], 1)[:, -ctx:]; v = np.concatenate([kv[l][1], v], 1)[:, -ctx:]
+                kv[l] = [k, v]
+            S = k.shape[1]; mask = np.triu(np.full((T, S), -1e9, np.float32), S - T + 1)
             a = q @ k.transpose(0, 2, 1) / math.sqrt(hd) + mask; a = np.exp(a - a.max(-1, keepdims=True)); a /= a.sum(-1, keepdims=True)
             x = x + (a @ v).transpose(1, 0, 2).reshape(T, d) @ W[f"o{l}"].T
             h = _rms(x, W[f"ln2_{l}"]); g = h @ W[f"router{l}"].T
@@ -110,23 +129,53 @@ class StreamedMoE:
             y = np.zeros_like(x)
             for e in np.unique(top):
                 rows, slot = np.nonzero(top == e); w1, w2 = self.expert(l, int(e))
-                z = h[rows] @ w1.T; z = z / (1 + np.exp(-z))  # silu
+                z = h[rows] @ w1.T; z = np.maximum(z, 0) if relu else z / (1 + np.exp(-z))
                 y[rows] += (z @ w2.T) * gv[rows, slot][:, None]
             x = x + y
         return _rms(x, W["lnf"]) @ W["head"].T
 
-    def generate(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128):
-        rng = np.random.default_rng(seed); ids = list(prompt.encode("utf-8", "replace")) or [32]
-        t0 = time.time()
-        for _ in range(max_new):
-            lg = self.forward(np.array(ids[-ctx:]))[-1]
+    def stream(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128):
+        """Yields ("token", bytes) per new token, then ("done", stats). Prefill runs once over the last ctx bytes."""
+        rng = np.random.default_rng(seed); ids = list(prompt.encode("utf-8", "replace"))[-ctx:] or [32]
+        kv = [None] * self.cfg["layers"]; t0 = time.time(); lg = self.forward(np.array(ids), kv, ctx)[-1]; tp = time.time() - t0
+        out = []; ttft = None
+        for i in range(max_new):
             if temperature <= 0: n = int(lg.argmax())
             else: p = np.exp((lg - lg.max()) / temperature); p /= p.sum(); n = int(rng.choice(VOCAB, p=p))
-            ids.append(n)
+            out.append(n)
+            if ttft is None: ttft = time.time() - t0
+            yield "token", n
+            if i + 1 < max_new: lg = self.forward(np.array([n]), kv, ctx)[-1]
         dt = time.time() - t0
-        out = bytes(ids[len(prompt.encode()):]).decode("utf-8", "replace")
-        return dict(text=out, new_tokens=max_new, seconds=round(dt, 3), tok_per_s=round(max_new / dt, 2),
-                    cache_mb=round(self.used / 2**20, 1), **self.stats)
+        yield "done", dict(new_tokens=max_new, prompt_tokens=len(ids), prompt_s=round(tp, 4), ttft_s=round(ttft, 4), seconds=round(dt, 3),
+                           tok_per_s=round(max_new / dt, 2), decode_tok_per_s=round((max_new - 1) / max(dt - ttft, 1e-9), 2),
+                           cache_mb=round(self.used / 2**20, 1), **self.stats)
+
+    def generate(self, prompt, max_new=64, temperature=0.8, seed=0, ctx=128):
+        toks = []
+        for kind, v in self.stream(prompt, max_new, temperature, seed, ctx):
+            if kind == "token": toks.append(v)
+            else: st = v
+        return dict(text=bytes(toks).decode("utf-8", "replace"), **st)
+
+def _seeded_dense(c, seed=0):
+    """Dense weights for packs that ship experts only (the Lab's speed packs): seeded random, generated in RAM, never stored.
+    Output text is meaningless; this exists to measure streaming speed through the real Run path."""
+    rng = np.random.default_rng(seed); d, L, E = c["dim"], c["layers"], c["experts"]
+    r = lambda *s: (rng.standard_normal(s, dtype=np.float32) / math.sqrt(s[-1]))
+    W = {"emb": r(VOCAB, d), "head": r(VOCAB, d), "lnf": np.ones(d, np.float32)}
+    for l in range(L):
+        for k in "qkvo": W[f"{k}{l}"] = r(d, d)
+        W[f"router{l}"] = r(E, d); W[f"ln1_{l}"] = np.ones(d, np.float32); W[f"ln2_{l}"] = np.ones(d, np.float32)
+    return W
+
+def lab_pack_config(out, bin_path, layers, experts, dim, ffn, topk=1, heads=None, scale=0.02):
+    """Write an adapter directory (config.json only) for a Lab packed int4 experts.bin; nothing is converted or copied."""
+    os.makedirs(out, exist_ok=True); assert os.path.getsize(bin_path) == layers * experts * dim * ffn, "size mismatch"
+    cfg = dict(format="lab-packed-int4", bin=bin_path, layers=layers, experts=experts, dim=dim, ffn=ffn, topk=topk, heads=heads or max(1, dim // 64),
+               vocab=VOCAB, act="relu", scale=scale, materialized=True, dense="seeded-random",
+               total_params=count(layers, experts, dim, ffn), active_params=count(layers, experts, dim, ffn, active=topk))
+    json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1); return cfg
 
 def train_torch(out, cfg, text, steps=300, seq=64, batch=16, threads=2, lr=3e-3, log=print):
     """Actually train a small byte-level MoE (torch, CPU) and export it in es-moe-v1 format."""
