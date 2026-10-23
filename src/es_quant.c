@@ -1643,6 +1643,15 @@ AVX2 static void avx_q6_K_multi(const uint8_t *w, int cols, int r0, int r1, cons
     }
 }
 static int HAVE_AVX2 = -1, HAVE_VNNI = -1;
+#if defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+#include <cpuid.h>
+/* AVX-VNNI (CPUID leaf 7, sub-leaf 1, EAX bit 4), asked directly: __builtin_cpu_supports("avxvnni") needs clang 19 or newer */
+static int cpu_avxvnni(void) {
+    unsigned a, b, c, d;
+    if (!__get_cpuid_count(7, 1, &a, &b, &c, &d)) return 0;
+    return (a >> 4) & 1;
+}
+#endif
 #endif
 
 #if defined(__aarch64__)
@@ -1870,7 +1879,7 @@ void es_matvec(uint32_t t, const void *W, int cols, int r0, int r1, const es_act
     if (HAVE_AVX2) {
         if (a->q80) {
             if (t == GGML_Q8_0) {
-                if (HAVE_VNNI < 0) HAVE_VNNI = __builtin_cpu_supports("avxvnni") && !getenv("ES_NO_VNNI");
+                if (HAVE_VNNI < 0) HAVE_VNNI = cpu_avxvnni() && !getenv("ES_NO_VNNI");
                 if (HAVE_VNNI) vnni_q8_0(w, cols, r0, r1, a->q80, y); else avx_q8_0(w, cols, r0, r1, a->q80, y);
                 return;
             }
