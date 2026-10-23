@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ExpertCloud platform checks without any computer online: accounts, plans in INR, plan limits, the database service, Razorpay
-payments (the Razorpay API call is replaced by a stand-in; signatures are computed exactly as Razorpay does) and owner tools.
+payments (the Razorpay API call is replaced by a stand-in; signatures are computed exactly as Razorpay does), owner tools, and the
+link with the ExpertStream site (one account, single sign-on, Expert One unlocking Cloud tiers, Training inside the Cloud).
 
     python3 scripts/test_platform.py
 """
@@ -16,7 +17,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 tmp = tempfile.mkdtemp(prefix="ecplat_")
 os.environ["HOME"] = tmp
-for k in ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET", "EXPERTCLOUD_ADMIN_TOKEN"): os.environ.pop(k, None)
+for k in ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET", "EXPERTCLOUD_ADMIN_TOKEN", "DATABASE_URL"): os.environ.pop(k, None)
+os.makedirs(os.path.join(tmp, "models")); open(os.path.join(tmp, "models", "tiny.gguf"), "w").close()   # the Training model library
+os.environ["ES_MODEL_DIR"] = os.path.join(tmp, "models")
 
 from fastapi.testclient import TestClient  # noqa: E402
 from gateway import billing, omni_router as gw  # noqa: E402
@@ -37,15 +40,15 @@ def check(name, ok, info=""):
 
 
 def user(name):
-    r = c.post("/auth/signup", json={"username": name, "password": "password123"}).json()
+    r = c.post("/auth/signup", json={"email": name + "@example.com", "password": "password123"}).json()
     return {"Authorization": "Bearer " + r["token"]}
 
 
 # ---- plans
 p = c.get("/plans").json()
 prices = {x["id"]: x["price_inr"] for prod in p["products"].values() for x in prod["plans"]}
-check("1 plans in INR: cloud 0/1700/4000, ExpertStream 0/800/2000", p["currency"] == "INR" and prices == {
-    "cloud_free": 0, "cloud_pro": 1700, "cloud_max": 4000, "es_free": 0, "es_plus": 800, "es_pro": 2000}, str(prices))
+check("1 plans in INR: Cloud 0/1700/4000, Expert One 0/2000/5000/10000", p["currency"] == "INR" and prices == {
+    "cloud_free": 0, "cloud_pro": 1700, "cloud_max": 4000, "es-starter": 0, "one-starter": 2000, "one-mid": 5000, "one-top": 10000}, str(prices))
 
 space = {p["id"]: p["limits"]["db_mb"] for p in gw.plans_mod.PLANS["cloud"]["plans"]}
 check("1b database space: Free 1 GB, Pro 50 GB, Max 1 TB; extra Rs 30 per GB", space == {"cloud_free": 1024, "cloud_pro": 51200, "cloud_max": 1048576}
@@ -53,14 +56,14 @@ check("1b database space: Free 1 GB, Pro 50 GB, Max 1 TB; extra Rs 30 per GB", s
 
 U = user("asha")
 acc = c.get("/account", headers=U).json()
-check("2 a new account starts on both Free plans", acc["plan"]["id"] == "cloud_free" and acc["plans"]["expertstream"]["id"] == "es_free",
-      "%s / %s" % (acc["plan"]["name"], acc["plans"]["expertstream"]["name"]))
+check("2 a new account starts on Cloud Free and ExpertStream Starter", acc["plan"]["id"] == "cloud_free" and acc["plans"]["expertone"]["id"] == "es-starter",
+      "%s / %s" % (acc["plan"]["name"], acc["plans"]["expertone"]["name"]))
 
 # ---- free plan limits
 k1 = c.post("/account/keys", headers=U, json={"label": "one"})
 k2 = c.post("/account/keys", headers=U, json={"label": "two"})
 check("3 Free plan: one API key", k1.status_code == 200 and k2.status_code == 402, k2.json().get("error", {}).get("message", ""))
-uid = gw.STORE.user_id("asha")
+uid = gw.STORE.user_id("asha@example.com")
 for _ in range(25): gw.STORE.count_request(uid)
 r = c.post("/v1/chat/completions", headers=U, json={"messages": [{"role": "user", "content": "hi"}]})
 check("4 Free plan: 25 requests a day, then 429", r.status_code == 429, r.json()["error"]["message"][:70])
@@ -138,13 +141,15 @@ days = (exp1 - gw.time.time()) / 86400
 check("17 Pro lasts 30 days; the same payment never counts twice", 29.9 < days <= 30 and exp1 == exp2, "%.2f days" % days)
 check("18 Pro lifts the limits (keys, daily requests)", c.post("/account/keys", headers=U, json={"label": "two"}).status_code == 200
       and c.post("/v1/chat/completions", headers=U, json={"messages": [{"role": "user", "content": "hi"}]}).status_code != 429)
-eo = c.post("/billing/checkout", headers=U, json={"plan": "es_plus"}).json()
+eo = c.post("/billing/checkout", headers=other, json={"plan": "cloud_max"}).json()
 body = json.dumps({"event": "payment.captured", "payload": {"payment": {"entity": {"id": "pay_2", "order_id": eo["order_id"]}}}}).encode()
 whsig = hmac.new(b"whsec", body, hashlib.sha256).hexdigest()
 forged = c.post("/billing/webhook", content=body, headers={"x-razorpay-signature": "0" * 64}).status_code
 c.post("/billing/webhook", content=body, headers={"x-razorpay-signature": whsig})
-es = c.get("/account/plans", headers=U).json()["expertstream"]
-check("19 webhook starts ExpertStream Plus (Rs 800); forged webhooks refused", eo["amount"] == 80000 and es["id"] == "es_plus" and forged == 400)
+mx = c.get("/account/plans", headers=other).json()["cloud"]
+one = c.post("/billing/checkout", headers=U, json={"plan": "one-mid"})
+check("19 webhook starts Cloud Max (Rs 4,000); forged webhooks refused; Expert One is bought on the site", eo["amount"] == 400000 and mx["id"] == "cloud_max"
+      and forged == 400 and one.status_code == 400 and "ExpertStream" in one.json()["error"]["message"])
 
 so = c.post("/billing/checkout", headers=U, json={"storage_gb": 3}).json()
 c.post("/billing/verify", headers=U, json={"order_id": so["order_id"], "payment_id": "pay_3", "signature": sig(so["order_id"], "pay_3")})
@@ -152,19 +157,56 @@ st = c.get("/account", headers=U).json()["storage"]
 dbq = c.get("/db", headers=U).json()
 check("20 buy 3 GB extra space for Rs 90; the quota grows by 3 GB", so["amount"] == 9000 and st["extra_gb"] == 3
       and dbq["quota_bytes"] == (51200 << 20) + (3 << 30), "quota %.1f GB (Pro 50 GB + 3 GB)" % (dbq["quota_bytes"] / 2 ** 30))
-c.post("/admin/users/ravi/storage", headers=A, json={"gb": 2, "days": 7})
+c.post("/admin/users/ravi@example.com/storage", headers=A, json={"gb": 2, "days": 7})
 check("21 the owner can give extra space", c.get("/db", headers=other).json()["extra_gb"] == 2)
 
-# ---- owner tools and the ExpertStream link
-c.post("/admin/users/ravi/plan", headers=A, json={"plan": "es_pro", "days": None})
+# ---- owner tools
+c.post("/admin/users/ravi@example.com/plan", headers=A, json={"plan": "one-mid"})
 users = {u["username"]: u for u in c.get("/admin/users", headers=A).json()["users"]}
 pays = c.get("/admin/billing", headers=A).json()
-check("24 owner sees users, plans and payments; can grant a plan", users["ravi"]["plans"]["expertstream"]["id"] == "es_pro"
-      and users["asha"]["plans"]["cloud"]["id"] == "cloud_pro" and len([x for x in pays["payments"] if x["status"] == "paid"]) == 3
+check("24 owner sees users, plans and payments; can grant Expert One", users["ravi@example.com"]["plans"]["expertone"]["id"] == "one-mid"
+      and users["asha@example.com"]["plans"]["cloud"]["id"] == "cloud_pro" and len([x for x in pays["payments"] if x["status"] == "paid"]) == 3
       and "rzp_key_secret" not in json.dumps(pays) and "sekret" not in json.dumps(pays))
-login = c.post("/auth/login", json={"username": "ravi", "password": "password123"}).json()
+login = c.post("/auth/login", json={"email": "ravi@example.com", "password": "password123"}).json()
 viaapp = c.get("/account/plans", headers={"Authorization": "Bearer " + login["token"], "Origin": "https://expertstream.example"})
-check("25 the ExpertStream app signs in and reads the plan (CORS open)", viaapp.json()["expertstream"]["name"] == "Pro"
+check("25 apps sign in and read the plans (CORS open)", viaapp.json()["expertone"]["name"] == "Mid"
       and viaapp.headers.get("access-control-allow-origin") == "*" and c.get("/plans").json()["apps"]["expertstream"]["url"] == "https://expertstream.example")
+
+# ---- one account on both websites
+import es_common as ESC  # noqa: E402  (the ExpertStream site's library, on the path the gateway set)
+check("26 a Cloud sign-up is an ExpertStream account (the site's login takes the same email and password)",
+      bool(ESC.login("asha@example.com", "password123")))
+site_uid = ESC.signup("meera@example.com", "sitepass123")   # signs up on the ExpertStream site
+b = TestClient(gw.app); b.cookies.set(ESC.COOKIE, ESC.make_token(site_uid))
+s1 = b.post("/auth/sso")
+me = b.get("/account", headers={"Authorization": "Bearer " + s1.json().get("token", "")}).json() if s1.status_code == 200 else {}
+cookie_back = ESC.verify_token(TestClient(gw.app).post("/auth/login", json={"email": "meera@example.com", "password": "sitepass123"}).cookies.get(ESC.COOKIE) or "")
+check("27 signed in on the site = signed in on the Cloud (and back)", me.get("username") == "meera@example.com" and cookie_back == site_uid,
+      "sso %d, the Cloud's login gives the site's cookie: %s" % (s1.status_code, bool(cookie_back)))
+ESC.set_subscription(site_uid, "one-starter", "order_x", "pay_x")
+pro = b.get("/account/plans", headers={"Authorization": "Bearer " + s1.json()["token"]}).json()["cloud"]
+ESC.set_subscription(site_uid, "one-top", "order_y", "pay_y")
+top = b.get("/account/plans", headers={"Authorization": "Bearer " + s1.json()["token"]}).json()["cloud"]
+check("28 Expert One includes Cloud: Starter -> Cloud Pro, Top -> Cloud Max", pro["id"] == "cloud_pro" and pro["source"] == "Expert One" and top["id"] == "cloud_max",
+      "%s, %s" % (pro["name"], top["name"]))
+
+# ---- Training inside the Cloud
+anon = TestClient(gw.app)
+t1 = TestClient(gw.app); t1.cookies.set(gw.COOKIE, c.post("/auth/login", json={"email": "asha@example.com", "password": "password123"}).json()["token"])
+t2 = TestClient(gw.app); t2.cookies.set(gw.COOKIE, s1.json()["token"])
+st1 = t1.get("/training/api/status")
+check("29 Training needs a Cloud sign-in; the plan sets its limits", anon.get("/training/api/status").status_code == 401 and st1.status_code == 200
+      and st1.json()["limits"]["max_steps"] == 3000 and t2.get("/training/api/status").json()["limits"]["max_steps"] == 20000,
+      "Pro: %s steps, Max (Expert One Top): 20000" % st1.json()["limits"]["max_steps"])
+model = os.path.join(tmp, "models", "tiny.gguf"); sample = os.path.join(ROOT, "apps", "es-trainer", "data", "qa_sample.jsonl")
+r_model = t1.post("/training/api/train", json={"model": "/etc/passwd", "data": sample, "steps": 10}).status_code
+r_data = t1.post("/training/api/train", json={"model": model, "data": "/etc/passwd", "steps": 10}).status_code
+r_steps = t1.post("/training/api/train", json={"model": model, "data": sample, "steps": 999999}).status_code
+check("30 Training only takes library models and your own data, within the plan", (r_model, r_data, r_steps) == (400, 400, 402), str((r_model, r_data, r_steps)))
+free = TestClient(gw.app); free.cookies.set(gw.COOKIE, c.post("/auth/signup", json={"email": "free@example.com", "password": "password123"}).json()["token"])
+check("30b Free plan cannot fill the shared model library from Hugging Face", free.post("/training/api/hf", json={"repo": "x/y"}).status_code == 402)
+up = t1.post("/training/api/upload", files={"file": ("notes.jsonl", b'{"prompt": "hi", "response": "hello"}\n', "application/json")}).json()
+d1, d2 = t1.get("/training/api/datasets").json(), t2.get("/training/api/datasets").json()
+check("31 each user's uploads are private", up.get("path") in d1 and up.get("path") not in d2 and sample in d2, "upload: %s" % os.path.basename(up.get("path", "?")))
 print("ALL PASSED" if not bad else "%d FAILED" % bad)
 sys.exit(1 if bad else 0)

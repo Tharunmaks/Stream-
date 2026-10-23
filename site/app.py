@@ -18,9 +18,10 @@ PLANS = {
     "one-top": dict(product="Expert One", name="Top", inr=10000, items=["Everything in Mid", "Notebook: 8 jobs, 24 h CPU each", "Models up to 70B, priority queue"]),
 }
 ORDERS = {}
-TRAINER_URL = os.environ.get("TRAINER_URL", "http://127.0.0.1:8781")
+CLOUD_URL = os.environ.get("CLOUD_URL", "http://127.0.0.1:8000").rstrip("/")   # ExpertStream Cloud: same accounts (es_session), Training lives there
+TRAINER_URL = os.environ.get("TRAINER_URL", CLOUD_URL + "/#training")
 _run_cache = {}
-app.jinja_env.globals.update(trainer_url=TRAINER_URL)
+app.jinja_env.globals.update(trainer_url=TRAINER_URL, cloud_url=CLOUD_URL)
 
 @app.context_processor
 def _ctx(): u = C.user_from_request(request); return dict(user=u, sub=C.subscription(u["id"]) if u else None)
@@ -41,7 +42,8 @@ def auth():
     return render_template("auth.html", mode=mode, err=err)
 
 @app.get("/logout")
-def logout(): r = redirect("/"); r.delete_cookie(C.COOKIE, domain=os.environ.get("ES_COOKIE_DOMAIN")); return r
+def logout():   # signs out of ExpertStream Cloud too (its cookie: ec_session)
+    r = redirect("/"); r.delete_cookie(C.COOKIE, domain=os.environ.get("ES_COOKIE_DOMAIN")); r.delete_cookie("ec_session", path="/"); return r
 
 @app.get("/run")
 def run_page(): return render_template("run.html", models=C.list_models())
@@ -167,4 +169,4 @@ def verify():
     pid, uid = ORDERS.pop(oid); C.set_subscription(uid, pid, oid, pay)
     return jsonify(ok=True, plan=pid)
 
-if __name__ == "__main__": C.db(); app.run("0.0.0.0", int(os.environ.get("PORT", 8780)), threaded=True)
+if __name__ == "__main__": C.db(); app.run(os.environ.get("HOST", "0.0.0.0"), int(os.environ.get("PORT", 8780)), threaded=True)

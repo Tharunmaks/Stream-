@@ -41,3 +41,4 @@ moe/es_moe
 es_train
 es_lora_u.o
 es_moe_u.o
+clouddata/

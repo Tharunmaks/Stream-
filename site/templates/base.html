@@ -13,6 +13,6 @@ button.ghost{background:var(--raise);color:var(--ink);border:1px solid var(--lin
 code,pre,textarea,input,select{font-family:var(--f-mono);font-size:13px}.mono{font-family:var(--f-mono)}
 input,select{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-family:var(--f-body)}
 </style>{% block head %}{% endblock %}</head><body>
-<nav><b>ExpertStream</b><a href="/" class="{{'on' if request.path=='/'}}">Plans</a><a href="/create" class="{{'on' if request.path=='/create'}}">Create</a><a href="/run" class="{{'on' if request.path=='/run'}}">Run</a><a href="/mcp" class="{{'on' if request.path=='/mcp'}}">MCP</a><a href="{{trainer_url}}/">Trainer</a>
+<nav><b>ExpertStream</b><a href="/" class="{{'on' if request.path=='/'}}">Plans</a><a href="/create" class="{{'on' if request.path=='/create'}}">Create</a><a href="/run" class="{{'on' if request.path=='/run'}}">Run</a><a href="/mcp" class="{{'on' if request.path=='/mcp'}}">MCP</a><a href="{{trainer_url}}">Training</a><a href="{{cloud_url}}/">Cloud</a>
 <span style="margin-left:auto;color:var(--dim);font-size:13px">{% if user %}{{user.email}} · {{ sub or 'Expert Stream Starter' }} · <a href="/logout">Log out</a>{% else %}<a href="/login">Log in</a> <a class="btn" href="/signup" style="color:#fff">Sign up</a>{% endif %}</span></nav>
 <main>{% block body %}{% endblock %}</main></body></html>

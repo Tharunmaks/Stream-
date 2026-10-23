@@ -18,6 +18,9 @@ ul{padding-left:18px;color:var(--dim);margin:14px 0 20px}li{margin:4px 0}.tag{fo
 <div class="card {{'mid' if id=='one-mid'}}"><div class="tag">{{p.name}}</div><div class="price">₹{{'{:,}'.format(p.inr)}} <small>/ month</small></div>
 <ul>{% for i in p['items'] %}<li>{{i}}</li>{% endfor %}</ul><button data-plan="{{id}}">Choose {{p.name}}</button></div>{% endfor %}</div>
 <div id="msg"></div>
+<h2>Expert Cloud</h2><p class="sub">AI API, Database (1 GB free, 50 GB Pro, 1 TB Max) and Training, with the same account.
+Cloud Free ₹0, Pro ₹1,700, Max ₹4,000 a month; Expert One Starter includes Cloud Pro, Mid and Top include Cloud Max.</p>
+<a class="btn" href="{{cloud_url}}/">Open Expert Cloud</a>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <script>
 const msg=document.getElementById('msg');

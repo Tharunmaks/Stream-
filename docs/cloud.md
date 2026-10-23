@@ -85,13 +85,19 @@ and sign-ins to 10 failures per 10 minutes.
 **Extra database space**: ₹30 per GB a month on top of any plan, bought in the console (Plans & billing, or Database > Buy more
 space) and paid with Razorpay; the owner can also give space by hand (Users > Give space). Price in `plans.json`: `{"storage": {"price_inr_per_gb": 30}}`.
 
-| ExpertStream | Price |
-|---|---|
-| Free | ₹0 |
-| Plus | ₹800 |
-| Pro | ₹2,000 |
+| Expert One (sold on the ExpertStream site) | Price | Includes Cloud |
+|---|---|---|
+| Starter (free) | ₹0 | Cloud Free |
+| Starter | ₹2,000 | **Cloud Pro** |
+| Mid | ₹5,000 | **Cloud Max** |
+| Top | ₹10,000 | **Cloud Max** |
 
-ExpertStream plans are sold here; the ExpertStream app applies its own features from the plan id.
+Expert One is one subscription for Expert Stream, Cloud, Build and Craft. It is bought on the ExpertStream site; the Cloud reads
+it from the shared account and gives the better of the user's own Cloud plan and the one Expert One includes (the console says
+"Included in your Expert One"). The owner can give Expert One by hand (Users > Change plan).
+
+Training limits per Cloud plan: Free 100 steps, 2 threads, fine-tuning only; Pro 3,000 steps, 4 threads, MoE training, add models
+from Hugging Face; Max 20,000 steps, 8 threads.
 
 **Payments: Razorpay** (UPI, cards, net banking). Owner dashboard > Billing: key id and secret (or `RAZORPAY_KEY_ID`,
 `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`), and the webhook URL `https://YOUR-HOST/billing/webhook` (events
@@ -116,22 +122,38 @@ database has its own indexes and backups. In the console (Database) and over the
 Space counts document bytes and snapshot files against plan + extra space. Honest limits: one gateway machine holds all the data
 (its disk is the real ceiling, and it is not replicated across machines the way AWS stores data); back up the `clouddata` folder.
 
-**Connecting the ExpertStream app** (one account for both, like Drive and Photos): the app signs users in with
-`POST /auth/login {username, password}` (or sends them to sign up at `/`), reads `GET /account/plans` for their ExpertStream plan
-(`es_free`, `es_plus`, `es_pro`), and can keep their data in `/db/...`. The API allows calls from any website (CORS) since it uses
-bearer tokens. To move the app's current data over, export it as JSON and import it per collection. The console's app switcher
-opens the ExpertStream address set in the owner's Billing page.
+## Two websites, one account: ExpertStream and ExpertStream Cloud
+
+* **ExpertStream** (`site/app.py`, port 8780): Plans (Expert One, Razorpay), Create, Run, MCP.
+* **ExpertStream Cloud** (this gateway, port 8000): AI API, Playground, Database, **Training**, Cloud plans.
+
+Accounts are email + password, stored once by `es-common` (the same `DATABASE_URL` for both). A sign-up on either website works on
+the other. Signing in on one signs you in on the other: both set the `es_session` cookie (a token signed with `ES_JWT_SECRET`), and
+the Cloud console turns it into its own session through `POST /auth/sso`. Signing out of either signs out of both.
+
+**Training** (the trainer from `apps/es-trainer`) runs inside the Cloud at `/training`, as a page of the console. It needs a Cloud
+sign-in; each user gets their own runs, uploads, chats and downloads, and their plan sets the limits above. Models come from the
+shared library (`ES_MODEL_DIR`, default `~/models`); data is the samples or the user's own uploads, nothing else on the disk.
+
+`cloud start` runs both websites with a private `ES_JWT_SECRET` it makes once (`~/.expertcloud/jwt_secret`). **On the internet**,
+set the same `ES_JWT_SECRET` (a long random string) and `DATABASE_URL` for both, serve them under one domain (e.g.
+`expertstream.in` and `cloud.expertstream.in`) and set `ES_COOKIE_DOMAIN=.expertstream.in` so the sign-in cookie is shared; set
+`EXPERTSTREAM_URL` on the Cloud (or the Billing page) and `CLOUD_URL` on the site so each links to the other.
+
+Other apps can still use the API: `POST /auth/login {email, password}`, `GET /account/plans` (`cloud` and `expertone`), and
+`/db/...`. The API allows calls from any website (CORS) since it uses bearer tokens.
 
 ## Easiest way: the `cloud` command
 
 ```
 scripts/expertcloud.sh shortcut     # once: makes "cloud" work in new terminals
-cloud start                         # gateway + this device as a node, in the background, restarted if they crash
+cloud start                         # gateway + ExpertStream site + this device as a node, in the background, restarted if they crash
 cloud status                        # live: nodes online, speed, requests served
 cloud open                          # the dashboard link (signs you in)
 cloud logs | stop
 ```
-`cloud start --lan` lets other devices join; `--models DIR` picks the model folder (default `~/models`); `--rotate` makes new tokens.
+`cloud start --lan` lets other devices join; `--models DIR` picks the model folder (default `~/models`); `--rotate` makes new tokens;
+`--no-site` skips the ExpertStream site, `--site-port N` moves it (default 8780).
 
 **On a phone:** Android freezes background apps, which stops Termux. `cloud start` takes a Termux wake lock (install the
 Termux:API app and run `pkg install termux-api`), and once: Android Settings > Apps > Termux > Battery > Unrestricted.

@@ -57,6 +57,8 @@ class Store:
         self.db.executescript(SCHEMA)
         cols = [r[1] for r in self.db.execute("PRAGMA table_info(keys)")]
         if "user_id" not in cols: self.db.execute("ALTER TABLE keys ADD COLUMN user_id INTEGER")   # databases from before accounts
+        ucols = [r[1] for r in self.db.execute("PRAGMA table_info(users)")]
+        if "es_uid" not in ucols: self.db.execute("ALTER TABLE users ADD COLUMN es_uid TEXT")   # the linked ExpertStream (site) account
         try:
             self.db.execute(FTS)
             self.fts = True
@@ -138,6 +140,21 @@ class Store:
         with self.lock:
             self.db.execute("UPDATE users SET console_hash=? WHERE id=?", (key_hash(console), uid))
         return uid
+
+    def linked_user(self, es_uid, email):
+        """The Cloud account of an ExpertStream account (made on first use; the password stays with ExpertStream)."""
+        row = self.db.execute("SELECT id FROM users WHERE es_uid=?", (es_uid,)).fetchone()
+        if row: return row[0]
+        row = self.db.execute("SELECT id FROM users WHERE username=? AND es_uid IS NULL", (email,)).fetchone()
+        uid = row[0] if row else self.create_user(email, secrets.token_urlsafe(32))
+        if uid is None: return None
+        with self.lock:
+            self.db.execute("UPDATE users SET es_uid=? WHERE id=?", (es_uid, uid))
+        return uid
+
+    def es_uid(self, uid):
+        row = self.db.execute("SELECT es_uid FROM users WHERE id=?", (uid,)).fetchone()
+        return row[0] if row else None
 
     def check_password(self, username, password):
         row = self.db.execute("SELECT id, pw, disabled FROM users WHERE username=?", (username,)).fetchone()

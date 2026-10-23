@@ -52,6 +52,24 @@ app = FastAPI(title="ExpertStream OmniRoute Gateway", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["Authorization", "Content-Type", "x-api-key"])
 PLANS = plans_mod.PLANS
 DOCS = None
+sys.path.insert(0, os.path.join(ROOT, "es-common"))
+_ESC = []
+
+
+def esc():
+    """es_common (ExpertStream accounts, Expert One subscriptions), shared with the ExpertStream site; None if unavailable."""
+    if not _ESC:
+        try:
+            import es_common
+            es_common.db()
+            _ESC.append(es_common)
+        except Exception as ex:   # noqa: BLE001 - the Cloud works alone without the site's library
+            print("ExpertStream accounts off: %s" % ex, flush=True); _ESC.append(None)
+    return _ESC[0]
+
+
+def site_url():
+    return (STORE.setting("expertstream_url") or os.environ.get("EXPERTSTREAM_URL") or "http://127.0.0.1:8780").rstrip("/")
 STORE = None
 CTRL = None
 ADMIN = None
@@ -105,12 +123,28 @@ def token_hint(tok, want):
     return "unknown or revoked API key (Authorization: Bearer sk-expert-...)"
 
 
+def expert_one(uid):
+    """The Expert One plan id of a user (from the ExpertStream site), or None."""
+    e, es_uid = esc(), STORE.es_uid(uid)
+    if not e or not es_uid: return None
+    try: return e.subscription(es_uid)
+    except Exception: return None   # noqa: BLE001
+
+
 def user_plan(uid, product="cloud"):
+    if product == "expertone":
+        _, p = plans_mod.find(PLANS, expert_one(uid) or "es-starter")
+        return dict(p or plans_mod.free_plan(PLANS, "expertone"), expires=None, source="ExpertStream")
+    best = dict(plans_mod.free_plan(PLANS, product), expires=None, source=None)
     sub = STORE.subscription(uid, product)
     if sub:
         _, p = plans_mod.find(PLANS, sub[0])
-        if p: return dict(p, expires=sub[1])
-    return dict(plans_mod.free_plan(PLANS, product), expires=None)
+        if p: best = dict(p, expires=sub[1], source=None)
+    one = plans_mod.UNLOCKS.get(expert_one(uid) or "") if product == "cloud" else None
+    if one:   # Expert One includes Expert Cloud: the better of the two counts
+        _, p = plans_mod.find(PLANS, one)
+        if p and p["price_inr"] > best["price_inr"]: best = dict(p, expires=None, source="Expert One")
+    return best
 
 
 def auth(request, count=False):
@@ -364,19 +398,48 @@ async def body_of(request):
         return {}
 
 
+COOKIE = "ec_session"   # the Cloud's sign-in cookie (the Training page needs it); the site's is es_common.COOKIE (es_session)
+
+
+def signed_in(resp, uid, token, es_uid=None):
+    """Sets the Cloud cookie, and the ExpertStream cookie so the site sees the same person signed in."""
+    resp.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=30 * 86400, path="/")
+    e = esc()
+    if e and es_uid:
+        resp.set_cookie(e.COOKIE, e.make_token(es_uid), httponly=True, samesite="lax", max_age=7 * 86400, path="/",
+                        domain=os.environ.get("ES_COOKIE_DOMAIN") or None)
+    return resp
+
+
+def session_reply(uid, es_uid=None):
+    row = STORE.db.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+    tok = STORE.new_session(uid)
+    return signed_in(JSONResponse({"token": tok, "username": row[0]}), uid, tok, es_uid)
+
+
 @app.post("/auth/signup")
 async def signup(request: Request):
+    """One account for ExpertStream and ExpertStream Cloud: {"email", "password"} makes it on both. ({"username"} still works for a
+    Cloud-only account when the ExpertStream library is not installed.)"""
     if not setting_on("signup", True): return err(403, "sign-up is closed on this cloud", "permission_error")
     full, q = too_many(request, "signup", 5, 3600)
     if full: return err(429, "too many new accounts from this address; try again in an hour", "rate_limit_error")
     b = await body_of(request)
-    name, pw = str(b.get("username") or "").strip(), str(b.get("password") or "")
-    if not USERNAME.match(name): return err(400, "username: 3 to 32 letters, digits, dots, dashes or underscores")
+    email, pw = str(b.get("email") or b.get("username") or "").strip(), str(b.get("password") or "")
     if len(pw) < 8: return err(400, "password: at least 8 characters")
-    uid = STORE.create_user(name, pw)
+    e = esc()
+    if "@" in email and e:
+        try: es_uid = e.signup(email, pw)
+        except ValueError as ex: return err(409 if "registered" in str(ex) else 400, str(ex))
+        uid = STORE.linked_user(es_uid, email.lower())
+        q.append(time.time())
+        return session_reply(uid, es_uid)
+    if e: return err(400, "enter your email address: one account works on ExpertStream and ExpertStream Cloud")
+    if not USERNAME.match(email): return err(400, "username: 3 to 32 letters, digits, dots, dashes or underscores")
+    uid = STORE.create_user(email, pw)
     if uid is None: return err(409, "that username is taken")
     q.append(time.time())
-    return {"token": STORE.new_session(uid), "username": name}
+    return session_reply(uid)
 
 
 @app.post("/auth/login")
@@ -384,19 +447,48 @@ async def login(request: Request):
     full, q = too_many(request, "login", 10, 600)
     if full: return err(429, "too many wrong passwords; wait 10 minutes", "rate_limit_error")
     b = await body_of(request)
-    name = str(b.get("username") or "").strip()
-    uid = STORE.check_password(name, str(b.get("password") or "")) if name else None
+    name, pw = str(b.get("email") or b.get("username") or "").strip(), str(b.get("password") or "")
+    e = esc()
+    if "@" in name and e:   # an ExpertStream account: the password is checked by ExpertStream
+        try: es_uid = e.login(name, pw)
+        except ValueError:
+            q.append(time.time()); return err(401, "wrong email or password", "authentication_error")
+        return session_reply(STORE.linked_user(es_uid, name.lower()), es_uid)
+    uid = STORE.check_password(name, pw) if name else None
     if not uid:
-        q.append(time.time()); return err(401, "wrong username or password", "authentication_error")
-    row = STORE.db.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-    return {"token": STORE.new_session(uid), "username": row[0]}
+        q.append(time.time()); return err(401, "wrong email or password", "authentication_error")
+    return session_reply(uid, STORE.es_uid(uid))
+
+
+@app.post("/auth/sso")
+async def sso(request: Request):
+    """Signed in on the ExpertStream site (its es_session cookie): the same person, signed in here."""
+    e = esc()
+    tok = request.cookies.get(e.COOKIE) if e else None
+    es_uid = e.verify_token(tok) if tok else None
+    if not es_uid: return err(401, "not signed in on ExpertStream", "authentication_error")
+    row = e.db().q("SELECT email FROM users WHERE id=?", (es_uid,))
+    if not row: return err(401, "not signed in on ExpertStream", "authentication_error")
+    return session_reply(STORE.linked_user(es_uid, row[0]["email"]), es_uid)
+
+
+@app.post("/auth/cookie")
+async def cookie(request: Request):
+    """A console signed in before cookies existed: set them from its session token."""
+    tok = bearer(request)
+    su = STORE.session_user(tok) if tok.startswith("ses-") else None
+    if not su: return err(401, "sign in first", "authentication_error")
+    return signed_in(JSONResponse({"ok": True}), su[0], tok, STORE.es_uid(su[0]))
 
 
 @app.post("/auth/logout")
 async def logout(request: Request):
-    tok = bearer(request)
+    tok = bearer(request) or request.cookies.get(COOKIE) or ""
     if tok.startswith("ses-"): STORE.end_session(tok)
-    return {"ok": True}
+    r = JSONResponse({"ok": True}); r.delete_cookie(COOKIE, path="/")
+    e = esc()
+    if e: r.delete_cookie(e.COOKIE, path="/", domain=os.environ.get("ES_COOKIE_DOMAIN") or None)
+    return r
 
 
 def public_stats():
@@ -510,7 +602,7 @@ async def admin_settings(request: Request):
 # ---------------------------------------------------------------------------------------------------------------- plans and billing
 def plan_view(uid, product):
     p = user_plan(uid, product)
-    return dict(id=p["id"], name=p["name"], price_inr=p["price_inr"], expires=p["expires"], features=p["features"])
+    return dict(id=p["id"], name=p["name"], price_inr=p["price_inr"], expires=p["expires"], features=p["features"], source=p.get("source"))
 
 
 def rzp_keys():
@@ -520,7 +612,8 @@ def rzp_keys():
 
 
 def apps_view():
-    return {"expertstream": {"title": PLANS.get("expertstream", {}).get("title", "ExpertStream"), "url": STORE.setting("expertstream_url") or ""}}
+    return {"expertstream": {"title": "ExpertStream", "url": site_url(), "plans_url": site_url() + "/", "accounts": bool(esc())},
+            "training": {"url": "/training/", "on": bool(TRAINER)}}
 
 
 @app.get("/plans")
@@ -567,6 +660,7 @@ async def checkout(request: Request):
         item, price, desc = "storage:%d" % gb, gb * st["price_inr_per_gb"], "%d GB extra database space (30 days)" % gb
     else:
         product, plan = plans_mod.find(PLANS, str(b.get("plan") or ""))
+        if product and PLANS[product].get("sold_on_site"): return err(400, "Expert One is bought on ExpertStream: %s/" % site_url())
         if not plan or plan["price_inr"] <= 0: return err(400, "pick a paid plan")
         item, price, desc = plan["id"], plan["price_inr"], "%s %s (30 days)" % (PLANS[product]["title"], plan["name"])
     keys = rzp_keys()
@@ -659,6 +753,11 @@ async def admin_set_plan(username: str, request: Request):
         STORE.end_subscription(uid, str(b.get("product") or "cloud")); return {"ok": True}
     product, plan = plans_mod.find(PLANS, str(b["plan"]))
     if not plan: return err(400, "no such plan")
+    if product == "expertone":   # written where the site keeps it
+        e, es_uid = esc(), STORE.es_uid(uid)
+        if not e or not es_uid: return err(400, "this account has no ExpertStream login (it signed up with a username)")
+        e.set_subscription(es_uid, None if plan["price_inr"] == 0 else plan["id"], "owner", "owner")
+        return {"ok": True}
     if plan["price_inr"] == 0: STORE.end_subscription(uid, product); return {"ok": True}
     days = b.get("days", plans_mod.PERIOD_DAYS)
     return {"ok": True, "expires": STORE.set_subscription(uid, product, plan["id"], None if days is None else float(days), "owner")}
@@ -941,6 +1040,38 @@ async def auth_check(request: Request):
     return err(401, token_hint(tok, "admin"), "authentication_error")
 
 
+# ---------------------------------------------------------------------------------------------------------------- training
+TRAINER = None
+
+
+def training_app():
+    """The Training app (apps/es-trainer), each request carrying the signed-in user and their plan's training limits."""
+    import importlib.util
+    from http.cookies import SimpleCookie
+    os.environ.setdefault("ES_BIN_DIR", ROOT)                                     # es_train, es_lora, es_chat built here
+    os.environ.setdefault("ES_MODEL_DIR", os.path.expanduser("~/models"))
+    os.environ.setdefault("ES_TRAIN_RUNS", os.path.join(os.path.dirname(os.path.abspath(STORE.path)), "training", "runs"))
+    os.environ.setdefault("ES_TRAIN_DATA", os.path.join(os.path.dirname(os.path.abspath(STORE.path)), "training", "data"))
+    spec = importlib.util.spec_from_file_location("es_trainer_app", os.path.join(ROOT, "apps", "es-trainer", "app.py"))
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    flask_app = mod.app
+
+    def guarded(environ, start_response):
+        c = SimpleCookie(); c.load(environ.get("HTTP_COOKIE", ""))
+        su = STORE.session_user(c[COOKIE].value) if COOKIE in c else None
+        if not su:
+            body = (b'<!doctype html><meta charset="utf-8"><body style="font:15px system-ui;background:#0b0d12;color:#e8ebf2;padding:40px">'
+                    b'Sign in to ExpertStream Cloud to use Training. <a style="color:#7c6cff" href="/" target="_top">Sign in</a></body>')
+            start_response("401 Unauthorized", [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body)))])
+            return [body]
+        lim = user_plan(su[0])["limits"]
+        environ["es.user"] = "u%d" % su[0]
+        environ["es.limits"] = {"max_steps": lim.get("train_steps"), "moe": lim.get("train_moe"), "max_threads": lim.get("train_threads"),
+                               "hf_download": bool(lim.get("train_moe"))}   # adding models to the shared library: paid plans
+        return flask_app(environ, start_response)
+    return guarded
+
+
 PAGE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
 
 
@@ -987,6 +1118,14 @@ def init(db_path, rotate=False):
     CTRL = Controller(STORE)
     base = os.path.dirname(os.path.abspath(db_path))
     PLANS = plans_mod.load(os.environ.get("EXPERTCLOUD_PLANS") or os.path.join(base, "plans.json"))
+    global TRAINER
+    if TRAINER is None and os.environ.get("ES_TRAINING", "1") != "0":
+        try:
+            from starlette.middleware.wsgi import WSGIMiddleware
+            TRAINER = training_app()
+            app.mount("/training", WSGIMiddleware(TRAINER))
+        except Exception as ex:   # noqa: BLE001 - Flask missing: the Cloud runs without Training
+            print("Training off: %s (pip install flask)" % ex, flush=True)
     DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata"), legacy=os.path.join(base, "clouddata.db"))
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))

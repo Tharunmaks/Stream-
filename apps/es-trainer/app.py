@@ -1,4 +1,9 @@
-"""Expert Stream LoRA Trainer: tiny Flask app driving es_lora / es_chat. Works on Linux and Termux."""
+"""Expert Stream LoRA Trainer: tiny Flask app driving es_lora / es_chat. Works on Linux and Termux.
+
+Alone (./run.sh) it is a single-user app. Inside ExpertStream Cloud (gateway/omni_router.py mounts it at /training) every request
+carries the signed-in user (environ "es.user") and their plan's limits ("es.limits"): each user gets their own job, chat, uploads
+and runs, models come only from the model library, datasets only from the user's own uploads or the shared samples, and at most
+ES_TRAIN_MAX_JOBS trainings run on the server at once."""
 import os, re, shlex, shutil, json, glob, time, signal, subprocess, threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -8,11 +13,41 @@ def trainer():
     t = os.path.join(BIN, "es_train")
     return ([t, "finetune"] if os.path.exists(t) else [os.path.join(BIN, "es_lora")])
 MODELS = os.environ.get("ES_MODEL_DIR", "/workspace/es-bench")
-RUNS = os.path.join(HERE, "runs"); DATA = os.path.join(HERE, "data")
+RUNS = os.environ.get("ES_TRAIN_RUNS") or os.path.join(HERE, "runs")       # per user: RUNS/<user>/
+SAMPLES = os.path.join(HERE, "data")                                         # sample datasets, shared and read-only
+DATA = os.environ.get("ES_TRAIN_DATA") or SAMPLES                            # uploads, per user: DATA/<user>/
 FAST_ENV = {"ES_AMX": "1", "ES_LORA_BLAS": "1",
             "ES_BLAS": os.environ.get("ES_BLAS", "/usr/local/lib/python3.13/dist-packages/numpy.libs/libscipy_openblas64_-f48b354e.so")}
 app = Flask(__name__, static_folder=None)
-JOB = {"proc": None, "run": None, "cfg": None, "lines": [], "steps": [], "heldout": [], "state": "idle", "rss": 0, "t0": 0, "done_offset": 0, "mode": "finetune"}
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("ES_TRAIN_MAX_UPLOAD_MB", "64")) << 20
+MAX_JOBS = int(os.environ.get("ES_TRAIN_MAX_JOBS", "1"))     # trainings running at once on this server (CPU bound)
+MAX_CHATS = int(os.environ.get("ES_TRAIN_MAX_CHATS", "2"))   # es_chat processes kept alive (each holds a model in RAM)
+JOBS = {}   # user -> job
+
+def new_job():
+    return {"proc": None, "run": None, "cfg": None, "lines": [], "steps": [], "heldout": [], "state": "idle", "rss": 0, "t0": 0, "done_offset": 0, "mode": "finetune"}
+
+def who():
+    """(user, limits): the signed-in Cloud user and their plan's limits; 'local' with no limits when run alone."""
+    u = request.environ.get("es.user")
+    return (re.sub(r"[^\w.@-]", "_", str(u)) if u else "local"), (request.environ.get("es.limits") or {})
+
+def job():
+    return JOBS.setdefault(who()[0], new_job())
+
+def udir(base):
+    d = os.path.join(base, who()[0]); os.makedirs(d, exist_ok=True); return d
+
+def running():
+    return sum(1 for j in JOBS.values() if j["proc"] and j["proc"].poll() is None)
+
+def allowed_model(path):
+    rp = os.path.realpath(path or "")
+    return any(os.path.realpath(m) == rp for m in model_list())
+
+def allowed_data(path):
+    rp = os.path.realpath(path or ""); ok = (os.path.realpath(SAMPLES) + os.sep, os.path.realpath(udir(DATA)) + os.sep)
+    return os.path.isfile(rp) and (os.path.dirname(rp) + os.sep in ok)
 STEP = re.compile(r"step (\d+)/(\d+)\s+loss ([\d.]+).*?lr ([\de.+-]+)\s+([\d.]+) s\s+(\d+) tokens/s")
 MOESTEP = re.compile(r"^step (\d+) loss ([\d.]+) aux ([\d.]+).*? ([\d.]+)s ([\d.]+) tok/s.*?hit ([\d.]+)%.*?rss (\d+) MB")
 MOEHELD = re.compile(r"^held-out loss ([\d.]+)")
@@ -25,7 +60,7 @@ def rss(pid):
     except Exception: pass
     return 0
 
-def reader(p):
+def reader(p, JOB):
     for raw in p.stderr:
         l = raw.decode(errors="replace").rstrip()
         JOB["lines"] = (JOB["lines"] + [l])[-200:]
@@ -47,8 +82,9 @@ def reader(p):
 
 def sampler():
     while True:
-        p = JOB["proc"]
-        if p and p.poll() is None: JOB["rss"] = rss(p.pid)
+        for J in list(JOBS.values()):
+            p = J["proc"]
+            if p and p.poll() is None: J["rss"] = rss(p.pid)
         time.sleep(1)
 threading.Thread(target=sampler, daemon=True).start()
 
@@ -79,11 +115,15 @@ def index(): return send_from_directory(os.path.join(HERE, "static"), "index.htm
 @app.get("/static/<path:f>")
 def st(f): return send_from_directory(os.path.join(HERE, "static"), f)
 
+def model_list(): return sorted(glob.glob(os.path.join(MODELS, "*.gguf")) + glob.glob(os.path.join(HERE, "models", "*.gguf")))
+
 @app.get("/api/models")
-def models(): return jsonify(sorted(glob.glob(os.path.join(MODELS, "*.gguf")) + glob.glob(os.path.join(HERE, "models", "*.gguf"))))
+def models(): return jsonify(model_list())
 
 @app.post("/api/hf")
 def hf():
+    if who()[1].get("hf_download") is False:
+        return jsonify(error="Adding models from Hugging Face needs a paid plan. Use a model already in the library, or upgrade."), 402
     repo = request.json.get("repo", "").strip()
     try:
         from huggingface_hub import list_repo_files, hf_hub_download
@@ -99,13 +139,15 @@ def hf():
     return jsonify(path=path)
 
 @app.get("/api/datasets")
-def datasets(): return jsonify(sorted(glob.glob(os.path.join(DATA, "*.jsonl")) + glob.glob(os.path.join(DATA, "*.txt"))))
+def datasets():   # the shared samples, then this user's uploads
+    return jsonify(sorted(glob.glob(os.path.join(SAMPLES, "*.jsonl")) + glob.glob(os.path.join(SAMPLES, "*.txt")))
+                   + sorted(glob.glob(os.path.join(udir(DATA), "*.jsonl")) + glob.glob(os.path.join(udir(DATA), "*.txt"))))
 
 @app.post("/api/upload")
 def upload():
-    f = request.files["file"]; name = re.sub(r"[^\w.-]", "_", f.filename)
-    tmp = os.path.join(DATA, "raw_" + name); f.save(tmp)
-    try: path, info = convert_dataset(tmp, os.path.join(DATA, os.path.splitext(name)[0]))
+    f = request.files["file"]; name = re.sub(r"[^\w.-]", "_", f.filename); d = udir(DATA)
+    tmp = os.path.join(d, "raw_" + name); f.save(tmp)
+    try: path, info = convert_dataset(tmp, os.path.join(d, os.path.splitext(name)[0]))
     except Exception as e: return jsonify(error=str(e)), 400
     finally:
         if os.path.exists(tmp): os.remove(tmp)
@@ -125,9 +167,9 @@ def moe_text(path):
                 else: f.write(f'Q: {o.get("prompt","")}\nA: {o.get("response", o.get("completion",""))}\n\n')
     return out
 
-def start_moe(cfg):
+def start_moe(cfg, JOB, runs):
     L, E, D, F = (str(int(cfg[k])) for k in ("layers", "experts", "dim", "ffn"))
-    ef = os.path.join(RUNS, f"experts_L{L}_E{E}_d{D}_f{F}.bin")
+    ef = os.path.join(RUNS, f"experts_L{L}_E{E}_d{D}_f{F}.bin")   # random frozen experts: one shared file per shape
     tr = os.path.join(BIN, "es_train")
     gen = [tr, "moe", "gen", "--experts-file", ef, "--layers", L, "--experts", E, "--dim", D, "--ffn", F]
     cmd = [tr, "moe", "train", "--experts-file", ef, "--layers", L, "--experts", E, "--dim", D, "--ffn", F,
@@ -137,14 +179,14 @@ def start_moe(cfg):
     sh = ("" if os.path.exists(ef) else " ".join(map(shlex.quote, gen)) + " && ") + "exec " + ("stdbuf -oL " if shutil.which("stdbuf") else "") + " ".join(map(shlex.quote, cmd))
     env = dict(os.environ); env["ES_BLAS"] = FAST_ENV["ES_BLAS"]
     JOB.update(cfg=cfg, run=cfg["run"], mode="moe", state="running", t0=time.time(), rss=0, steps=[], heldout=[], done_offset=0, lines=["$ " + sh])
-    JOB["proc"] = subprocess.Popen(["sh", "-c", sh], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=RUNS, start_new_session=True)
+    JOB["proc"] = subprocess.Popen(["sh", "-c", sh], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=runs, start_new_session=True)
     p = JOB["proc"]; p.stderr = p.stdout
-    threading.Thread(target=reader, args=(p,), daemon=True).start()
+    threading.Thread(target=reader, args=(p, JOB), daemon=True).start()
 
-def start(cfg, resume=False):
-    if cfg.get("mode") == "moe": return start_moe(cfg)
+def start(cfg, JOB, runs, resume=False):
+    if cfg.get("mode") == "moe": return start_moe(cfg, JOB, runs)
     JOB["mode"] = "finetune"
-    run = cfg["run"]; out = os.path.join(RUNS, run + ".eslora")
+    run = cfg["run"]; out = os.path.join(runs, run + ".eslora")
     steps = int(cfg["steps"])
     if resume:
         done = JOB["steps"][-1]["step"] if JOB["steps"] and JOB["run"] == run else 0
@@ -160,18 +202,34 @@ def start(cfg, resume=False):
     if cfg.get("fast"): env.update(FAST_ENV)
     if cfg.get("recompute"): env["ES_LORA_RECOMPUTE"] = "1"
     JOB.update(cfg=cfg, run=run, state="running", t0=time.time(), rss=0, lines=["$ " + " ".join(cmd)])
-    JOB["proc"] = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=RUNS)
-    threading.Thread(target=reader, args=(JOB["proc"],), daemon=True).start()
+    JOB["proc"] = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=runs)
+    threading.Thread(target=reader, args=(JOB["proc"], JOB), daemon=True).start()
+
+def check(cfg):
+    """A reason the run is not allowed (plan limits, files that are not this user's), or None."""
+    lim = who()[1]
+    if running() >= MAX_JOBS: return "the server is training for someone else right now: try again in a few minutes", 429
+    if cfg.get("mode") == "moe":
+        if lim.get("moe") is False: return "training a mixture-of-experts model needs a paid plan", 402
+    elif not allowed_model(cfg.get("model")): return "pick a model from the model library", 400
+    if not allowed_data(cfg.get("data")): return "pick one of your datasets (or a sample)", 400
+    if lim.get("max_steps") and int(cfg.get("steps") or 0) > lim["max_steps"]:
+        return "your plan allows up to %d steps per run: lower the steps or upgrade" % lim["max_steps"], 402
+    if lim.get("max_threads"): cfg["threads"] = min(int(cfg.get("threads") or 1), int(lim["max_threads"]))
+    return None
 
 @app.post("/api/train")
 def train():
+    JOB = job()
     if JOB["proc"] and JOB["proc"].poll() is None: return jsonify(error="a run is active"), 409
     cfg = request.json; cfg["run"] = re.sub(r"[^\w-]", "_", cfg.get("run") or time.strftime("run_%H%M%S"))
-    start(cfg); return jsonify(ok=True, run=cfg["run"])
+    bad = check(cfg)
+    if bad: return jsonify(error=bad[0]), bad[1]
+    start(cfg, JOB, udir(RUNS)); return jsonify(ok=True, run=cfg["run"])
 
 @app.post("/api/stop")
 def stop():
-    p = JOB["proc"]
+    JOB = job(); p = JOB["proc"]
     if p and p.poll() is None:
         JOB["state"] = "stopping"
         if JOB["mode"] == "moe": os.killpg(p.pid, signal.SIGTERM)
@@ -180,51 +238,71 @@ def stop():
 
 @app.post("/api/resume")
 def resume():
+    JOB = job()
     if JOB["proc"] and JOB["proc"].poll() is None: return jsonify(error="a run is active"), 409
     if not JOB["cfg"]: return jsonify(error="nothing to resume"), 400
     if JOB["mode"] == "moe": return jsonify(error="MoE prototype runs keep no checkpoint, so they can't resume. Start a new run."), 400
-    start(JOB["cfg"], resume=True); return jsonify(ok=True)
+    if running() >= MAX_JOBS: return jsonify(error="the server is training for someone else right now: try again in a few minutes"), 429
+    start(JOB["cfg"], JOB, udir(RUNS), resume=True); return jsonify(ok=True)
 
 @app.get("/api/status")
 def status():
-    s = JOB["steps"]; cfg = JOB["cfg"] or {}
+    JOB = job(); s = JOB["steps"]; cfg = JOB["cfg"] or {}
     eta = None
     if s and JOB["state"] == "running":
         avg = sum(x["secs"] for x in s[-5:]) / len(s[-5:]); eta = round(avg * (s[-1]["of"] - s[-1]["step"]))
     return jsonify(state=JOB["state"], mode=JOB["mode"], run=JOB["run"], cfg=cfg, steps=s, heldout=JOB["heldout"], rss=JOB["rss"],
-                   log=JOB["lines"][-12:], eta=eta, elapsed=round(time.time() - JOB["t0"]) if JOB["t0"] else 0)
+                   log=JOB["lines"][-12:], eta=eta, elapsed=round(time.time() - JOB["t0"]) if JOB["t0"] else 0,
+                   limits=who()[1], busy=running() >= MAX_JOBS and not (JOB["proc"] and JOB["proc"].poll() is None))
 
 @app.get("/api/runs")
 def runs():
-    r = []
-    for f in sorted(glob.glob(os.path.join(RUNS, "*.eslora")), key=os.path.getmtime, reverse=True):
-        n = os.path.basename(f)[:-7]; g = os.path.join(RUNS, n + ".gguf")
+    r = []; runs_dir = udir(RUNS)
+    for f in sorted(glob.glob(os.path.join(runs_dir, "*.eslora")), key=os.path.getmtime, reverse=True):
+        n = os.path.basename(f)[:-7]; g = os.path.join(runs_dir, n + ".gguf")
         r.append({"run": n, "eslora_mb": round(os.path.getsize(f) / 1e6, 2), "gguf": os.path.exists(g)})
     return jsonify(r)
 
 @app.post("/api/export/<run>")
 def export(run):
-    run = re.sub(r"[^\w-]", "_", run); model = (JOB["cfg"] or {}).get("model") or request.json.get("model")
-    p = subprocess.run(trainer() + ["export", "--lora", os.path.join(RUNS, run + ".eslora"), "-g", model, "-j", "1",
-                        "-o", os.path.join(RUNS, run + ".gguf")], capture_output=True, text=True)
+    run = re.sub(r"[^\w-]", "_", run); model = (job()["cfg"] or {}).get("model") or (request.json or {}).get("model")
+    if not allowed_model(model): return jsonify(error="pick a model from the model library"), 400
+    runs_dir = udir(RUNS)
+    p = subprocess.run(trainer() + ["export", "--lora", os.path.join(runs_dir, run + ".eslora"), "-g", model, "-j", "1",
+                        "-o", os.path.join(runs_dir, run + ".gguf")], capture_output=True, text=True)
     return (jsonify(ok=True) if p.returncode == 0 else (jsonify(error=p.stderr[-500:]), 500))
 
 @app.get("/dl/<path:name>")
 def dl(name):
     name = os.path.basename(name)
-    return send_file(os.path.join(RUNS, name), as_attachment=True)
+    return send_file(os.path.join(udir(RUNS), name), as_attachment=True)
 
-CHAT = {"proc": None, "key": None, "lock": threading.Lock()}
+CHATS = {}; CHAT_LOCK = threading.Lock()   # user -> {"proc", "key", "lock", "used"}
+def chat_slot():
+    """This user's chat process slot; when MAX_CHATS are alive, the least recently used other one is closed."""
+    u = who()[0]
+    with CHAT_LOCK:
+        c = CHATS.get(u)
+        if not c:
+            alive = [(k, v) for k, v in CHATS.items() if v["proc"] and v["proc"].poll() is None]
+            while len(alive) >= MAX_CHATS:
+                k, v = min(alive, key=lambda kv: kv[1]["used"]); v["proc"].kill(); del CHATS[k]; alive.remove((k, v))
+            c = CHATS[u] = {"proc": None, "key": None, "lock": threading.Lock(), "used": time.time()}
+        c["used"] = time.time()
+        return c
+
 @app.post("/api/chat")
 def chat():
     j = request.json; run = re.sub(r"[^\w-]", "_", j.get("run") or ""); model = j["model"]
-    key = (model, run)
+    if not allowed_model(model): return jsonify(error="pick a model from the model library"), 400
+    if run and not os.path.exists(os.path.join(udir(RUNS), run + ".eslora")): return jsonify(error="no such adapter"), 404
+    key = (model, run); CHAT = chat_slot()
     with CHAT["lock"]:
         p = CHAT["proc"]
         if not p or p.poll() is not None or CHAT["key"] != key:
             if p and p.poll() is None: p.kill()
             cmd = [os.path.join(BIN, "es_chat"), "-g", model, "-J", "-j", str(j.get("threads", 1)), "-n", str(j.get("max", 96)), "-t", "0.7", "-C", "512"]
-            if run: cmd += ["--lora", os.path.join(RUNS, run + ".eslora")]
+            if run: cmd += ["--lora", os.path.join(udir(RUNS), run + ".eslora")]
             p = CHAT["proc"] = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
             CHAT["key"] = key
             while True:
@@ -245,6 +323,8 @@ def chat():
             elif e.get("ev") == "done":
                 stats = e; break
         return jsonify(reply=text, tps=stats.get("tps"), ram_mb=stats.get("ram_mb"))
+
+os.makedirs(RUNS, exist_ok=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8765)), threaded=True)

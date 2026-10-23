@@ -126,7 +126,7 @@
       <!-- Users -->
       <section data-view="users" hidden>
         <div class="card"><div class="hd"><h3>Users</h3><span class="sub" id="usersSub"></span><div class="sp"></div><input class="input" id="userSearch" placeholder="Search" style="max-width:180px;height:32px"></div>
-          <div class="tbl-wrap"><table><thead><tr><th>User</th><th>Joined</th><th>Last sign-in</th><th>ExpertCloud</th><th>ExpertStream</th><th class="r">Database</th><th class="r">Today</th><th class="r">Requests</th><th class="r">Tokens</th><th></th></tr></thead>
+          <div class="tbl-wrap"><table><thead><tr><th>User</th><th>Joined</th><th>Last sign-in</th><th>ExpertCloud</th><th>Expert One</th><th class="r">Database</th><th class="r">Today</th><th class="r">Requests</th><th class="r">Tokens</th><th></th></tr></thead>
           <tbody id="userRows"></tbody></table></div><div id="usersEmpty" hidden></div></div>
       </section>
 
@@ -434,10 +434,10 @@ async function loadUsers() {
 function planChip(p) { return h("span", { class: "chip" + (p.price_inr ? " warm" : "") }, h("span", { class: "dot" }), p.name + (p.expires ? " · " + day(p.expires) : "")); }
 function renderUsers() {
   const q = $("#userSearch").value.trim().toLowerCase(), rows = USERS.filter(u => !q || u.username.toLowerCase().includes(q));
-  const paid = USERS.filter(u => u.plans.cloud.price_inr || u.plans.expertstream.price_inr).length;
+  const paid = USERS.filter(u => u.plans.cloud.price_inr || u.plans.expertone.price_inr).length;
   $("#usersSub").textContent = USERS.length + " users · " + paid + " paying";
   $("#userRows").replaceChildren(...rows.map(u => h("tr", {}, h("td", {}, h("b", {}, u.username)), h("td", {}, day(u.created)), h("td", {}, u.last_login ? ago(u.last_login) : "—"),
-    h("td", {}, planChip(u.plans.cloud)), h("td", {}, planChip(u.plans.expertstream)),
+    h("td", {}, planChip(u.plans.cloud)), h("td", {}, planChip(u.plans.expertone)),
     h("td", { class: "r" }, mb((u.db_bytes || 0) / 1048576) + (u.extra_gb ? " · +" + u.extra_gb + " GB" : "")), h("td", { class: "r" }, fmt(u.today)), h("td", { class: "r" }, fmt(u.usage.requests)),
     h("td", { class: "r" }, fmt(u.usage.completion_tokens)), h("td", { class: "r" }, h("button", { class: "btn sm", onclick: () => changePlan(u) }, "Change plan"), " ", h("button", { class: "btn sm", onclick: () => giveSpace(u) }, "Give space")))));
   const em = $("#usersEmpty"); em.hidden = rows.length > 0; em.replaceChildren(emptyState("users", "No users yet", "People who sign up on your public page show up here."));
@@ -489,10 +489,10 @@ async function loadBilling() {
           const body = { key_id: kid.value.trim() }; if (ksec.value) body.key_secret = ksec.value; if (wsec.value) body.webhook_secret = wsec.value;
           try { await api("/admin/billing", { method: "POST", body: JSON.stringify(body) }); toast("Saved", "ok"); loadBilling(); } catch (e) { toast(e.message, "bad"); } } }, "Save"))),
       h("div", { class: "grid", style: "align-content:start" },
-        h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "ExpertStream app")), h("div", { class: "bd" },
-          f("App address", esu, "The app switcher in your users' console opens this."),
+        h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "ExpertStream site")), h("div", { class: "bd" },
+          f("ExpertStream site address", esu, "The app switcher and the ExpertStream page in your users' console open this."),
           h("button", { class: "btn", onclick: async () => { try { await api("/admin/billing", { method: "POST", body: JSON.stringify({ expertstream_url: esu.value.trim() }) }); toast("Saved", "ok"); } catch (e) { toast(e.message, "bad"); } } }, "Save"),
-          h("p", { class: "note" }, "Your app signs users in with POST /auth/login {username, password}, then GET /account/plans tells it their ExpertStream plan (es_free, es_plus or es_pro). Its data can live in the user's database: /db/... with the same sign-in."))),
+          h("p", { class: "note" }, "The ExpertStream site and this Cloud share one account: signing in on either signs in on both (same browser). Expert One is sold on the site and unlocks Cloud Pro (Starter) or Cloud Max (Mid, Top). Apps: POST /auth/login {email, password}, then GET /account/plans."))),
         h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Plans"), h("span", { class: "sub" }, "per month")), h("div", { class: "bd" },
           h("dl", { class: "kv" }, Object.values(PLANLIST.cloud ? PLANLIST : {}).flatMap(v => v.plans.map(p => [h("dt", {}, v.title + " " + p.name), h("dd", {}, inr(p.price_inr))])).flat()),
           h("p", { class: "note" }, "To change prices or limits, put a plans.json next to expertcloud.db (see gateway/plans.py)."))))),

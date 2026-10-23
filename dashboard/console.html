@@ -166,7 +166,7 @@
     <div id="sideNav"></div>
     <div class="grow"></div>
     <div class="side-foot">
-      <div class="nav" style="cursor:default"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span id="whoSide"></span></div>
+      <div class="nav" style="cursor:default"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span id="whoSide" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span></div>
       <button class="nav" id="themeBtn"><svg class="i" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg><span>Theme</span></button>
       <button class="nav" id="logoutBtn"><svg class="i" viewBox="0 0 24 24"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l-5-5 5-5M5 12h12"/></svg><span>Sign out</span></button>
     </div>
@@ -183,7 +183,7 @@
       <div class="banner bad" id="offline" hidden><svg class="i" viewBox="0 0 24 24"><path d="M12 9v4M12 17v.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span>The cloud is not answering right now. It retries by itself.</span></div>
 
       <section data-view="home">
-        <div class="welcome"><h1 id="hello">Welcome</h1><span class="badge" id="planBadge">Free plan</span><div class="sp"></div><button class="btn primary" data-go="playground">Open the playground</button></div>
+        <div class="welcome"><h1 id="hello" style="min-width:0;overflow-wrap:anywhere">Welcome</h1><span class="badge" id="planBadge">Free plan</span><div class="sp"></div><button class="btn primary" data-go="playground">Open the playground</button></div>
         <div class="card" id="planCard" style="margin-bottom:16px"></div>
         <div class="grid kpis">
           <div class="card kpi"><div class="l">Requests</div><div class="v" id="uReq">0</div><div class="s">made by your keys and the playground</div></div>
@@ -245,6 +245,10 @@
           <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
       </section>
 
+      <section data-view="training" hidden>
+        <div class="card" style="overflow:hidden"><iframe id="trainFrame" title="Training" style="display:block;width:100%;height:calc(100vh - 150px);min-height:560px;border:0;background:#070b14"></iframe></div>
+        <p class="note">Fine-tune a model on your own data (LoRA), or train a mixture-of-experts model. Your plan sets how long a run can be.</p>
+      </section>
       <section data-view="database" hidden><div id="dbView"></div></section>
       <section data-view="billing" hidden><div id="billView"></div></section>
       <section data-view="expertstream" hidden><div id="esView"></div></section>
@@ -324,7 +328,7 @@ function renderLanding() {
 function authModal(mode) {
   let m = mode;
   const err = h("div", { class: "err", hidden: true, role: "alert" }, h("b", {}, "!"), h("span", {}));
-  const user = h("input", { class: "input", autocomplete: "username", autocapitalize: "off", spellcheck: "false", placeholder: "username", maxlength: "32" });
+  const user = h("input", { class: "input", type: "email", autocomplete: "email", autocapitalize: "off", spellcheck: "false", placeholder: "you@example.com", maxlength: "200" });
   const pass = h("input", { class: "input", type: "password", placeholder: "password", maxlength: "200" });
   const go = h("button", { class: "btn primary", style: "width:100%;height:44px" });
   const seg = h("div", { class: "seg" });
@@ -333,19 +337,20 @@ function authModal(mode) {
     seg.replaceChildren(...[["signup", "Create account"], ["login", "Sign in"]].map(([k, l]) => h("button", { type: "button", class: m === k ? "on" : "", onclick: () => { m = k; draw(); } }, l)));
     go.textContent = m === "signup" ? "Create free account" : "Sign in";
     pass.setAttribute("autocomplete", m === "signup" ? "new-password" : "current-password");
-    hint.textContent = m === "signup" ? "Usernames: 3 to 32 letters or digits. Passwords: at least 8 characters." : "";
+    hint.textContent = m === "signup" ? "One account for ExpertStream and ExpertStream Cloud. Passwords: at least 8 characters." : "Your ExpertStream email works here too.";
+    user.type = m === "signup" ? "email" : "text"; user.placeholder = m === "signup" ? "you@example.com" : "email (or your old username)";
     err.hidden = true;
   };
-  const form = h("form", {}, seg, err, h("div", { class: "field" }, h("label", { class: "f" }, "Username"), user), h("div", { class: "field" }, h("label", { class: "f" }, "Password"), pass), go, hint);
+  const form = h("form", {}, seg, err, h("div", { class: "field" }, h("label", { class: "f" }, "Email"), user), h("div", { class: "field" }, h("label", { class: "f" }, "Password"), pass), go, hint);
   let close;
   form.addEventListener("submit", async e => {
     e.preventDefault(); go.disabled = true;
     try {
-      const r = await fetch("/auth/" + m, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }) });
+      const r = await fetch("/auth/" + m, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: user.value.trim(), password: pass.value }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
       store.set("ec_session", j.token, true); TOKEN = j.token; USER = j.username; close(); enterConsole(m === "signup");
-      if (WANT_PLAN) { const want = WANT_PLAN; WANT_PLAN = null; billTab = want.startsWith("es_") ? "expertstream" : "cloud"; go("billing"); setTimeout(() => buy(want), 600); }
+      if (WANT_PLAN) { const want = WANT_PLAN; WANT_PLAN = null; billTab = "cloud"; go("billing"); setTimeout(() => buy(want), 600); }
     } catch (er) { err.hidden = false; err.lastChild.textContent = er.message.charAt(0).toUpperCase() + er.message.slice(1); }
     go.disabled = false;
   });
@@ -372,8 +377,9 @@ $("#themeBtn").addEventListener("click", () => {
 
 // ---------------------------------------------------------------- console navigation
 const VIEWS = [["home", "Home", "home"], ["models", "Models", "models"], ["playground", "Playground", "playground"], ["database", "Database", "db"],
-  ["keys", "API keys", "keys"], ["billing", "Plans & billing", "card"], ["expertstream", "ExpertStream", "stream"], ["compute", "Servers", "compute"], ["docs", "Docs", "docs"]];
-const MOBILE = { home: "Home", playground: "Chat", database: "Database", keys: "Keys", billing: "Plans" };
+  ["training", "Training", "bolt"], ["keys", "API keys", "keys"], ["billing", "Plans & billing", "card"], ["expertstream", "ExpertStream", "stream"],
+  ["compute", "Servers", "compute"], ["docs", "Docs", "docs"]];
+const MOBILE = { home: "Home", playground: "Chat", training: "Train", database: "Database", billing: "Plans" };
 let VIEW = "home";
 for (const [id, label, ic] of VIEWS) {
   $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(ic), h("span", {}, label)));
@@ -391,9 +397,11 @@ function go(id) {
   if (id === "database") loadDatabase();
   if (id === "billing") renderBilling();
   if (id === "expertstream") renderES();
+  if (id === "training") { const f = $("#trainFrame"); if (!f.src) f.src = "/training/"; }
   closeApps();
   render();
 }
+addEventListener("hashchange", () => { const want = location.hash.slice(1); if (!$("#app").hidden && want !== VIEW && VIEWS.some(v => v[0] === want)) go(want); });
 function enterConsole(fresh) {
   $("#landing").hidden = true; $("#app").hidden = false;
   if (fresh) toast("Welcome to ExpertCloud, " + USER + "!", "ok");
@@ -408,7 +416,7 @@ function render() {
   if (!TOKEN || !STATS) return;
   const s = STATS, a = ACCOUNT;
   setStatus(s.nodes ? "ok" : "warn", s.nodes ? "All systems running" : "AI servers starting");
-  if (a) { USER = a.username; $("#whoSide").textContent = a.username; $("#hello").textContent = "Hi, " + a.username; $("#planBadge").textContent = a.plan.name + " plan"; }
+  if (a) { USER = a.username; $("#whoSide").textContent = a.username; $("#whoSide").title = a.username; $("#hello").textContent = "Hi, " + a.username; $("#planBadge").textContent = a.plan.name + " plan"; }
   renderModelSelect();
   document.querySelectorAll('[data-nav="compute"]').forEach(b => b.hidden = !s.public_compute);
   if (VIEW === "home") { renderHome(); renderPlanCard(); }
@@ -608,7 +616,10 @@ function productTabs(cur, onPick) {
 function renderLandingPlans() {
   if (!PLANSDATA) return;
   $("#planTabs").replaceChildren(productTabs(planTab, k => { planTab = k; renderLandingPlans(); }));
-  $("#planCards").replaceChildren(...planCards(planTab, p => ({ el: h("button", { class: "btn" + (p.price_inr ? " primary" : ""), style: "width:100%",
+  const site = PLANSDATA.products[planTab].sold_on_site;
+  $("#planCards").replaceChildren(...planCards(planTab, p => ({ el: site && p.price_inr
+    ? h("a", { class: "btn primary", href: PLANSDATA.apps.expertstream.plans_url, target: "_blank", rel: "noopener", style: "width:100%;text-decoration:none" }, "Get " + p.name + " on ExpertStream")
+    : h("button", { class: "btn" + (p.price_inr ? " primary" : ""), style: "width:100%",
     onclick: () => { WANT_PLAN = p.price_inr ? p.id : null; authModal("signup"); } }, p.price_inr ? "Choose " + p.name : "Start free") })));
 }
 function loadScript(src) {
@@ -632,9 +643,15 @@ async function buy(item) {   /* a plan id, or {storage_gb: N} */
 }
 function planButton(product) {
   const mine = ACCOUNT && ACCOUNT.plans[product];
+  if (PLANSDATA.products[product].sold_on_site) return p => {   /* Expert One: bought on the ExpertStream site */
+    const current = mine && mine.id === p.id, site = PLANSDATA.apps.expertstream.plans_url;
+    if (current) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Your plan") };
+    if (!p.price_inr) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Included") };
+    return { current, el: h("a", { class: "btn primary", href: site, target: "_blank", rel: "noopener", style: "width:100%;text-decoration:none" }, "Buy on ExpertStream") };
+  };
   return p => {
     const current = mine && mine.id === p.id;
-    if (current) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, p.price_inr ? "Current plan · until " + dateOf(mine.expires) : "Current plan") };
+    if (current) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, mine.source === "Expert One" ? "Included in your Expert One" : p.price_inr ? "Current plan · until " + dateOf(mine.expires) : "Current plan") };
     if (!p.price_inr) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Included") };
     if (!PLANSDATA.payments) return { current, el: h("button", { class: "btn", disabled: true, style: "width:100%" }, "Payments open soon") };
     return { current, el: h("button", { class: "btn primary", style: "width:100%", onclick: () => buy(p.id) }, (mine && mine.price_inr ? "Switch to " : "Upgrade to ") + p.name + " · " + inr(p.price_inr)) };
@@ -687,7 +704,7 @@ function renderPlanCard() {
     return h("div", { class: "bar", style: "margin:0" }, h("div", { class: "t" }, h("span", {}, label), h("b", {}, text)), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))); };
   $("#planCard").replaceChildren(h("div", { class: "bd", style: "display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr) auto;gap:18px;align-items:center" },
     h("div", {}, h("div", { class: "muted", style: "font-size:12.5px" }, "Your plans"), h("div", { style: "font-weight:700;font-size:16px" }, "ExpertCloud " + a.plan.name),
-      h("div", { class: "muted", style: "font-size:12.5px" }, a.plan.expires ? "until " + dateOf(a.plan.expires) : "free, no end date", " · ExpertStream " + a.plans.expertstream.name)),
+      h("div", { class: "muted", style: "font-size:12.5px" }, a.plans.cloud.source === "Expert One" ? "included in Expert One" : a.plan.expires ? "until " + dateOf(a.plan.expires) : "free, no end date", " · Expert One " + a.plans.expertone.name)),
     bar("AI requests today", used, cap, fmt(used) + " of " + fmt(cap)), bar("Database space", a.db_bytes || 0, dbq, gbs(a.db_bytes || 0) + " of " + gbs(dbq)),
     h("button", { class: "btn" + (a.plan.price_inr === 0 || a.plan.id === "cloud_free" ? " primary" : ""), onclick: () => go("billing") }, a.plan.id === "cloud_free" ? "Upgrade" : "Manage")));
   if (matchMedia("(max-width: 860px)").matches) $("#planCard").firstChild.style.gridTemplateColumns = "1fr";
@@ -704,7 +721,8 @@ $("#appsBtn").addEventListener("click", e => {
     h("span", { class: "ai", style: "background:" + bg }, icon(ic)), label);
   document.querySelector(".apps").append(h("div", { class: "apps-pop", role: "menu" },
     tile("Console", "home", "linear-gradient(135deg,#7c6cff,#5ac8fa)", () => go("home")),
-    tile("ExpertStream", "stream", "linear-gradient(135deg,#f97316,#ec4899)", url ? { href: url } : () => go("expertstream")),
+    tile("ExpertStream", "stream", "linear-gradient(135deg,#f97316,#ec4899)", url ? { href: url + "/" } : () => go("expertstream")),
+    tile("Training", "bolt", "linear-gradient(135deg,#22c55e,#16a34a)", () => go("training")),
     tile("Database", "db", "linear-gradient(135deg,#10b981,#06b6d4)", () => go("database")),
     tile("Playground", "playground", "linear-gradient(135deg,#6366f1,#a855f7)", () => go("playground")),
     tile("Models", "models", "linear-gradient(135deg,#0ea5e9,#6366f1)", () => go("models")),
@@ -715,17 +733,20 @@ document.addEventListener("click", e => { if (!e.target.closest(".apps-pop")) cl
 // ---------------------------------------------------------------- ExpertStream
 function renderES() {
   if (!PLANSDATA || !ACCOUNT) return;
-  const p = ACCOUNT.plans.expertstream, url = PLANSDATA.apps.expertstream.url, t = PLANSDATA.products.expertstream.title;
+  const p = ACCOUNT.plans.expertone, app = PLANSDATA.apps.expertstream, cloud = ACCOUNT.plans.cloud;
   $("#esView").replaceChildren(
     h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "bd row", style: "gap:16px;flex-wrap:wrap" },
       h("span", { class: "ai", style: "width:52px;height:52px;border-radius:14px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,#f97316,#ec4899)" }, icon("stream")),
-      h("div", { style: "flex:1;min-width:200px" }, h("div", { style: "font-weight:700;font-size:18px" }, t),
-        h("div", { class: "muted" }, "Your plan: ", h("b", {}, p.name), p.expires ? " · until " + dateOf(p.expires) : "", ". Same account as ExpertCloud: sign in to " + t + " with your ExpertCloud username.")),
-      url ? h("a", { class: "btn primary", href: url, target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open " + t) : null)),
-    h("div", { class: "plans3", style: "margin-bottom:16px" }, planCards("expertstream", planButton("expertstream"))),
+      h("div", { style: "flex:1;min-width:200px" }, h("div", { style: "font-weight:700;font-size:18px" }, "ExpertStream"),
+        h("div", { class: "muted" }, "Expert One plan: ", h("b", {}, p.name), ". ", app.accounts ? "The same account and password work on ExpertStream: Create and Run MoE models, the MCP server, the Notebook." : "")),
+      h("a", { class: "btn primary", href: app.url + "/", target: "_blank", rel: "noopener", style: "text-decoration:none" }, "Open ExpertStream"))),
+    h("p", { class: "muted", style: "margin:0 0 12px" }, "Expert One is one subscription for Expert Stream, Cloud, Build and Craft. It includes Expert Cloud" +
+      (cloud.source === "Expert One" ? ": your Cloud plan comes from it (" + cloud.name + ")." : ": Starter gives Cloud Pro, Mid and Top give Cloud Max.")),
+    h("div", { class: "plans3", style: "margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))" }, planCards("expertone", planButton("expertone"))),
     h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Your data in one place")), h("div", { class: "bd" },
-      h("p", { class: "muted", style: "margin:0 0 12px" }, t + " keeps its data in your ExpertCloud Database, so you can see and download it here, like photos in your drive."),
-      h("button", { class: "btn", onclick: () => go("database") }, icon("db"), "Open Database"))));
+      h("p", { class: "muted", style: "margin:0 0 12px" }, "Train on your data in Training, keep it in Database, use it from ExpertStream with the same account."),
+      h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" }, h("button", { class: "btn", onclick: () => go("training") }, icon("bolt"), "Open Training"),
+        h("button", { class: "btn", onclick: () => go("database") }, icon("db"), "Open Database")))));
 }
 
 // ---------------------------------------------------------------- database
@@ -854,10 +875,14 @@ function confirmDel(title, text, fn, verb) {
 }
 // ---------------------------------------------------------------- start
 loadPlans();
-(function boot() {
+(async function boot() {
   const saved = store.get("ec_session");
-  if (saved) { TOKEN = saved; enterConsole(false); }
-  else { $("#landing").hidden = false; renderLanding(); refresh(); }
+  if (saved) { TOKEN = saved; fetch("/auth/cookie", { method: "POST", headers: { "Authorization": "Bearer " + saved } }).catch(() => {}); enterConsole(false); return; }
+  try {   /* signed in on the ExpertStream site: the same account, signed in here */
+    const r = await fetch("/auth/sso", { method: "POST" });
+    if (r.ok) { const j = await r.json(); store.set("ec_session", j.token, true); TOKEN = j.token; USER = j.username; enterConsole(false); return; }
+  } catch {}
+  $("#landing").hidden = false; renderLanding(); refresh();
 })();
 </script>
 </body>

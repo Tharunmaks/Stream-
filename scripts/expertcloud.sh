@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
-# ExpertCloud on your own device, as one command. The gateway and this device's node run in the background and restart
-# themselves if they crash. Works on Termux and on a PC.
+# ExpertCloud on your own device, as one command. The gateway, the ExpertStream site and this device's node run in the
+# background and restart themselves if they crash. Works on Termux and on a PC.
 #
 #   cloud start        start (safe to run again)
 #   cloud status       live numbers from the cloud: nodes, speed, requests
 #   cloud open         print the dashboard link (it signs you in)
-#   cloud stop         stop everything
+#   cloud stop         stop everything (the Cloud, the ExpertStream site, the node)
 #   cloud logs         show what is happening (Ctrl+C returns, nothing stops)
 #   cloud shortcut     make the word "cloud" work in any new terminal
 #
 # start options: --lan (let other devices join), --models DIR (default ~/models), --port N (default 8000), --name NAME,
-#                --gateway-only, --rotate (new tokens; old ones stop working)
+#                --gateway-only, --no-site, --site-port N (default 8780), --rotate (new tokens; old ones stop working)
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd); STATE="$HOME/.expertcloud"; mkdir -p "$STATE"
 PORT=${EC_PORT:-$(cat "$STATE/port" 2>/dev/null || echo 8000)}
 MODELS=${EC_MODELS:-$HOME/models}; NAME=${EC_NAME:-$(cat "$STATE/name" 2>/dev/null || hostname 2>/dev/null || echo "my-device")}
-LAN=${EC_LAN:-0}; GATEWAY_ONLY=0; ROTATE=0
+SITE_PORT=${EC_SITE_PORT:-$(cat "$STATE/site_port" 2>/dev/null || echo 8780)}
+LAN=${EC_LAN:-0}; GATEWAY_ONLY=0; ROTATE=0; SITE=1
 cmd=${1:-status}; shift || true
 while [ $# -gt 0 ]; do case "$1" in
   --lan) LAN=1;; --port) PORT=$2; shift;; --models) MODELS=$2; shift;; --name) NAME=$2; shift;;
-  --gateway-only) GATEWAY_ONLY=1;; --rotate) ROTATE=1;; *) echo "Unknown option: $1"; exit 1;; esac; shift; done
+  --gateway-only) GATEWAY_ONLY=1;; --rotate) ROTATE=1;; --no-site) SITE=0;; --site-port) SITE_PORT=$2; shift;; *) echo "Unknown option: $1"; exit 1;; esac; shift; done
 say() { printf '%s\n' "$*"; }
 
 running() { [ -s "$STATE/$1.pid" ] && kill -0 "$(cat "$STATE/$1.pid")" 2>/dev/null; }
 up() { python3 -c "import urllib.request,sys;urllib.request.urlopen('http://127.0.0.1:$PORT/health',timeout=2)" >/dev/null 2>&1; }
+site_up() { python3 -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:$SITE_PORT/login',timeout=2)" >/dev/null 2>&1; }
 token() { cat "$STATE/admin_token" 2>/dev/null; }
 open_link() { [ -s "$STATE/admin_token" ] && say "http://127.0.0.1:$PORT/dashboard#token=$(token)" || say "Not started yet: run  cloud start"; }
 
@@ -42,8 +44,13 @@ stop_one() {   # name: its loop, then its program
 
 case "$cmd" in
 start)
-  if [ "$ROTATE" = 1 ]; then stop_one worker; stop_one gateway; fi
-  echo "$PORT" >"$STATE/port"; echo "$NAME" >"$STATE/name"
+  if [ "$ROTATE" = 1 ]; then stop_one worker; stop_one gateway; stop_one site; rm -f "$STATE/jwt_secret"; fi
+  echo "$PORT" >"$STATE/port"; echo "$NAME" >"$STATE/name"; echo "$SITE_PORT" >"$STATE/site_port"
+  host=127.0.0.1; [ "$LAN" = 1 ] && host=0.0.0.0
+  # One account on both websites: they sign each other's sign-in cookie with this secret (made once, kept private).
+  [ -s "$STATE/jwt_secret" ] || { python3 -c "import secrets;print(secrets.token_hex(32))" >"$STATE/jwt_secret"; chmod 600 "$STATE/jwt_secret"; }
+  export ES_JWT_SECRET=${ES_JWT_SECRET:-$(cat "$STATE/jwt_secret")}
+  export EXPERTSTREAM_URL=${EXPERTSTREAM_URL:-http://127.0.0.1:$SITE_PORT} CLOUD_URL=${CLOUD_URL:-http://127.0.0.1:$PORT}
   if ! python3 -c "import fastapi, uvicorn, websockets, httpx" 2>/dev/null; then
     say "Installing the Python packages (first time only, a minute or two)..."
     pip install -q fastapi uvicorn websockets httpx psutil 2>/dev/null || pip install -q fastapi uvicorn websockets httpx || { say "Could not install packages. Check your internet connection."; exit 1; }
@@ -56,12 +63,22 @@ start)
   if running gateway && up; then say "Cloud already running."
   else
     stop_one gateway
-    host=127.0.0.1; [ "$LAN" = 1 ] && host=0.0.0.0
     args=(--host $host --port "$PORT"); [ "$ROTATE" = 1 ] && args+=(--rotate-tokens)
     keep gateway python3 gateway/omni_router.py "${args[@]}"
     for _ in $(seq 1 60); do up && break; sleep 0.5; done
     up || { say "The gateway did not start. Last lines:"; tail -n 6 "$STATE/gateway.log"; exit 1; }
     say "Gateway running on port $PORT."
+  fi
+  if [ "$SITE" = 1 ]; then
+    python3 -c "import flask, numpy" 2>/dev/null || pip install -q flask numpy 2>/dev/null || pip install -q --ignore-installed blinker flask numpy 2>/dev/null
+    if ! python3 -c "import flask, numpy" 2>/dev/null; then say "ExpertStream site skipped: could not install flask and numpy."
+    elif running site && site_up; then say "ExpertStream site already running."
+    else
+      stop_one site
+      keep site env PYTHONPATH="$ROOT/es-common" HOST=$host PORT="$SITE_PORT" python3 site/app.py
+      for _ in $(seq 1 40); do site_up && break; sleep 0.5; done
+      site_up && say "ExpertStream site running on port $SITE_PORT." || say "The ExpertStream site did not start. Details: $STATE/site.log"
+    fi
   fi
   if [ "$GATEWAY_ONLY" = 0 ]; then
     mkdir -p "$MODELS"
@@ -73,15 +90,16 @@ start)
   say ""
   say "Your cloud's public page (people sign up and use it here):"
   say "  http://127.0.0.1:$PORT/"
+  [ "$SITE" = 1 ] && site_up && { say "The ExpertStream site (same accounts; Training opens in the Cloud):"; say "  http://127.0.0.1:$SITE_PORT/"; }
   say "Your owner dashboard (signs you in by itself):"
   say "  $(open_link)"
   if [ "$LAN" = 1 ]; then ip=$(python3 -c "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.connect(('10.255.255.255',1));print(s.getsockname()[0])" 2>/dev/null)
-    [ -n "$ip" ] && say "Other devices on the same Wi-Fi open: http://$ip:$PORT/"; fi
+    [ -n "$ip" ] && say "Other devices on the same Wi-Fi open: http://$ip:$PORT/ (ExpertStream site: http://$ip:$SITE_PORT/)"; fi
   say ""; say "It keeps running in the background. Check it any time with:  cloud status"
   ;;
 stop)
-  stop_one worker; stop_one gateway
-  pkill -f "cloud/worker_agent.py --master" 2>/dev/null; pkill -f "gateway/omni_router.py --host" 2>/dev/null
+  stop_one worker; stop_one gateway; stop_one site
+  pkill -f "cloud/worker_agent.py --master" 2>/dev/null; pkill -f "gateway/omni_router.py --host" 2>/dev/null; pkill -f "python3 site/app.py" 2>/dev/null
   command -v termux-wake-unlock >/dev/null 2>&1 && termux-wake-unlock >/dev/null 2>&1
   say "Stopped."
   ;;
@@ -108,9 +126,11 @@ print("  Requests served:   %d   tokens generated: %d" % (t.get("requests", 0), 
 print("  Models:            %s" % (", ".join(m["id"] for m in d.get("models", [])) or "none yet"))
 PY
   running worker && say "This device's node: running." || say "This device's node: stopped (cloud start)."
+  site_up && say "ExpertStream site: running on port $SITE_PORT." || say "ExpertStream site: stopped (cloud start)."
   ;;
 open) open_link ;;
-logs) touch "$STATE/gateway.log" "$STATE/worker.log"; say "Ctrl+C returns to the prompt; the cloud keeps running."; tail -n 25 -f "$STATE/gateway.log" "$STATE/worker.log" ;;
+logs) touch "$STATE/gateway.log" "$STATE/worker.log" "$STATE/site.log"; say "Ctrl+C returns to the prompt; the cloud keeps running."
+  tail -n 25 -f "$STATE/gateway.log" "$STATE/worker.log" "$STATE/site.log" ;;
 shortcut)
   line="alias cloud='$ROOT/scripts/expertcloud.sh'"
   for rc in "$HOME/.bashrc" "$HOME/.profile"; do
