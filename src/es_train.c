@@ -16,12 +16,14 @@
 #include "es_gguf.h"
 #include "es_quant.h"
 #include "es_amx.h"
+#include "es_cpu.h"
 
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,10 +49,21 @@ typedef struct {
 typedef void (*job_fn)(void *ctx, int item, int tid);
 typedef struct {
     int n; pthread_t *th;
-    pthread_mutex_t mu; pthread_cond_t go, done;
-    job_fn fn; void *ctx; int items; atomic_int next; int busy; unsigned gen; int quit;
+    pthread_mutex_t mu; pthread_cond_t go;
+    job_fn fn; void *ctx; int items; atomic_int next, busy; atomic_uint gen; atomic_int quit, sleepers;
 } pool;
-
+/* Workers poll for new work for a while before sleeping, and the caller polls for the end. Waking a sleeping thread
+ * costs tens to hundreds of microseconds (much more in a VM, where the idle core itself has halted), and a training
+ * pass runs tens of thousands of parallel sections with serial work in between: with plain sleeping workers, the
+ * calling thread did most of the work alone. ES_POOL_SPIN sets the polling (default about a millisecond; 0 = sleep). */
+static long pool_spin(void) { static long s = -1; if (s < 0) { const char *e = getenv("ES_POOL_SPIN"); s = e ? atol(e) : 200000; } return s; }
+static inline void cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
 static void pool_work(pool *p, int tid) {
     for (;;) {
         const int i = atomic_fetch_add(&p->next, 1);
@@ -63,38 +76,40 @@ static void *pool_main(void *a_) {
     worker_arg *a = a_; pool *p = a->p; const int tid = a->tid; free(a);
     unsigned seen = 0;
     for (;;) {
-        pthread_mutex_lock(&p->mu);
-        while (p->gen == seen && !p->quit) pthread_cond_wait(&p->go, &p->mu);
-        if (p->quit) { pthread_mutex_unlock(&p->mu); return NULL; }
-        seen = p->gen;
-        pthread_mutex_unlock(&p->mu);
+        unsigned g = atomic_load_explicit(&p->gen, memory_order_acquire);
+        for (long s = 0, n = pool_spin(); g == seen && s < n && !atomic_load(&p->quit); s++) { cpu_relax(); g = atomic_load_explicit(&p->gen, memory_order_acquire); }
+        if (g == seen) {
+            pthread_mutex_lock(&p->mu);
+            atomic_fetch_add(&p->sleepers, 1);
+            while ((g = atomic_load(&p->gen)) == seen && !atomic_load(&p->quit)) pthread_cond_wait(&p->go, &p->mu);
+            atomic_fetch_sub(&p->sleepers, 1);
+            pthread_mutex_unlock(&p->mu);
+        }
+        if (atomic_load(&p->quit)) return NULL;
+        seen = g;
         pool_work(p, tid);
-        pthread_mutex_lock(&p->mu);
-        if (--p->busy == 0) pthread_cond_signal(&p->done);
-        pthread_mutex_unlock(&p->mu);
+        atomic_fetch_sub_explicit(&p->busy, 1, memory_order_release);
     }
 }
 static void pool_init(pool *p, int n) {
     memset(p, 0, sizeof *p);
+    es_unpin_self();   /* opened after the engine, this thread is pinned to one core, and the workers would inherit it */
     p->n = n < 1 ? 1 : n;
-    pthread_mutex_init(&p->mu, NULL); pthread_cond_init(&p->go, NULL); pthread_cond_init(&p->done, NULL);
+    pthread_mutex_init(&p->mu, NULL); pthread_cond_init(&p->go, NULL);
     p->th = calloc((size_t)p->n, sizeof(pthread_t));
     for (int i = 1; i < p->n; i++) { worker_arg *a = malloc(sizeof *a); a->p = p; a->tid = i; pthread_create(&p->th[i], NULL, pool_main, a); }
 }
 static void pool_run(pool *p, int items, job_fn fn, void *ctx) {
     if (items <= 0) return;
     if (p->n == 1 || items == 1) { for (int i = 0; i < items; i++) fn(ctx, i, 0); return; }
-    pthread_mutex_lock(&p->mu);
-    p->fn = fn; p->ctx = ctx; p->items = items; atomic_store(&p->next, 0); p->busy = p->n - 1; p->gen++;
-    pthread_cond_broadcast(&p->go);
-    pthread_mutex_unlock(&p->mu);
+    p->fn = fn; p->ctx = ctx; p->items = items; atomic_store(&p->next, 0); atomic_store(&p->busy, p->n - 1);
+    atomic_fetch_add_explicit(&p->gen, 1, memory_order_release);
+    if (atomic_load(&p->sleepers)) { pthread_mutex_lock(&p->mu); pthread_cond_broadcast(&p->go); pthread_mutex_unlock(&p->mu); }
     pool_work(p, 0);
-    pthread_mutex_lock(&p->mu);
-    while (p->busy) pthread_cond_wait(&p->done, &p->mu);
-    pthread_mutex_unlock(&p->mu);
+    for (long s = 0; atomic_load_explicit(&p->busy, memory_order_acquire) > 0; s++) { if (s < 100000) cpu_relax(); else sched_yield(); }
 }
 static void pool_free(pool *p) {
-    pthread_mutex_lock(&p->mu); p->quit = 1; pthread_cond_broadcast(&p->go); pthread_mutex_unlock(&p->mu);
+    pthread_mutex_lock(&p->mu); atomic_store(&p->quit, 1); pthread_cond_broadcast(&p->go); pthread_mutex_unlock(&p->mu);
     for (int i = 1; i < p->n; i++) pthread_join(p->th[i], NULL);
     free(p->th);
 }
@@ -236,8 +251,10 @@ static void free_bufs(es_tm *m) {
     for (int t = 0; t < ES_LT_N; t++) { free(m->Z[t]); m->Z[t] = NULL; }
     m->Tcap = 0;
 }
+static void weights_cache_free(void);
 void es_tm_close(es_tm *m) {
     if (!m) return;
+    weights_cache_free();   /* keyed by weight address: a model opened later could reuse the address */
     if (m->nt) pool_free(&m->P);
     free_bufs(m);
     if (m->scratch) { for (int i = 0; i < m->nt; i++) free(m->scratch[i]); free(m->scratch); }
@@ -406,6 +423,196 @@ static void dequant_rows(const tw *w, int r0, int nr, float *dst) {
     for (int r = 0; r < nr; r++) es_dequant_row(w->type, w->data + w->rb * (size_t)(r0 + r), dst + (size_t)r * w->cols, w->cols);
 }
 
+/* ---------------------------------------------------------------- blocked GEMM
+ * C (M x N, stride ldc) = beta*C + alpha * A B, with A element (i, k) at A[i*ai + k*ak] (so A or A^T) and B row-major
+ * (K x N, stride ldb, N a multiple of 32). Register tiles: MR tokens x NR columns, the outer product of one broadcast A value
+ * and NR/VL vectors of B per k. AVX-512: 8 x 32 (16 zmm accumulators); AVX2 and others (NEON on phones): 6 x 16.
+ * Each C element is summed by one thread in a fixed order, so results do not depend on the thread count. */
+typedef float v16 __attribute__((vector_size(64), aligned(4)));
+#define GEMM_KERNEL(NAME, VT, VL, MR, ATTR) \
+ATTR static void NAME(int mr, int K, const float *A, size_t ai, size_t ak, const float *B, size_t ldb, float *C, size_t ldc, float alpha, int beta) { \
+    VT c0[MR], c1[MR]; \
+    for (int i = 0; i < MR; i++) { c0[i] = (VT){0}; c1[i] = (VT){0}; } \
+    if (mr == MR) { \
+        for (int k = 0; k < K; k++) { \
+            const VT b0 = *(const VT *)(B + (size_t)k * ldb), b1 = *(const VT *)(B + (size_t)k * ldb + VL); const float *a = A + (size_t)k * ak; \
+            for (int i = 0; i < MR; i++) { const float s = a[i * ai]; c0[i] += s * b0; c1[i] += s * b1; } \
+        } \
+    } else { \
+        for (int k = 0; k < K; k++) { \
+            const VT b0 = *(const VT *)(B + (size_t)k * ldb), b1 = *(const VT *)(B + (size_t)k * ldb + VL); const float *a = A + (size_t)k * ak; \
+            for (int i = 0; i < mr; i++) { const float s = a[i * ai]; c0[i] += s * b0; c1[i] += s * b1; } \
+        } \
+    } \
+    for (int i = 0; i < mr; i++) { \
+        VT *c = (VT *)(C + (size_t)i * ldc); \
+        if (beta) { c[0] += alpha * c0[i]; c[1] += alpha * c1[i]; } else { c[0] = alpha * c0[i]; c[1] = alpha * c1[i]; } \
+    } \
+}
+/* 16 columns (the LoRA rank): one vector per row, B read in place (row-major, K x 16) */
+#define GEMM_KERNEL16(NAME, VT, MR, ATTR) \
+ATTR static void NAME(int mr, int K, const float *A, size_t ai, size_t ak, const float *B, size_t ldb, float *C, size_t ldc, float alpha, int beta) { \
+    VT c0[MR]; \
+    for (int i = 0; i < MR; i++) c0[i] = (VT){0}; \
+    if (mr == MR) { for (int k = 0; k < K; k++) { const VT b0 = *(const VT *)(B + (size_t)k * ldb); const float *a = A + (size_t)k * ak; for (int i = 0; i < MR; i++) c0[i] += a[i * ai] * b0; } } \
+    else { for (int k = 0; k < K; k++) { const VT b0 = *(const VT *)(B + (size_t)k * ldb); const float *a = A + (size_t)k * ak; for (int i = 0; i < mr; i++) c0[i] += a[i * ai] * b0; } } \
+    for (int i = 0; i < mr; i++) { VT *c = (VT *)(C + (size_t)i * ldc); if (beta) *c += alpha * c0[i]; else *c = alpha * c0[i]; } \
+}
+GEMM_KERNEL(gk_generic, v8, 8, 6, )
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
+GEMM_KERNEL(gk_avx2, v8, 8, 6, __attribute__((target("avx2,fma"))))
+GEMM_KERNEL(gk_avx512, v16, 16, 8, __attribute__((target("avx512f"))))
+GEMM_KERNEL16(gk16_avx512, v16, 12, __attribute__((target("avx512f"))))
+#endif
+typedef void (*gemm_k)(int, int, const float *, size_t, size_t, const float *, size_t, float *, size_t, float, int);
+static gemm_k GK, GK16; static int GMR, GNR, GMR16;
+static int gemm_on(void) {   /* ES_GEMM=0: the older dot-product kernels, for comparison */
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("ES_GEMM"); on = !(e && !atoi(e));
+        GK = gk_generic; GMR = 6; GNR = 16; GK16 = gk_generic; GMR16 = 6;   /* NR 16 kernels serve 16 columns as they are */
+#if defined(__x86_64__) && (defined(__clang__) || defined(__GNUC__))
+        __builtin_cpu_init();
+        if (__builtin_cpu_supports("avx512f") && !getenv("ES_NO_AVX512")) { GK = gk_avx512; GMR = 8; GNR = 32; GK16 = gk16_avx512; GMR16 = 12; }
+        else if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) GK = GK16 = gk_avx2;
+#endif
+    }
+    return on;
+}
+#define GMB 64    /* C rows per job */
+#define GNB 128   /* C columns per job */
+#ifndef GKB
+#define GKB 64    /* terms summed in registers before they are added into C */
+#endif
+/* B is packed in panels of 32 columns, each K x 32 and contiguous: element (k, j) at B[(j / 32) * K * 32 + k * 32 + j % 32].
+ * Read row by row with plain strides, a weight panel spans megabytes and every k lands on a new page; packed, it streams. */
+typedef struct { int M, N, K; const float *A; size_t ai, ak; const float *B; float *C; size_t ldc; float alpha; int beta, nbn; } gm_ctx;
+static void gm_job(void *c_, int item, int tid) {
+    (void)tid; const gm_ctx *c = c_;
+    const int i0 = (item / c->nbn) * GMB, j0 = (item % c->nbn) * GNB;
+    const int i1 = i0 + GMB < c->M ? i0 + GMB : c->M, j1 = j0 + GNB < c->N ? j0 + GNB : c->N;
+    /* K in blocks of GKB: partial sums of GKB terms are added into C, which keeps float32 rounding close to that of
+     * 8-lane dot products (one running sum over thousands of terms is noticeably less accurate) */
+    for (int k0 = 0; k0 < c->K; k0 += GKB) {
+        const int kn = c->K - k0 < GKB ? c->K - k0 : GKB, beta = k0 ? 1 : c->beta;
+        for (int j = j0; j < j1; j += GNR) {
+            const float *Bj = c->B + (size_t)(j / 32) * c->K * 32 + (size_t)k0 * 32 + j % 32;
+            for (int i = i0; i < i1; i += GMR)
+                GK(i1 - i < GMR ? i1 - i : GMR, kn, c->A + (size_t)i * c->ai + (size_t)k0 * c->ak, c->ai, c->ak, Bj, 32, c->C + (size_t)i * c->ldc + j, c->ldc, c->alpha, beta);
+        }
+    }
+}
+typedef struct { int M, K; const float *A; size_t ai, ak; const float *B; size_t ldb; float *C; size_t ldc; float alpha; int beta; } g16_ctx;
+static void g16_job(void *c_, int item, int tid) {   /* 48 rows of C, 16 columns */
+    (void)tid; const g16_ctx *c = c_; const int i0 = item * 48, i1 = i0 + 48 < c->M ? i0 + 48 : c->M;
+    for (int k0 = 0; k0 < c->K; k0 += GKB) {
+        const int kn = c->K - k0 < GKB ? c->K - k0 : GKB, beta = k0 ? 1 : c->beta;
+        for (int i = i0; i < i1; i += GMR16)
+            GK16(i1 - i < GMR16 ? i1 - i : GMR16, kn, c->A + (size_t)i * c->ai + (size_t)k0 * c->ak, c->ai, c->ak, c->B + (size_t)k0 * c->ldb, c->ldb, c->C + (size_t)i * c->ldc, c->ldc, c->alpha, beta);
+    }
+}
+static void gemm_packed(es_tm *m, int M, int N, int K, const float *A, size_t ai, size_t ak, const float *Bp, float *C, size_t ldc, float alpha, int beta) {
+    gm_ctx c = {M, N, K, A, ai, ak, Bp, C, ldc, alpha, beta, (N + GNB - 1) / GNB};
+    pool_run(&m->P, ((M + GMB - 1) / GMB) * c.nbn, gm_job, &c);
+}
+static float *GPAD; static size_t GPAD_N;
+static float *gbuf(float **p, size_t *cap, size_t n) { if (n > *cap) { free(*p); *p = malloc(sizeof(float) * n); *cap = *p ? n : 0; } if (!*p) { fprintf(stderr, "out of memory\n"); exit(1); } return *p; }
+typedef struct { const float *B; size_t ldb; int K, N; float *dst; } pk_ctx;
+static void pk_job(void *c_, int item, int tid) {   /* panel item of row-major B, zero beyond N */
+    (void)tid; const pk_ctx *c = c_; const int j0 = item * 32, w = c->N - j0 < 32 ? c->N - j0 : 32;
+    float *d = c->dst + (size_t)item * c->K * 32;
+    for (int k = 0; k < c->K; k++) { memcpy(d + (size_t)k * 32, c->B + (size_t)k * c->ldb + j0, sizeof(float) * w); if (w < 32) memset(d + (size_t)k * 32 + w, 0, sizeof(float) * (32 - w)); }
+}
+/* C (M x N) = beta C + alpha A B with B row-major (K x N, stride ldb): packs B, then the blocked product */
+static void gemm(es_tm *m, int M, int N, int K, const float *A, size_t ai, size_t ak, const float *B, size_t ldb, float *C, size_t ldc, float alpha, int beta) {
+    if (M <= 0 || N <= 0) return;
+    if (K <= 0) { if (!beta) for (int i = 0; i < M; i++) memset(C + (size_t)i * ldc, 0, sizeof(float) * N); return; }
+    if (N == 16) { g16_ctx c = {M, K, A, ai, ak, B, ldb, C, ldc, alpha, beta}; pool_run(&m->P, (M + 47) / 48, g16_job, &c); return; }
+    const int Np = (N + 31) / 32 * 32;
+    float *Bp = gbuf(&GPAD, &GPAD_N, (size_t)K * Np + (N == Np ? 0 : (size_t)M * Np));
+    pk_ctx pc = {B, ldb, K, N, Bp};
+    pool_run(&m->P, Np / 32, pk_job, &pc);
+    if (N == Np) { gemm_packed(m, M, N, K, A, ai, ak, Bp, C, ldc, alpha, beta); return; }
+    float *Cp = Bp + (size_t)K * Np;   /* N not a multiple of 32 (the LoRA rank): through a padded copy of C */
+    gemm_packed(m, M, Np, K, A, ai, ak, Bp, Cp, (size_t)Np, alpha, 0);
+    for (int i = 0; i < M; i++) {
+        float *d = C + (size_t)i * ldc; const float *s2 = Cp + (size_t)i * Np;
+        if (beta) for (int j = 0; j < N; j++) d[j] += s2[j]; else memcpy(d, s2, sizeof(float) * N);
+    }
+}
+
+/* Frozen weights for the GEMM: a chunk of rows dequantized once, packed, and shared by all threads. */
+static float *WCH; static size_t WCH_N;
+static int chunk_rows(const tw *w) {   /* about 2 MB of fp32 weights per chunk, a multiple of 32 rows */
+    int rc = (int)((2u << 20) / (sizeof(float) * (size_t)w->cols)) / 32 * 32;
+    if (rc < 32) rc = 32;
+    return rc > w->rows ? (w->rows + 31) / 32 * 32 : rc;
+}
+typedef struct { const tw *w; int r0, nr, fwd; float *dst; float **scr; } wc_ctx;
+static void wc_job(void *c_, int item, int tid) {   /* 32 rows of the chunk: dequantize, then place into the packed panels */
+    const wc_ctx *c = c_; const int a = item * 32, n = c->nr - a < 32 ? c->nr - a : 32, K = c->w->cols;
+    float *t = c->scr[tid];
+    dequant_rows(c->w, c->r0 + a, n, t);
+    if (c->fwd) {   /* B = W^T (cols x rows): these 32 rows are panel 'item', element (k, r) */
+        float *d = c->dst + (size_t)item * K * 32;
+        for (int k = 0; k < K; k++) { float *dk = d + (size_t)k * 32; for (int r = 0; r < n; r++) dk[r] = t[(size_t)r * K + k]; for (int r = n; r < 32; r++) dk[r] = 0; }
+    } else {        /* B = W (rows x cols): row a + r of the chunk is k, its columns spread over the panels */
+        for (int p = 0; p < K / 32; p++) { float *d = c->dst + (size_t)p * c->nr * 32 + (size_t)a * 32; for (int r = 0; r < n; r++) memcpy(d + (size_t)r * 32, t + (size_t)r * K + p * 32, 128); }
+    }
+}
+/* Packed weights are kept for the next pass while they fit in ES_WCACHE_MB (default: a quarter of the RAM): the
+ * weights are frozen, so dequantizing and packing them again every pass is wasted work. Chunk r0 sits at r0 * cols. */
+typedef struct { const void *key; int fwd; float *p; } wcache_ent;
+static wcache_ent WCE[4096]; static int WCEN; static size_t WC_USED;
+static size_t wc_budget(void) {
+    static size_t b = (size_t)-1;
+    if (b == (size_t)-1) {
+        const char *e = getenv("ES_WCACHE_MB");
+        if (e) b = (size_t)atol(e) << 20;
+        else { const long pg = sysconf(_SC_PHYS_PAGES), ps = sysconf(_SC_PAGESIZE); b = pg > 0 && ps > 0 ? (size_t)pg * (size_t)ps / 4 : 0; }
+    }
+    return b;
+}
+/* the packed copy of w for this direction: cached (filled on first use), or NULL to pack chunk by chunk */
+static float *wcache(const tw *w, int fwd, int *fresh) {
+    *fresh = 0;
+    for (int i = 0; i < WCEN; i++) if (WCE[i].key == w->data && WCE[i].fwd == fwd) return WCE[i].p;
+    const size_t n = (size_t)((w->rows + 31) / 32 * 32) * w->cols * sizeof(float);
+    if (WCEN >= 4096 || WC_USED + n > wc_budget()) return NULL;
+    float *p = malloc(n); if (!p) return NULL;
+    WCE[WCEN++] = (wcache_ent){w->data, fwd, p}; WC_USED += n; *fresh = 1;
+    return p;
+}
+/* Y (T x rows, stride ldy) = X (T x cols) W^T */
+static void gemm_fwd(es_tm *m, const tw *w, const float *X, int T, float *Y, size_t ldy) {
+    const int K = w->cols, rc = chunk_rows(w);
+    int fresh; float *cache = wcache(w, 1, &fresh), *Wt = cache ? NULL : gbuf(&WCH, &WCH_N, (size_t)rc * K);
+    for (int r0 = 0; r0 < w->rows; r0 += rc) {
+        const int nr = w->rows - r0 < rc ? w->rows - r0 : rc, np = (nr + 31) / 32 * 32;
+        if (cache) Wt = cache + (size_t)r0 * K;
+        if (!cache || fresh) { wc_ctx wc = {w, r0, nr, 1, Wt, m->scratch}; pool_run(&m->P, np / 32, wc_job, &wc); }
+        if (np == nr) gemm_packed(m, T, nr, K, X, (size_t)K, 1, Wt, Y + r0, ldy, 1.0f, 0);
+        else {   /* a row count that is not a multiple of 32: the padded columns go to a scratch copy */
+            float *Yp = gbuf(&GPAD, &GPAD_N, (size_t)T * np);
+            gemm_packed(m, T, np, K, X, (size_t)K, 1, Wt, Yp, (size_t)np, 1.0f, 0);
+            for (int t = 0; t < T; t++) memcpy(Y + (size_t)t * ldy + r0, Yp + (size_t)t * np, sizeof(float) * nr);
+        }
+    }
+    m->bytes += (double)w->nbytes;
+}
+/* dX (T x cols) += dY (T x rows, stride ldy) W; cols must be a multiple of 32 (checked by the caller) */
+static void gemm_bwd(es_tm *m, const tw *w, const float *dY, int T, size_t ldy, float *dX) {
+    const int K = w->cols, rc = chunk_rows(w);
+    int fresh; float *cache = wcache(w, 0, &fresh), *Wc = cache ? NULL : gbuf(&WCH, &WCH_N, (size_t)rc * K);
+    for (int r0 = 0; r0 < w->rows; r0 += rc) {
+        const int nr = w->rows - r0 < rc ? w->rows - r0 : rc;
+        if (cache) Wc = cache + (size_t)r0 * K;
+        if (!cache || fresh) { wc_ctx wc = {w, r0, nr, 0, Wc, m->scratch}; pool_run(&m->P, (nr + 31) / 32, wc_job, &wc); }
+        gemm_packed(m, T, K, nr, dY + r0, ldy, 1, Wc, dX, (size_t)K, 1.0f, 1);
+    }
+    m->bytes += (double)w->nbytes;
+}
+
 
 /* Optional BLAS path: ES_BLAS=/path/libopenblas.so (cblas_sgemm, or numpy's scipy_cblas_sgemm64_). The weights of one
  * product are dequantized whole into a buffer, then one sgemm runs over the whole micro-batch. Summation order differs
@@ -462,6 +669,12 @@ static const uint16_t *amx_packed(const tw *w, int bt) {
     AMXC[AMXN++] = (amx_ent){w->data, bt, p};
     return p;
 }
+static void weights_cache_free(void) {
+    for (int i = 0; i < WCEN; i++) free(WCE[i].p);
+    WCEN = 0; WC_USED = 0;
+    for (int i = 0; i < AMXN; i++) free(AMXC[i].p);
+    AMXN = 0;
+}
 typedef struct { const float *A; int lda; const uint16_t *B; int K, N; float *C; int ldc, M, beta; } amx_ctx;
 static void amx_job(void *c_, int item, int tid) { (void)tid; amx_ctx *c = c_; const int m0 = item * 32, m1 = m0 + 32 < c->M ? m0 + 32 : c->M; es_amx_gemm(c->A, c->lda, c->B, c->K, c->N, c->C, c->ldc, m0, m1, c->beta); }
 static int amx_mm(es_tm *m, const tw *w, int bt, const float *A, int lda, int T, float *C, int ldc, int beta) {
@@ -485,6 +698,7 @@ static void mmf_job(void *c_, int item, int tid) {
 }
 static void mm_fwd(es_tm *m, const tw *w, const float *X, int T, float *Y, size_t ldy) {
     if (amx_mm(m, w, 1, X, w->cols, T, Y, (int)ldy, 0)) return;
+    if (gemm_on() && !blas_init(m->nt)) { gemm_fwd(m, w, X, T, Y, ldy); return; }
     const float *Wf;
     if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
         sgemm(1, T, w->rows, w->cols, X, w->cols, Wf, w->cols, 0.0f, Y, (int)ldy); m->bytes += (double)w->nbytes; return;
@@ -519,6 +733,7 @@ static void mmb_row_job(void *c_, int item, int tid) {   /* a block of rows agai
 }
 static void mm_bwd(es_tm *m, const tw *w, const float *dY, int T, size_t ldy, float *dX) {
     if (amx_mm(m, w, 0, dY, (int)ldy, T, dX, w->cols, 1)) return;
+    if (gemm_on() && !blas_init(m->nt) && w->cols % 32 == 0) { gemm_bwd(m, w, dY, T, ldy, dX); return; }
     const float *Wf;
     if (T >= 16 && blas_init(m->nt) && (Wf = blas_weights(m, w))) {
         sgemm(0, T, w->cols, w->rows, dY, (int)ldy, Wf, w->cols, 1.0f, dX, w->cols); m->bytes += (double)w->nbytes; return;
@@ -653,6 +868,7 @@ int es_tm_lora_export_gguf(const es_tm *m, const char *path, char *err, size_t c
     return 0;
 }
 
+static float *LT; static size_t LT_N;
 /* forward part of target t: Z = X A^T (T x r); Y += ls * Z B^T */
 typedef struct { es_tm *m; const float *X, *A, *B; float *Z, *Y; int T, in, out; size_t ldy; } lf_ctx;
 static void lf_job(void *c_, int item, int tid) {
@@ -682,6 +898,16 @@ static void lora_fwd(es_tm *m, int l, int t, const float *X, int T, float *Y, si
     const size_t *o = lo(m, l, t);
     if (!m->lp || o[0] == SIZE_MAX) return;
     lf_ctx c = {m, X, m->lp + o[0], m->lp + o[1], m->Z[t], Y, T, in_of(m, t), out_of(m, t), ldy};
+    if (gemm_on() && !lora_blas(m)) {   /* Z = X A^T; Y += ls Z B^T (A: r x in, B: out x r, both transposed into LT first) */
+        const int r = m->rank;
+        float *At = gbuf(&LT, &LT_N, (size_t)c.in * r + (size_t)r * c.out);
+        float *Bt = At + (size_t)c.in * r;
+        for (int k = 0; k < r; k++) for (int i = 0; i < c.in; i++) At[(size_t)i * r + k] = c.A[(size_t)k * c.in + i];
+        for (int o2 = 0; o2 < c.out; o2++) for (int k = 0; k < r; k++) Bt[(size_t)k * c.out + o2] = c.B[(size_t)o2 * r + k];
+        gemm(m, T, r, c.in, X, (size_t)c.in, 1, At, (size_t)r, c.Z, (size_t)r, 1.0f, 0);
+        gemm(m, T, c.out, r, c.Z, (size_t)r, 1, Bt, (size_t)c.out, Y, ldy, m->ls, 1);
+        return;
+    }
     if (lora_blas(m)) {   /* ES_LORA_BLAS=1: two sgemms instead of the per-16-token jobs */
         sgemm2(0, 1, T, m->rank, c.in, 1.0f, X, c.in, c.A, c.in, 0.0f, c.Z, m->rank);
         sgemm2(0, 1, T, c.out, m->rank, m->ls, c.Z, m->rank, c.B, m->rank, 1.0f, Y, (int)ldy);
@@ -727,6 +953,14 @@ static void lora_bwd(es_tm *m, int l, int t, const float *X, int T, const float 
     const size_t *o = lo(m, l, t);
     if (!m->lp || o[0] == SIZE_MAX) return;
     lb_ctx c = {m, X, m->Z[t], dY, m->lp + o[0], m->lp + o[1], m->lg + o[0], m->lg + o[1], dX, m->dZ, T, in_of(m, t), out_of(m, t), ldy};
+    if (gemm_on() && !lora_blas(m)) {
+        const int r = m->rank;
+        gemm(m, T, r, c.out, dY, ldy, 1, c.B, (size_t)r, c.dZ, (size_t)r, m->ls, 0);          /* dZ = ls dY B */
+        gemm(m, c.out, r, T, dY, 1, ldy, c.Z, (size_t)r, c.dB, (size_t)r, m->ls, 1);          /* dB += ls dY^T Z */
+        gemm(m, r, c.in, T, c.dZ, 1, (size_t)r, X, (size_t)c.in, c.dA, (size_t)c.in, 1.0f, 1); /* dA += dZ^T X */
+        gemm(m, T, c.in, r, c.dZ, (size_t)r, 1, c.A, (size_t)c.in, dX, (size_t)c.in, 1.0f, 1); /* dX += dZ A */
+        return;
+    }
     if (lora_blas(m)) {
         const int r = m->rank;
         sgemm2(0, 0, T, r, c.out, m->ls, dY, (int)ldy, c.B, r, 0.0f, c.dZ, r);            /* dZ = ls dY B */

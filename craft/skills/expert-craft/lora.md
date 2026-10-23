@@ -47,9 +47,18 @@ One optimizer step over T tokens (several examples packed together):
    not T squared.
 4. **AdamW** on the LoRA numbers (warm-up, cosine decay to 10%, gradient clipping at norm 1).
 
-Every weight matrix is read three times per step, always in layer order. Products dequantize a block of weight rows to floats and
-multiply them with a tile of tokens (AVX2 on x86, NEON on ARM); the backward products use the same rows transposed. The frozen
+Every weight matrix is read three times per step, always in layer order. Products are a blocked GEMM: a chunk of weight rows
+(about 2 MB) is dequantized once, packed into 32-column panels shared by all threads, and multiplied with register tiles (AVX-512:
+8 tokens x 32 outputs, AVX2 and NEON: 6 x 16), summing 64 terms in registers at a time. Packed weights are kept for the next pass
+while they fit in `ES_WCACHE_MB` (default a quarter of the RAM; 0 turns it off). The LoRA products use the same GEMM. The frozen
 weights get no gradients, so there is no weight-gradient or optimizer memory for them.
+
+**Fast mode** (`ES_AMX=1`): on Intel Xeon 4th gen and later, the frozen products run on AMX bf16 tiles (float32 sums). Losses
+match float32 to about 3 decimals. Each tile block is computed twice and compared (a guard; 0 mismatches in our runs);
+`ES_AMX_VERIFY=0` skips the check for about 10% more speed. Other machines run the exact float32 path.
+
+**Threads**: all cores by default (`-j N` to choose). The engine, opened for its tokenizer, pins its calling thread to one core;
+the trainer resets that before starting its threads (before this fix, every training run used one core whatever `-j` said).
 
 ## Checked
 
@@ -85,8 +94,14 @@ held-out examples (1,016 tokens).
 The LoRA keeps learning past the graft because it changes the model's layers, not only its final scores; MeZO, with gradients
 estimated from forward passes, barely moved in four times as long.
 
-Speed on this test machine: about 53 s per step of 2,048 tokens for the 135M model (about 38 trained tokens/s). This machine gave
-the trainer about one core of real work although it reports four (the host was busy); on a free 4-core machine expect several times
-that. Cost grows with the model: roughly 6 x parameters x tokens floating-point operations per step (forward, recompute, backward),
-so a 1.5B coder model is about 10x slower per token than the 135M one. Use `--minutes` to bound a run and `--resume` to continue.
+Speed, trained tokens per second on a 4-core Xeon (AVX-512 + AMX), `--seq 256 --batch 2048 --micro 1024`, steady state:
+
+| model | before | float32 (exact) | Fast mode (AMX bf16) |
+|---|---|---|---|
+| SmolLM2-135M Q8_0 | 34 | ~190 (5.5x) | ~345 (10x) |
+| Qwen2.5-0.5B Q8_0 | 10.5 | ~61 (5.8x) | ~134 (12.8x) |
+
+"Before" was one core (the pinning above) and dot-product kernels. Cost grows with the model: roughly 4-6 x parameters x tokens
+floating-point operations per step, so a 7B model is about 14x slower per token than the 0.5B one, and a 70B model about 140x;
+a CPU cannot train 70B at interactive speed (that takes a datacenter GPU). Use `--minutes` to bound a run and `--resume` to continue.
 

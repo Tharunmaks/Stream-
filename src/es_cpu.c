@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(__linux__)
 #include <sys/auxv.h>
@@ -147,6 +148,21 @@ int es_pin_self(int cpu) {
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
+    return sched_setaffinity(0, sizeof set, &set) == 0 ? 0 : errno;
+#endif
+}
+
+/* The engine pins its calling thread to one core. A program that opens the engine and then starts its own threads
+ * from that thread would put them all on that one core: call this first. CPUs outside the process's cpuset are
+ * dropped by the kernel. */
+int es_unpin_self(void) {
+#if defined(__EMSCRIPTEN__)
+    return 0;
+#else
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    long n = sysconf(_SC_NPROCESSORS_CONF); if (n < 1 || n > CPU_SETSIZE) n = CPU_SETSIZE;
+    for (long c = 0; c < n; c++) CPU_SET((int)c, &set);
     return sched_setaffinity(0, sizeof set, &set) == 0 ? 0 : errno;
 #endif
 }

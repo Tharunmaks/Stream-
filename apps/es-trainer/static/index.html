@@ -44,8 +44,8 @@
    <div><label for="seq">Sequence length</label><input id="seq" type="number" value="128" inputmode="numeric"></div>
    <div class="ft"><label for="batch">Tokens per step</label><input id="batch" type="number" value="640" inputmode="numeric"></div>
    <div class="ft"><label for="targets">Targets</label><select id="targets"><option value="all">All layers</option><option value="attn">Attention</option><option value="mlp">MLP</option></select></div>
-   <div class="ft"><label for="threads">Threads</label><input id="threads" type="number" value="1" inputmode="numeric"></div></div>
-  <label class="sw ft"><input type="checkbox" id="fast" checked><span></span><div><b>Fast mode</b><small>AMX and OpenBLAS. x86 only, 1 thread.</small></div></label>
+   <div class="ft"><label for="threads">Threads <small>(0 = all cores)</small></label><input id="threads" type="number" value="0" min="0" inputmode="numeric"></div></div>
+  <label class="sw ft"><input type="checkbox" id="fast" checked><span></span><div><b>Fast mode</b><small>bf16 AMX on Intel Xeon (4th gen+), about 2x. Exact float32 elsewhere.</small></div></label>
   <label class="sw ft"><input type="checkbox" id="recompute"><span></span><div><b>Low-RAM mode</b><small>Recomputes layers. About 300 MB, slower.</small></div></label>
   <button class="btn primary block" id="go">Start training</button><p class="note" id="trmsg"></p></div>
 </section>

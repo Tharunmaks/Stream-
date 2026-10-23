@@ -16,8 +16,7 @@ MODELS = os.environ.get("ES_MODEL_DIR", "/workspace/es-bench")
 RUNS = os.environ.get("ES_TRAIN_RUNS") or os.path.join(HERE, "runs")       # per user: RUNS/<user>/
 SAMPLES = os.path.join(HERE, "data")                                         # sample datasets, shared and read-only
 DATA = os.environ.get("ES_TRAIN_DATA") or SAMPLES                            # uploads, per user: DATA/<user>/
-FAST_ENV = {"ES_AMX": "1", "ES_LORA_BLAS": "1",
-            "ES_BLAS": os.environ.get("ES_BLAS", "/usr/local/lib/python3.13/dist-packages/numpy.libs/libscipy_openblas64_-f48b354e.so")}
+FAST_ENV = {"ES_AMX": "1"}   # bf16 AMX tiles on Intel Xeon (4th gen and later); exact float32 everywhere else
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("ES_TRAIN_MAX_UPLOAD_MB", "64")) << 20
 MAX_JOBS = int(os.environ.get("ES_TRAIN_MAX_JOBS", "1"))     # trainings running at once on this server (CPU bound)
@@ -177,7 +176,7 @@ def start_moe(cfg, JOB, runs):
            "--cache-mb", str(int(cfg["cache_mb"])), "--seq", str(int(cfg["seq"])), "--batch-seqs", str(int(cfg.get("batch_seqs", 4))),
            "--balance", str(float(cfg.get("balance", 0))), "--data", moe_text(cfg["data"])] + (["--random-route"] if cfg.get("random_route") else [])
     sh = ("" if os.path.exists(ef) else " ".join(map(shlex.quote, gen)) + " && ") + "exec " + ("stdbuf -oL " if shutil.which("stdbuf") else "") + " ".join(map(shlex.quote, cmd))
-    env = dict(os.environ); env["ES_BLAS"] = FAST_ENV["ES_BLAS"]
+    env = dict(os.environ)
     JOB.update(cfg=cfg, run=cfg["run"], mode="moe", state="running", t0=time.time(), rss=0, steps=[], heldout=[], done_offset=0, lines=["$ " + sh])
     JOB["proc"] = subprocess.Popen(["sh", "-c", sh], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=runs, start_new_session=True)
     p = JOB["proc"]; p.stderr = p.stdout
@@ -200,7 +199,7 @@ def start(cfg, JOB, runs, resume=False):
            "--eval-every", "5", "-o", out] + (["--resume"] if resume else [])
     env = dict(os.environ)
     if cfg.get("fast"): env.update(FAST_ENV)
-    if cfg.get("recompute"): env["ES_LORA_RECOMPUTE"] = "1"
+    if cfg.get("recompute"): env.update(ES_LORA_RECOMPUTE="1", ES_WCACHE_MB="0")   # low RAM: no kept activations, no kept weights
     JOB.update(cfg=cfg, run=run, state="running", t0=time.time(), rss=0, lines=["$ " + " ".join(cmd)])
     JOB["proc"] = subprocess.Popen(cmd, env=env, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=runs)
     threading.Thread(target=reader, args=(JOB["proc"], JOB), daemon=True).start()
@@ -215,7 +214,9 @@ def check(cfg):
     if not allowed_data(cfg.get("data")): return "pick one of your datasets (or a sample)", 400
     if lim.get("max_steps") and int(cfg.get("steps") or 0) > lim["max_steps"]:
         return "your plan allows up to %d steps per run: lower the steps or upgrade" % lim["max_steps"], 402
-    if lim.get("max_threads"): cfg["threads"] = min(int(cfg.get("threads") or 1), int(lim["max_threads"]))
+    t = int(cfg.get("threads") or 0)   # 0: every core (the plan's limit in the Cloud)
+    if lim.get("max_threads"): t = min(t, int(lim["max_threads"])) if t > 0 else int(lim["max_threads"])
+    cfg["threads"] = max(t, 0)
     return None
 
 @app.post("/api/train")

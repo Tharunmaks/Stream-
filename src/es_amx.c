@@ -4,8 +4,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/syscall.h>
-#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#if defined(__x86_64__) && ((defined(__clang__) && __clang_major__ >= 12) || (!defined(__clang__) && defined(__GNUC__) && __GNUC__ >= 11))
 #include <immintrin.h>
+#include <cpuid.h>
 #define HAVE_AMX_BUILD 1
 #endif
 
@@ -19,8 +20,8 @@ int es_amx_available(void) {
 #ifdef HAVE_AMX_BUILD
     static int s = -1;
     if (s < 0) {
-        __builtin_cpu_init();
-        s = __builtin_cpu_supports("amx-bf16") && __builtin_cpu_supports("amx-tile") && syscall(SYS_arch_prctl, 0x1023, 18) == 0;
+        unsigned a, b, c, d;   /* CPUID leaf 7: EDX bit 22 AMX-BF16, bit 24 AMX-TILE (clang 18 has no cpu_supports name for them) */
+        s = __get_cpuid_count(7, 0, &a, &b, &c, &d) && (d >> 22 & 1) && (d >> 24 & 1) && syscall(SYS_arch_prctl, 0x1023, 18) == 0;
     }
     return s;
 #else

@@ -34,6 +34,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../src/es_cpu.h"
 #include "../src/es_engine.h"
 #include "../src/es_graft.h"
 #include "../src/es_q2k.h"
@@ -443,6 +444,7 @@ static uint64_t rnd(void) { RNGS ^= RNGS << 13; RNGS ^= RNGS >> 7; RNGS ^= RNGS 
 static pool *pool_new(const es_graft *g, const feats *F, int T, int per) {
     pool *P = calloc(1, sizeof *P);
     P->T = T; P->g = g; P->F = F; P->S = calloc((size_t)T, sizeof(slot));
+    es_unpin_self();   /* the engine pinned this thread to one core; the workers would inherit it */
     pthread_mutex_init(&P->mu, NULL); pthread_cond_init(&P->go, NULL); pthread_cond_init(&P->done, NULL);
     for (int t = 0; t < T; t++) {
         slot *s = &P->S[t]; s->id = t; s->P = P;
