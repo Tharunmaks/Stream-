@@ -17,19 +17,19 @@ PLANS = {
         "plans": [
             {"id": "cloud_free", "name": "Free", "price_inr": 0,
              "limits": {"requests_per_day": 25, "requests_per_min": 5, "max_tokens": 256, "api_keys": 1, "db_mb": 1024, "databases": 3,
-                        "indexes": 5, "snapshots": 1, "priority": 2, "provider_keys": 5},
+                        "indexes": 5, "snapshots": 1, "priority": 2},
              "features": ["25 AI requests a day", "Answers up to 256 tokens", "1 API key", "1 GB database (3 databases)", "1 backup per database", "Playground",
-                          "Free models from 50+ AI providers", "Connect 5 AI providers with your own keys"]},
+                          "35 free models (8B and smaller)", "Bigger models from credits"]},
             {"id": "cloud_pro", "name": "Pro", "price_inr": 1700,
              "limits": {"requests_per_day": 2000, "requests_per_min": 60, "max_tokens": 4096, "api_keys": 10, "db_mb": 51200, "databases": 50,
-                        "indexes": 50, "snapshots": 10, "priority": 1, "provider_keys": 25},
+                        "indexes": 50, "snapshots": 10, "priority": 1},
              "features": ["2,000 AI requests a day", "Answers up to 4,096 tokens", "10 API keys", "50 GB database (50 databases)", "10 backups per database", "Faster queue, all models",
-                          "Connect 25 AI providers with your own keys"]},
+                          "All 54 catalog models (bigger ones from credits)"]},
             {"id": "cloud_max", "name": "Max", "price_inr": 4000,
              "limits": {"requests_per_day": 10000, "requests_per_min": 200, "max_tokens": 8192, "api_keys": 50, "db_mb": 1048576, "databases": 500,
-                        "indexes": 500, "snapshots": 50, "priority": 0, "provider_keys": 1000},
+                        "indexes": 500, "snapshots": 50, "priority": 0},
              "features": ["10,000 AI requests a day", "Answers up to 8,192 tokens", "50 API keys", "1 TB database (500 databases)", "50 backups per database", "Front of the queue, all models",
-                          "Connect every AI provider (50+) with your own keys"]},
+                          "All 54 catalog models (bigger ones from credits)"]},
         ],
     },
     "expertstream": {
@@ -60,6 +60,8 @@ PLANS = {
 PERIOD_DAYS = 30
 # Extra database space on top of any plan, bought in whole GB, for PERIOD_DAYS like a plan.
 STORAGE = {"price_inr_per_gb": 30, "min_gb": 1, "max_gb": 100000}
+# Prepaid credits for the paid models of the catalog (gateway/catalog.py), bought in whole rupees; they do not expire.
+CREDITS = {"min_inr": 100, "max_inr": 100000}
 
 
 def load(path=None):
@@ -71,6 +73,8 @@ def load(path=None):
         for product, p in override.items():
             if product == "storage":
                 STORAGE.update(p); continue
+            if product == "credits":
+                CREDITS.update(p); continue
             if product not in plans: plans[product] = {"title": p.get("title", product), "plans": []}
             if "title" in p: plans[product]["title"] = p["title"]
             have = {x["id"]: x for x in plans[product]["plans"]}

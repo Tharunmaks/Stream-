@@ -34,11 +34,10 @@ CREATE TABLE IF NOT EXISTS storage_addons (user_id INTEGER NOT NULL, gb INTEGER 
     order_id TEXT);
 CREATE TABLE IF NOT EXISTS usage_daily (user_id INTEGER NOT NULL, day TEXT NOT NULL, requests INTEGER DEFAULT 0, tokens INTEGER DEFAULT 0,
     PRIMARY KEY (user_id, day));
-CREATE TABLE IF NOT EXISTS provider_keys (user_id INTEGER NOT NULL, provider TEXT NOT NULL, sealed TEXT NOT NULL, hint TEXT, fields TEXT,
-    budget_usd REAL, created REAL NOT NULL, last_used REAL, PRIMARY KEY (user_id, provider));
-CREATE TABLE IF NOT EXISTS provider_usage (user_id INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, day TEXT NOT NULL, via TEXT NOT NULL,
-    requests INTEGER DEFAULT 0, prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0,
-    PRIMARY KEY (user_id, provider, model, day, via));
+CREATE TABLE IF NOT EXISTS credits (user_id INTEGER PRIMARY KEY, paise INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS credit_log (user_id INTEGER NOT NULL, paise INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS model_usage (user_id INTEGER NOT NULL, model TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER DEFAULT 0,
+    prompt_tokens INTEGER DEFAULT 0, completion_tokens INTEGER DEFAULT 0, paise INTEGER DEFAULT 0, PRIMARY KEY (user_id, model, day));
 CREATE TABLE IF NOT EXISTS nodes_seen (node_id TEXT PRIMARY KEY, name TEXT, owner_hash TEXT, first_seen REAL, last_seen REAL,
     tokens_generated INTEGER DEFAULT 0);
 """
@@ -269,52 +268,50 @@ class Store:
         row = self.db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()
         return row[0] if row else None
 
-    # ---- AI provider keys (sealed by gateway/providers.Vault) and their usage; user_id 0 = the owner's keys ----
-    def set_provider_key(self, uid, provider, sealed, hint, fields, budget_usd=None):
+    # ---- prepaid credits (paise) and per-model usage of catalog models ----
+    def credit_balance(self, uid):
+        row = self.db.execute("SELECT paise FROM credits WHERE user_id=?", (uid,)).fetchone()
+        return row[0] if row else 0
+
+    def add_credits(self, uid, paise, kind, ref=None):
+        """Adds (or, with a negative amount, takes) credits and logs it; returns the new balance."""
         with self.lock:
-            self.db.execute("INSERT INTO provider_keys(user_id, provider, sealed, hint, fields, budget_usd, created) VALUES(?,?,?,?,?,?,?)"
-                            " ON CONFLICT(user_id, provider) DO UPDATE SET sealed=excluded.sealed, hint=excluded.hint, fields=excluded.fields,"
-                            " budget_usd=COALESCE(excluded.budget_usd, provider_keys.budget_usd), created=excluded.created",
-                            (uid, provider, sealed, hint, json.dumps(fields or {}), budget_usd, time.time()))
+            self.db.execute("INSERT INTO credits(user_id, paise) VALUES(?, ?) ON CONFLICT(user_id) DO UPDATE SET paise=paise+excluded.paise", (uid, int(paise)))
+            self.db.execute("INSERT INTO credit_log(user_id, paise, kind, ref, created) VALUES(?,?,?,?,?)", (uid, int(paise), kind, ref, time.time()))
+        return self.credit_balance(uid)
 
-    def set_provider_budget(self, uid, provider, budget_usd):
-        with self.lock:
-            return self.db.execute("UPDATE provider_keys SET budget_usd=? WHERE user_id=? AND provider=?", (budget_usd, uid, provider)).rowcount
+    def credit_log(self, uid, limit=50):
+        rows = self.db.execute("SELECT paise, kind, ref, created FROM credit_log WHERE user_id=? AND kind != 'usage' ORDER BY created DESC LIMIT ?",
+                               (uid, limit)).fetchall()
+        return [dict(zip(["paise", "kind", "ref", "created"], r)) for r in rows]
 
-    def provider_key(self, uid, provider):
-        """(sealed key, fields dict, budget) or None."""
-        row = self.db.execute("SELECT sealed, fields, budget_usd FROM provider_keys WHERE user_id=? AND provider=?", (uid, provider)).fetchone()
-        return (row[0], json.loads(row[1] or "{}"), row[2]) if row else None
-
-    def provider_keys(self, uid):
-        rows = self.db.execute("SELECT provider, hint, fields, budget_usd, created, last_used FROM provider_keys WHERE user_id=? ORDER BY provider", (uid,)).fetchall()
-        return [dict(provider=r[0], hint=r[1], fields=json.loads(r[2] or "{}"), budget_usd=r[3], created=r[4], last_used=r[5]) for r in rows]
-
-    def delete_provider_key(self, uid, provider):
-        with self.lock:
-            return self.db.execute("DELETE FROM provider_keys WHERE user_id=? AND provider=?", (uid, provider)).rowcount
-
-    def provider_use(self, uid, provider, model, via, prompt_tokens, completion_tokens, cost_usd):
+    def model_use(self, uid, model, prompt_tokens, completion_tokens, paise):
+        """Counts a request to a catalog model; a paid one is charged to the credits in the same transaction."""
         day = time.strftime("%Y-%m-%d", time.gmtime())
         with self.lock:
-            self.db.execute("INSERT INTO provider_usage(user_id, provider, model, day, via, requests, prompt_tokens, completion_tokens, cost_usd)"
-                            " VALUES(?,?,?,?,?,1,?,?,?) ON CONFLICT(user_id, provider, model, day, via) DO UPDATE SET requests=requests+1,"
-                            " prompt_tokens=prompt_tokens+excluded.prompt_tokens, completion_tokens=completion_tokens+excluded.completion_tokens,"
-                            " cost_usd=cost_usd+excluded.cost_usd", (uid, provider, model, day, via, prompt_tokens, completion_tokens, cost_usd or 0.0))
-            self.db.execute("UPDATE provider_keys SET last_used=? WHERE user_id=? AND provider=?", (time.time(), 0 if via == "cloud" else uid, provider))
+            self.db.execute("BEGIN")
+            try:
+                self._model_use(uid, model, day, prompt_tokens, completion_tokens, paise)
+            except Exception:
+                self.db.execute("ROLLBACK"); raise
+            self.db.execute("COMMIT")
 
-    def provider_month_cost(self, uid, provider, via="own"):
-        """Estimated USD spent this calendar month (UTC) through one provider."""
-        return self.db.execute("SELECT COALESCE(SUM(cost_usd),0) FROM provider_usage WHERE user_id=? AND provider=? AND via=? AND day>=?",
-                               (uid, provider, via, time.strftime("%Y-%m-01", time.gmtime()))).fetchone()[0]
+    def _model_use(self, uid, model, day, prompt_tokens, completion_tokens, paise):
+        self.db.execute("INSERT INTO model_usage(user_id, model, day, requests, prompt_tokens, completion_tokens, paise) VALUES(?,?,?,1,?,?,?)"
+                        " ON CONFLICT(user_id, model, day) DO UPDATE SET requests=requests+1, prompt_tokens=prompt_tokens+excluded.prompt_tokens,"
+                        " completion_tokens=completion_tokens+excluded.completion_tokens, paise=paise+excluded.paise",
+                        (uid, model, day, prompt_tokens, completion_tokens, paise))
+        if paise:
+            self.db.execute("INSERT INTO credits(user_id, paise) VALUES(?, ?) ON CONFLICT(user_id) DO UPDATE SET paise=paise+excluded.paise", (uid, -paise))
+            self.db.execute("INSERT INTO credit_log(user_id, paise, kind, ref, created) VALUES(?,?,?,?,?)", (uid, -paise, "usage", model, time.time()))
 
-    def provider_usage(self, uid=None, days=31):
-        """Usage by provider and model over the last days, for one user (or everyone)."""
+    def model_usage(self, uid=None, days=31):
+        """Requests, tokens and rupees by model over the last days, for one user (or everyone)."""
         since = time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400))
-        q = ("SELECT provider, model, via, SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(cost_usd) FROM provider_usage WHERE day>=?"
-             + (" AND user_id=?" if uid is not None else "") + " GROUP BY provider, model, via ORDER BY SUM(cost_usd) DESC, SUM(requests) DESC")
+        q = ("SELECT model, SUM(requests), SUM(prompt_tokens), SUM(completion_tokens), SUM(paise) FROM model_usage WHERE day>=?"
+             + (" AND user_id=?" if uid is not None else "") + " GROUP BY model ORDER BY SUM(paise) DESC, SUM(requests) DESC")
         rows = self.db.execute(q, (since, uid) if uid is not None else (since,)).fetchall()
-        return [dict(zip(["provider", "model", "via", "requests", "prompt_tokens", "completion_tokens", "cost_usd"], r)) for r in rows]
+        return [dict(zip(["model", "requests", "prompt_tokens", "completion_tokens", "paise"], r)) for r in rows]
 
     # ---- contribute-to-use ledger ----
     def node_seen(self, node_id, name, owner_hash):
