@@ -122,6 +122,47 @@ Space counts document bytes and snapshot files against plan + extra space. Hones
 bearer tokens. To move the app's current data over, export it as JSON and import it per collection. The console's app switcher
 opens the ExpertStream address set in the owner's Billing page.
 
+## AI providers: 50+ hosted model APIs
+
+Next to the cloud's own computers, every model of 55 hosted AI providers can be called through the same endpoint and keys:
+OpenAI, Anthropic (Claude), Google Gemini, Groq, Cerebras, SambaNova, OpenRouter, Mistral, Cohere, DeepSeek, xAI, Together, Fireworks,
+DeepInfra, Perplexity, Hugging Face, GitHub Models, NVIDIA NIM, Cloudflare Workers AI, Ollama Cloud, Meta Llama API, Vercel AI Gateway,
+Azure OpenAI, Amazon Bedrock, Moonshot (Kimi), Z.ai (GLM), Alibaba Qwen, MiniMax, SiliconFlow, Sarvam and Krutrim (India) and more
+(`GET /providers` lists them all, 160 models, 73 of them on a free tier). Name the model `provider/model`:
+
+```sh
+curl http://HOST:8000/v1/chat/completions -H "Authorization: Bearer sk-expert-..." \
+     -d '{"model":"groq/llama-3.3-70b-versatile","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+| Whose key | What it serves | Who pays |
+|---|---|---|
+| The user's own (console > **AI providers**, "Add key") | every model of that provider | the provider bills the user |
+| The owner's (dashboard > **AI providers**) | only the models marked free (Groq, Cerebras, Gemini Flash, OpenRouter `:free`, GitHub Models ...) | nobody: provider free tiers |
+
+* Keys are checked against the provider when saved, encrypted at rest (Fernet; the secret is `EXPERTCLOUD_SECRET` or
+  `~/.expertcloud/provider_secret`, never in the database) and never shown again (only `gsk…1234`).
+* **Billing**: every request records tokens and an estimated cost (list prices in `gateway/providers.py`) per provider and model.
+  Users see this month's spend per provider and can set a **monthly budget** in dollars; requests stop when it is reached. The owner
+  sees everyone's usage. Correct prices or add providers and models with a `providers.json` next to the database.
+* Plans: Free connects 5 providers, Pro 25, Max all of them. Provider requests count toward the plan's daily requests and
+  answer length like any other request; compression and the response cache apply too.
+
+## Compute tiers: more RAM, more speed, more storage
+
+On top of any plan, a **Compute** tier (Plans & billing > Compute, paid with Razorpay like the plans) sends the user's requests
+only to computers with at least that much memory, picks the fastest measured ones first and puts them at the front of the queue:
+
+| Compute | Price / month | Computers | Extra storage |
+|---|---|---|---|
+| Standard | ₹0 | any | — |
+| Turbo | ₹999 | 16 GB+ RAM | +50 GB |
+| Ultra | ₹2,499 | 32 GB+ RAM | +200 GB |
+| Mega | ₹4,999 | 64 GB+ RAM | +500 GB |
+
+Honest limits: a tier can only use computers that people have joined to this cloud. If no computer that big has the model online,
+the request is served by any computer rather than refused. Prices and sizes are set in `gateway/plans.py` (or `plans.json`).
+
 ## Easiest way: the `cloud` command
 
 ```
@@ -140,7 +181,7 @@ Termux:API app and run `pkg install termux-api`), and once: Android Settings > A
 
 Your phone does not have to be the cloud. Host the gateway and a node on a free **Hugging Face Space** (Docker, CPU basic:
 2 CPUs, 16 GB RAM): create a Space with the Docker SDK, add `deploy/huggingface/Dockerfile` and `deploy/huggingface/README.md`,
-and set the secret `EXPERTCLOUD_ADMIN_TOKEN`. It builds the engine, downloads Qwen2.5 1.5B Instruct and serves the dashboard and
+and set the secrets `EXPERTCLOUD_ADMIN_TOKEN` and `EXPERTCLOUD_SECRET` (keeps saved AI provider keys readable after restarts). It builds the engine, downloads Qwen2.5 1.5B Instruct and serves the dashboard and
 API at `https://NAME-expertcloud.hf.space`. The dashboard's Connect page walks through it and generates the token.
 
 Add more free machines as nodes with one line (Kaggle and Colab notebooks: put `!` in front):

@@ -16,6 +16,10 @@
   the model and context, weights already warm, measured speed); if a node drops or fails before its first token, the next one
   takes the request at once. When every node is busy, requests wait, contributors first.
 * Workers join at /cloud/ws with the join token (dashboard, or GET /admin/join).
+* AI providers (gateway/providers.py): "PROVIDER/MODEL" (groq/llama-3.3-70b-versatile, openai/gpt-4.1-mini ...) goes to one of 50+
+  hosted model APIs with the user's own key, or with the owner's key for the models marked free. Usage and estimated cost are kept per
+  provider and model; a user can set a monthly budget per provider.
+* Compute tiers (plans "compute"): requests of a paying user go to computers with enough RAM, fastest first, at the front of the queue.
 
 The admin token and join token are made on first start, stored in expertcloud.db and written to ~/.expertcloud/ (mode 600).
 """
@@ -41,7 +45,7 @@ sys.path.insert(0, ROOT)
 from cloud.controller import ALIASES, Controller, Node  # noqa: E402
 from gateway.compress import compress_messages, est_tokens  # noqa: E402
 from gateway.store import Store, default_db, key_hash  # noqa: E402
-from gateway import billing, plans as plans_mod  # noqa: E402
+from gateway import billing, plans as plans_mod, providers as prov  # noqa: E402
 from gateway.database import DbError, DocStore  # noqa: E402
 
 OPTS = dict(open_signup=False, similar=0.0, rate_per_min=120, queue_timeout=120.0, host="127.0.0.1", port=8000)
@@ -52,6 +56,8 @@ app = FastAPI(title="ExpertStream OmniRoute Gateway", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["Authorization", "Content-Type", "x-api-key"])
 PLANS = plans_mod.PLANS
 DOCS = None
+CAT = prov.PROVIDERS   # the AI provider catalog (providers.json applied in init)
+VAULT = None
 STORE = None
 CTRL = None
 ADMIN = None
@@ -116,9 +122,10 @@ def user_plan(uid, product="cloud"):
 def auth(request, count=False):
     """(key hash or 'admin', None) or (None, error response). Sets request.state.uid and .plan for user accounts and their
     keys. count=True also checks the plan's daily limit (chat requests; they are counted once answered)."""
-    request.state.uid, request.state.plan = None, None
+    request.state.uid, request.state.plan, request.state.admin = None, None, False
     tok = bearer(request)
-    if is_admin(tok): return "admin", None
+    if is_admin(tok):
+        request.state.admin = True; return "admin", None
     su = STORE.session_user(tok) if tok.startswith("ses-") else None
     h = su[2] if su else (STORE.check_key(tok) if tok else None)
     if not h: return None, err(401, "signed out: sign in again" if tok.startswith("ses-") else token_hint(tok, "key"), "authentication_error")
@@ -153,7 +160,49 @@ async def v1_models(request: Request):
     h, e = auth(request)
     if e: return e
     data = [dict(id=a, object="model", owned_by="expertcloud", alias_for=CTRL.resolve(a)) for a in sorted(ALIASES)] + CTRL.models()
-    return {"object": "list", "data": data}
+    return {"object": "list", "data": data + provider_models(request.state.uid, h == "admin")}
+
+
+def provider_models(uid, admin=False):
+    """Provider models the caller can use: every catalog model of a provider they have a key for, and the free models of
+    providers the owner has a key for (the owner, with the admin token: all models of those)."""
+    mine = {k["provider"] for k in STORE.provider_keys(uid)} if uid else set()
+    cloud = {k["provider"] for k in STORE.provider_keys(0)}
+    out = []
+    for pid, p in CAT.items():
+        for m in p["models"]:
+            via = "own" if pid in mine else "cloud" if pid in cloud and (m.get("free") or admin) else None
+            if via: out.append(dict(id=pid + "/" + m["id"], object="model", owned_by=pid, provider=p["name"], free=bool(m.get("free")), via=via,
+                                    price_in=m.get("price_in"), price_out=m.get("price_out"), context=m.get("ctx")))
+    return out
+
+
+def provider_route(request, model):
+    """For a provider model: (provider id, model at the provider, key, fields, via, model info), None for a cloud model, or an error
+    response. A user's own key comes first; the owner's key serves free models (and every model for the admin token)."""
+    if any(m["id"] == model for m in CTRL.models()): return None   # a computer serves a model by that exact name
+    pid, mid = prov.split(model, CAT)
+    if not pid: return None
+    p, info, uid = CAT[pid], prov.find_model(CAT, pid, mid), request.state.uid
+    try:
+        own = STORE.provider_key(uid, pid) if uid else None
+        if own:
+            budget = own[2]
+            if budget is not None and STORE.provider_month_cost(uid, pid) >= budget:
+                return err(402, "this month's %s budget of $%g is used up: raise it in AI providers" % (p["name"], budget), "insufficient_quota")
+            return pid, mid, VAULT.open(own[0]), own[1], "own", info
+        cloud = STORE.provider_key(0, pid)
+        if cloud and (bool(info and info.get("free")) or not uid and request.state.admin):
+            return pid, mid, VAULT.open(cloud[0]), cloud[1], "cloud", info
+    except prov.ProviderError as ex:
+        return err(ex.status, str(ex), "server_error")
+    if cloud_has(pid) and not (info and info.get("free")):
+        return err(403, "%s is not free: add your own %s key in AI providers to use it" % (model, p["name"]), "permission_error")
+    return err(403, "no %s key: add yours in the console under AI providers (%s)" % (p["name"], p["signup"] or "see the provider's site"), "permission_error")
+
+
+def cloud_has(pid):
+    return STORE.provider_key(0, pid) is not None
 
 
 def admin_use(completion_tokens=0, saved=0, cache_hits=0):
@@ -240,9 +289,18 @@ async def chat(request: Request):
             return {"id": cid, "object": "chat.completion", "created": created, "model": target, "usage": usage, "x_expertcloud": extra,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": cached["text"]}, "finish_reason": "stop"}]}
 
-    # queue order: 0 first (admin, Max plan, contributors), then Pro, then Free
-    prio = 0 if not acct or STORE.contribution(acct) > 0 else int(plan["limits"].get("priority", 1)) if plan else 1
-    gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"])
+    route = provider_route(request, model)
+    if isinstance(route, JSONResponse): return route
+    if route:
+        pid, mid, pkey, pfields, via, pinfo = route
+        gen = prov.run(CAT[pid], pkey, pfields, mid, messages, params)
+    else:
+        # queue order: 0 first (admin, Max plan, compute tiers, contributors), then Pro, then Free
+        prio = 0 if not acct or STORE.contribution(acct) > 0 else int(plan["limits"].get("priority", 1)) if plan else 1
+        tier = user_plan(request.state.uid, "compute")["limits"] if request.state.uid else {}
+        if "priority" in tier: prio = min(prio, int(tier["priority"]))
+        gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"],
+                       min_ram_mb=int(tier.get("min_ram_gb") or 0) * 1024, fast=bool(tier.get("prefer_fast")))
 
     async def finish(text, info):
         usage = dict(info.get("usage") or {})
@@ -253,6 +311,10 @@ async def chat(request: Request):
         else: admin_use(completion_tokens=ct, saved=saved)
         if use_cache and text: STORE.cache_put(ck, info.get("model") or target, prompt_text(messages), dict(text=text, usage=usage))
         extra = dict(cache="miss" if use_cache else "off", tokens_saved=saved, node=info.get("node"), ttft_s=info.get("ttft"), tps=info.get("tps"))
+        if route:
+            c = prov.cost(pinfo, pt, ct)
+            STORE.provider_use(request.state.uid or 0, pid, mid, via, pt, ct, c)
+            extra.update(provider=pid, key=via, cost_usd=None if c is None else round(c, 6))
         return usage, extra
 
     if stream:
@@ -277,6 +339,8 @@ async def chat(request: Request):
         async for kind, val in gen:
             if kind == "delta": text += val
             else: info = val
+    except prov.ProviderError as ex:
+        return err(ex.status, str(ex), "server_error" if ex.status >= 500 else "invalid_request_error")
     except RuntimeError as ex:
         return err(503, str(ex), "server_error")
     usage, extra = await finish(text, info)
@@ -424,6 +488,7 @@ async def account(request: Request):
     cp = user_plan(u[0])
     return dict(username=u[1], created=row[0], usage=use, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
                 storage=dict(quota_bytes=quota(u[0], cp["limits"]), plan_bytes=int(cp["limits"].get("db_mb", 1024)) << 20, extra_gb=STORE.extra_gb(u[0]),
+                             compute_gb=int(user_plan(u[0], "compute")["limits"].get("extra_storage_gb") or 0),
                              addons=STORE.storage_addons(u[0]), price_inr_per_gb=plans_mod.STORAGE["price_inr_per_gb"]),
                 plan=dict(id=cp["id"], name=cp["name"], expires=cp["expires"], limits=cp["limits"], contributor=use["contributed_tokens"] > 0),
                 plans={p: plan_view(u[0], p) for p in PLANS})
@@ -664,10 +729,141 @@ async def admin_set_plan(username: str, request: Request):
     return {"ok": True, "expires": STORE.set_subscription(uid, product, plan["id"], None if days is None else float(days), "owner")}
 
 
+# ---------------------------------------------------------------------------------------------------------------- AI providers
+def money(x):
+    return None if x is None else round(float(x), 4)
+
+
+def provider_body(b):
+    """(key, fields, budget) from a request body, or raises ProviderError."""
+    key = clean_token(str(b.get("key") or ""))
+    if not key or len(key) > 4096: raise prov.ProviderError(400, "paste the provider's API key")
+    fields = {k: str(v).strip() for k, v in (b.get("fields") or {}).items()} if isinstance(b.get("fields"), dict) else {}
+    return key, fields, budget_of(b)
+
+
+def budget_of(b):
+    if b.get("budget_usd") in (None, ""): return None
+    try: v = float(b["budget_usd"])
+    except (TypeError, ValueError): raise prov.ProviderError(400, "budget_usd must be a number of dollars")
+    if not 0 <= v <= prov.MAX_BUDGET_USD: raise prov.ProviderError(400, "budget_usd must be between 0 and %d" % prov.MAX_BUDGET_USD)
+    return v
+
+
+async def save_provider_key(uid, pid, b):
+    if pid not in CAT: raise prov.ProviderError(404, "no such provider")
+    key, fields, budget = provider_body(b)
+    prov.base_url(CAT[pid], fields)   # the fields make a valid address
+    result = None
+    if b.get("check"):
+        ok, msg = await prov.check_key(CAT[pid], key, fields)
+        if not ok: raise prov.ProviderError(400, msg)
+        result = msg
+    STORE.set_provider_key(uid, pid, VAULT.seal(key), prov.hint(key), fields, budget)
+    return {"ok": True, "provider": pid, "hint": prov.hint(key), "check": result}
+
+
+def provider_call(fn):
+    async def run():
+        try: return await fn()
+        except prov.ProviderError as ex: return err(ex.status, str(ex))
+    return run()
+
+
+@app.get("/providers")
+async def providers_catalog():
+    """The AI provider catalog: providers, their models and prices, which models are free, and which the owner offers to everyone."""
+    cloud = {k["provider"] for k in STORE.provider_keys(0)}
+    cat = prov.public_view(CAT)
+    for p in cat: p["cloud"] = p["id"] in cloud
+    return {"providers": cat, "count": len(cat), "models": sum(len(p["models"]) for p in cat), "keys_ready": VAULT.ready()}
+
+
+@app.get("/account/providers")
+async def account_providers(request: Request):
+    """The caller's connected providers (key hint, budget, this month's estimated spend) and usage over the last 31 days."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    keys = STORE.provider_keys(u[0])
+    for k in keys: k["month_usd"] = money(STORE.provider_month_cost(u[0], k["provider"]))
+    use = STORE.provider_usage(u[0])
+    for x in use: x["cost_usd"] = money(x["cost_usd"])
+    return dict(keys=keys, usage=use, limit=int(user_plan(u[0])["limits"].get("provider_keys", 5)),
+                month_usd=money(sum(k["month_usd"] or 0 for k in keys)))
+
+
+@app.put("/account/providers/{pid}")
+async def account_provider_set(pid: str, request: Request):
+    """Save (or replace) the caller's key for a provider: {"key": "...", "fields": {"account_id": ...}, "budget_usd": 20, "check": true}."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    b = await body_of(request)
+    have = {k["provider"] for k in STORE.provider_keys(u[0])}
+    cap = int(user_plan(u[0])["limits"].get("provider_keys", 5))
+    if pid not in have and len(have) >= cap:
+        return err(402, "your plan connects %d AI providers: remove one or upgrade" % cap)
+    return await provider_call(lambda: save_provider_key(u[0], pid, b))
+
+
+@app.patch("/account/providers/{pid}")
+async def account_provider_budget(pid: str, request: Request):
+    """Change the monthly budget: {"budget_usd": 20} (null = no limit)."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    b = await body_of(request)
+    try: budget = budget_of(b)
+    except prov.ProviderError as ex: return err(ex.status, str(ex))
+    return {"ok": True} if STORE.set_provider_budget(u[0], pid, budget) else err(404, "no key for that provider")
+
+
+@app.delete("/account/providers/{pid}")
+async def account_provider_delete(pid: str, request: Request):
+    u = user_of(request)
+    return {"deleted": STORE.delete_provider_key(u[0], pid)} if u else err(401, "sign in first", "authentication_error")
+
+
+@app.post("/account/providers/{pid}/check")
+async def account_provider_check(pid: str, request: Request):
+    """Checks a saved key by listing the provider's models (uses no tokens)."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    row = STORE.provider_key(u[0], pid)
+    if not row or pid not in CAT: return err(404, "no key for that provider")
+
+    async def go():
+        ok, msg = await prov.check_key(CAT[pid], VAULT.open(row[0]), row[1])
+        return {"ok": ok, "message": msg}
+    return await provider_call(go)
+
+
+@app.get("/admin/providers")
+async def admin_providers(request: Request):
+    """The owner's provider keys (their free models serve every user) and everyone's provider usage, last 31 days."""
+    e = admin_only(request)
+    if e: return e
+    use = STORE.provider_usage()
+    for x in use: x["cost_usd"] = money(x["cost_usd"])
+    return dict(keys=STORE.provider_keys(0), usage=use, catalog=prov.public_view(CAT), keys_ready=VAULT.ready())
+
+
+@app.put("/admin/providers/{pid}")
+async def admin_provider_set(pid: str, request: Request):
+    e = admin_only(request)
+    if e: return e
+    b = await body_of(request)
+    return await provider_call(lambda: save_provider_key(0, pid, b))
+
+
+@app.delete("/admin/providers/{pid}")
+async def admin_provider_delete(pid: str, request: Request):
+    return admin_only(request) or {"deleted": STORE.delete_provider_key(0, pid)}
+
+
 # ---------------------------------------------------------------------------------------------------------------- database
 def quota(uid, limits):
     """Database space of a user: the plan's, plus extra space bought, in bytes."""
-    return (int(limits.get("db_mb", 1024)) << 20) + (int(STORE.extra_gb(uid)) << 30)
+    tier = int(user_plan(uid, "compute")["limits"].get("extra_storage_gb") or 0)
+    return (int(limits.get("db_mb", 1024)) << 20) + ((int(STORE.extra_gb(uid)) + tier) << 30)
 
 
 def db_user(request):
@@ -982,11 +1178,13 @@ async def health():
 
 def init(db_path, rotate=False):
     global STORE, CTRL, ADMIN, JOIN
-    global PLANS, DOCS
+    global PLANS, DOCS, CAT, VAULT
     STORE = Store(db_path)
     CTRL = Controller(STORE)
     base = os.path.dirname(os.path.abspath(db_path))
     PLANS = plans_mod.load(os.environ.get("EXPERTCLOUD_PLANS") or os.path.join(base, "plans.json"))
+    CAT = prov.load(os.environ.get("EXPERTCLOUD_PROVIDERS") or os.path.join(base, "providers.json"))
+    VAULT = prov.Vault()
     DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata"), legacy=os.path.join(base, "clouddata.db"))
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))

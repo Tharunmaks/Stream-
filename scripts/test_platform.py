@@ -44,8 +44,9 @@ def user(name):
 # ---- plans
 p = c.get("/plans").json()
 prices = {x["id"]: x["price_inr"] for prod in p["products"].values() for x in prod["plans"]}
-check("1 plans in INR: cloud 0/1700/4000, ExpertStream 0/800/2000", p["currency"] == "INR" and prices == {
-    "cloud_free": 0, "cloud_pro": 1700, "cloud_max": 4000, "es_free": 0, "es_plus": 800, "es_pro": 2000}, str(prices))
+check("1 plans in INR: cloud 0/1700/4000, ExpertStream 0/800/2000, compute 0/999/2499/4999", p["currency"] == "INR" and prices == {
+    "cloud_free": 0, "cloud_pro": 1700, "cloud_max": 4000, "es_free": 0, "es_plus": 800, "es_pro": 2000,
+    "compute_std": 0, "compute_turbo": 999, "compute_ultra": 2499, "compute_mega": 4999}, str(prices))
 
 space = {p["id"]: p["limits"]["db_mb"] for p in gw.plans_mod.PLANS["cloud"]["plans"]}
 check("1b database space: Free 1 GB, Pro 50 GB, Max 1 TB; extra Rs 30 per GB", space == {"cloud_free": 1024, "cloud_pro": 51200, "cloud_max": 1048576}

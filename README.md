@@ -78,7 +78,9 @@ facts and style, not new abilities. Details: [`craft/skills/expert-craft/graft.m
 **ExpertStream Cloud & OmniRoute Gateway.** Pool your own machines into one OpenAI-compatible endpoint with free `sk-expert-...`
 keys: `gateway/omni_router.py` (OpenAI API with streaming, prompt compression, response cache, scoring router with failover),
 `cloud/worker_agent.py` (one command per machine, works behind home routers), an MCP server (`mcp/expertstream_mcp.py`) and a
-dashboard. Every node runs the native engine. Details and limits: [`docs/cloud.md`](docs/cloud.md); test: `python3 scripts/test_cloud.py MODEL.gguf`.
+dashboard. Every node runs the native engine. Details and limits: [`docs/cloud.md`](docs/cloud.md); test: `python3 scripts/test_cloud.py MODEL.gguf`. It also reaches 55 hosted AI providers
+(OpenAI, Claude, Gemini, Groq, OpenRouter, Mistral, DeepSeek and more, 73 free-tier models) as `provider/model`, with each user's own
+encrypted keys, usage and cost per provider, monthly budgets, and Compute tiers (16/32/64 GB RAM computers); test: `python3 scripts/test_providers.py`.
 
 **Faster on PCs; streaming tuned for phones.** On a 4-core x86 PC without a GPU, Qwen3-30B-A3B (30B parameters, Q2_K) generates
 8.0 words/s from RAM (it was 3.65; llama.cpp: 7.6), after new AVX2 kernels for the formats big models use (Q2_K, Q3_K, TQ1_0/TQ2_0, all

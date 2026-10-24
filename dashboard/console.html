@@ -84,6 +84,12 @@
 .mcard { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
 .mcard .nm { font-weight: 650; overflow-wrap: anywhere; }
 .mcard .row { justify-content: space-between; }
+.pvgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.pvcard { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pvcard .nm { font-weight: 650; font-size: 15px; }
+.pvcard .chips .chip.free { color: var(--ok); border-color: rgba(52,211,153,.3); }
+.pvcard .acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+.pvbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 .models { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .welcome { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
 .welcome h1 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
@@ -245,6 +251,7 @@
           <tbody id="keyRows"></tbody></table></div><div id="keysEmpty" hidden></div></div>
       </section>
 
+      <section data-view="providers" hidden><div id="provView"></div></section>
       <section data-view="database" hidden><div id="dbView"></div></section>
       <section data-view="billing" hidden><div id="billView"></div></section>
       <section data-view="expertstream" hidden><div id="esView"></div></section>
@@ -256,7 +263,7 @@
       <section data-view="docs" hidden>
         <div class="grid two">
           <div class="card"><div class="hd"><h3>Connect any app</h3><span class="sub">OpenAI-compatible</span></div><div class="bd">
-            <dl class="kv" style="margin-bottom:14px"><dt>Base URL</dt><dd id="docBase"></dd><dt>API key</dt><dd>sk-expert-… (from API keys)</dd><dt>Models</dt><dd>auto · expertstream-fast · expertstream-coder · any name on the Models page</dd></dl>
+            <dl class="kv" style="margin-bottom:14px"><dt>Base URL</dt><dd id="docBase"></dd><dt>API key</dt><dd>sk-expert-… (from API keys)</dd><dt>Models</dt><dd>auto · expertstream-fast · expertstream-coder · any name on the Models page · provider/model from AI providers (e.g. groq/llama-3.3-70b-versatile)</dd></dl>
             <div id="docSnip"></div>
           </div></div>
           <div class="grid" style="align-content:start">
@@ -264,6 +271,7 @@
               <code>POST /v1/chat/completions</code><span class="muted">chat, with "stream": true for live text</span>
               <code>GET /v1/models</code><span class="muted">models online now</span>
               <code>GET /me</code><span class="muted">usage of the key you call with</span>
+              <code>GET /providers</code><span class="muted">50+ AI providers, their models, prices and free models</span>
             </div></div></div>
             <div class="card"><div class="hd"><h3>Extras</h3></div><div class="bd"><div class="ep">
               <code>"compress": "aggressive"</code><span class="muted">shrinks long prompts before they are sent</span>
@@ -371,7 +379,7 @@ $("#themeBtn").addEventListener("click", () => {
 (t => { if (t) document.documentElement.dataset.theme = t; })(store.get("ec_theme"));
 
 // ---------------------------------------------------------------- console navigation
-const VIEWS = [["home", "Home", "home"], ["models", "Models", "models"], ["playground", "Playground", "playground"], ["database", "Database", "db"],
+const VIEWS = [["home", "Home", "home"], ["models", "Models", "models"], ["providers", "AI providers", "bolt"], ["playground", "Playground", "playground"], ["database", "Database", "db"],
   ["keys", "API keys", "keys"], ["billing", "Plans & billing", "card"], ["expertstream", "ExpertStream", "stream"], ["compute", "Servers", "compute"], ["docs", "Docs", "docs"]];
 const MOBILE = { home: "Home", playground: "Chat", database: "Database", keys: "Keys", billing: "Plans" };
 let VIEW = "home";
@@ -389,6 +397,8 @@ function go(id) {
   if (id === "keys") loadKeys();
   if (id === "compute") loadCompute();
   if (id === "database") loadDatabase();
+  if (id === "providers") loadProviders();
+  if (id === "playground") loadProviderModels();
   if (id === "billing") renderBilling();
   if (id === "expertstream") renderES();
   closeApps();
@@ -397,7 +407,7 @@ function go(id) {
 function enterConsole(fresh) {
   $("#landing").hidden = true; $("#app").hidden = false;
   if (fresh) toast("Welcome to ExpertCloud, " + USER + "!", "ok");
-  renderChat(); renderDocs();
+  renderChat(); renderDocs(); loadProviderModels();
   const want = location.hash.slice(1); go(VIEWS.some(v => v[0] === want) ? want : "home");
   refresh();
 }
@@ -518,14 +528,91 @@ function renderDocs() {
   $("#docLimits").textContent = L ? "Your plan: " + fmt(L.requests_per_day) + " AI requests a day, " + L.requests_per_min + " a minute, answers up to " + fmt(L.max_tokens) + " tokens, " + mb(L.db_mb) + " of database. Database calls are not counted as AI requests." : "Limits depend on your plan: see Plans & billing.";
 }
 
+// ---------------------------------------------------------------- AI providers
+let PROV = null, PMINE = null, PMODELS = [], provFilter = "all", provQuery = "";
+const usd = v => v == null ? "—" : "$" + (v < 0.01 && v > 0 ? v.toFixed(4) : v.toFixed(2));
+const per1m = m => m.price_in == null ? (m.free ? "free" : "price not listed") : m.price_in === 0 && m.price_out === 0 ? "free" : "$" + m.price_in + " in / $" + m.price_out + " out per 1M";
+async function loadProviderModels() {
+  try { PMODELS = (await call("/v1/models")).data.filter(m => m.provider); modelSig = ""; if (STATS) renderModelSelect(); } catch {}
+}
+async function loadProviders() {
+  try { [PROV, PMINE] = await Promise.all([call("/providers"), call("/account/providers")]); renderProviders(); loadProviderModels(); }
+  catch (e) { if (e.message !== "signed out") toast("Could not load providers: " + e.message, "bad"); }
+}
+function renderProviders() {
+  if (!PROV || !PMINE) return;
+  const mine = Object.fromEntries(PMINE.keys.map(k => [k.provider, k])), q = provQuery.toLowerCase();
+  const list = PROV.providers.filter(p => (provFilter === "all" || (provFilter === "free" && (p.free_models || p.cloud)) || (provFilter === "mine" && mine[p.id]))
+    && (!q || (p.name + " " + p.id + " " + p.models.map(m => m.id).join(" ")).toLowerCase().includes(q)));
+  const search = h("input", { class: "input", placeholder: "Search providers or models", value: provQuery, style: "max-width:280px;height:36px" });
+  search.addEventListener("input", () => { provQuery = search.value; renderProviders(); setTimeout(() => { const s = $("#provView input"); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }); });
+  const tabs = h("div", { class: "ptabs", style: "margin:0" }, [["all", "All " + PROV.count], ["free", "Free models"], ["mine", "Connected " + PMINE.keys.length]].map(([k, l]) =>
+    h("button", { class: k === provFilter ? "on" : "", onclick: () => { provFilter = k; renderProviders(); } }, l)));
+  $("#provView").replaceChildren(
+    h("div", { class: "grid kpis" },
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Providers"), h("div", { class: "v" }, fmt(PROV.count)), h("div", { class: "s" }, fmt(PROV.models) + " models listed")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Connected"), h("div", { class: "v" }, PMINE.keys.length + " / " + (PMINE.limit >= 1000 ? "all" : PMINE.limit)), h("div", { class: "s" }, "on your plan")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Spend this month"), h("div", { class: "v" }, usd(PMINE.month_usd || 0)), h("div", { class: "s" }, "estimated, billed by each provider")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Free on this cloud"), h("div", { class: "v" }, fmt(PROV.providers.filter(p => p.cloud).length)), h("div", { class: "s" }, "providers, no key needed"))),
+    PROV.keys_ready ? "" : h("div", { class: "banner bad", style: "margin-bottom:14px" }, h("span", {}, "Saving keys is switched off on this server (it needs the cryptography package).")),
+    h("div", { class: "pvbar" }, tabs, search, h("div", { class: "sp" }), h("span", { class: "muted", style: "font-size:13px" }, "Model names: provider/model, e.g. groq/llama-3.3-70b-versatile")),
+    list.length ? h("div", { class: "pvgrid" }, list.map(p => providerCard(p, mine[p.id]))) : h("div", { class: "card", style: "margin-bottom:16px" }, emptyState("bolt", "Nothing here", provFilter === "mine" ? "Add a key to any provider to see it here." : "No provider matches.")),
+    h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Usage, last 31 days"), h("span", { class: "sub" }, "costs are estimates from list prices")),
+      PMINE.usage.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Provider", "Model", "Key", "Requests", "Tokens in", "Tokens out", "Est. cost"].map(t => h("th", { class: /Req|Tok|cost/.test(t) ? "r" : "" }, t)))),
+        h("tbody", {}, PMINE.usage.map(x => h("tr", {}, h("td", {}, x.provider), h("td", {}, h("code", {}, x.model)), h("td", {}, x.via === "own" ? "yours" : "cloud (free)"),
+          h("td", { class: "r" }, fmt(x.requests)), h("td", { class: "r" }, fmt(x.prompt_tokens)), h("td", { class: "r" }, fmt(x.completion_tokens)), h("td", { class: "r" }, x.via === "own" ? usd(x.cost_usd) : "free"))))))
+        : emptyState("card", "No provider usage yet", "Requests to provider models show up here with tokens and estimated cost.")));
+}
+function providerCard(p, k) {
+  const shown = p.models.slice(0, 6);
+  return h("div", { class: "card pvcard" },
+    h("div", { class: "row", style: "justify-content:space-between;gap:8px" }, h("div", { class: "nm" }, p.name),
+      k ? h("span", { class: "st on" }, "Connected") : p.cloud ? h("span", { class: "st on" }, "Free here") : p.kind !== "global" ? h("span", { class: "chip" }, p.kind === "india" ? "India" : "China") : null),
+    h("div", { class: "muted", style: "font-size:13px" }, p.free_tier ? "Free: " + p.free_tier : "Paid: billed by " + p.name),
+    h("div", { class: "chips" }, shown.map(m => h("button", { class: "chip" + (m.free ? " free" : ""), style: "cursor:pointer", title: per1m(m) + (m.note ? " · " + m.note : "") + " · click to copy",
+      onclick: () => copy(m.full_id) }, m.id + (m.free ? " · free" : ""))), p.models.length > shown.length ? h("span", { class: "chip" }, "+" + (p.models.length - shown.length)) : null),
+    k ? h("div", { class: "muted", style: "font-size:12.5px" }, "Key " + k.hint + " · this month " + usd(k.month_usd || 0) + (k.budget_usd != null ? " of " + usd(k.budget_usd) + " budget" : " · no budget")) : null,
+    h("div", { class: "acts" },
+      h("button", { class: "btn sm" + (k ? "" : " primary"), onclick: () => providerKeyModal(p, k) }, k ? "Change key" : "Add key"),
+      k ? h("button", { class: "btn sm", onclick: () => providerBudget(p, k) }, "Budget") : null,
+      k ? h("button", { class: "btn sm", onclick: async () => { try { const r = await call("/account/providers/" + p.id + "/check", { method: "POST" }); toast(r.message, r.ok ? "ok" : "bad"); } catch (e) { toast(e.message, "bad"); } } }, "Check") : null,
+      k ? h("button", { class: "btn sm ghost", onclick: () => confirmDel("Remove " + p.name + " key?", "Requests to " + p.id + "/... models will stop using your key.", async () => { await call("/account/providers/" + p.id, { method: "DELETE" }); loadProviders(); }, "Remove") }, "Remove") : null,
+      p.signup ? h("a", { class: "btn sm ghost", href: p.signup, target: "_blank", rel: "noopener noreferrer" }, "Get a key") : null));
+}
+function providerKeyModal(p, k) {
+  const key = h("input", { class: "input", type: "password", placeholder: k ? "saved " + k.hint + " (paste to replace)" : "paste your " + p.name + " API key", autocomplete: "off", spellcheck: "false" });
+  const fields = p.fields.map(f => [f, h("input", { class: "input", placeholder: f.replace("_", " "), value: (k && k.fields[f]) || "", autocapitalize: "off", spellcheck: "false" })]);
+  const budget = h("input", { class: "input", type: "number", min: "0", step: "1", placeholder: "no limit", value: k && k.budget_usd != null ? k.budget_usd : "" });
+  modal((k ? "Change " : "Connect ") + p.name, [
+    h("label", { class: "f" }, "API key"), key, ...fields.flatMap(([f, i]) => [h("label", { class: "f", style: "margin-top:10px" }, f.replace("_", " ")), i]),
+    h("label", { class: "f", style: "margin-top:10px" }, "Monthly budget in US dollars (optional)"), budget,
+    h("p", { class: "note" }, "The key is encrypted on this server and never shown again. " + p.name + " bills you directly; requests stop when this month's estimated spend reaches the budget.")],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async e => {
+      if (!key.value.trim()) return toast("Paste the key", "bad");
+      e.target.disabled = true;
+      try {
+        const r = await call("/account/providers/" + p.id, { method: "PUT", body: JSON.stringify({ key: key.value, check: true, budget_usd: budget.value === "" ? null : +budget.value, fields: Object.fromEntries(fields.map(([f, i]) => [f, i.value.trim()])) }) });
+        close(); toast(p.name + " connected (" + r.hint + ")", "ok"); loadProviders();
+      } catch (err) { toast(err.message, "bad"); e.target.disabled = false; } } }, "Check and save")]);
+}
+function providerBudget(p, k) {
+  const budget = h("input", { class: "input", type: "number", min: "0", step: "1", placeholder: "no limit", value: k.budget_usd != null ? k.budget_usd : "" });
+  modal(p.name + " budget", [h("label", { class: "f" }, "Monthly budget in US dollars"), budget, h("p", { class: "note" }, "Spent this month: " + usd(k.month_usd || 0) + ". Leave empty for no limit.")],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+      try { await call("/account/providers/" + p.id, { method: "PATCH", body: JSON.stringify({ budget_usd: budget.value === "" ? null : +budget.value }) }); close(); toast("Budget saved", "ok"); loadProviders(); }
+      catch (e) { toast(e.message, "bad"); } } }, "Save")]);
+}
+
 // ---------------------------------------------------------------- playground
 const CHAT = []; let ABORT = null, modelSig = "";
 function renderModelSelect() {
-  const ms = STATS.models, ids = ["auto", "expertstream-fast", "expertstream-coder", ...ms.map(m => m.id)], sig = ids.join("|");
+  const ms = STATS.models, ids = ["auto", "expertstream-fast", "expertstream-coder", ...ms.map(m => m.id), ...PMODELS.map(m => m.id)], sig = ids.join("|");
   if (sig === modelSig) return; modelSig = sig;
   const sel = $("#pModel"), cur = sel.value || "auto";
+  const groups = {}; for (const m of PMODELS) (groups[m.provider] = groups[m.provider] || []).push(m);
   sel.replaceChildren(h("optgroup", { label: "Smart routing" }, h("option", { value: "auto" }, "auto: biggest model online"), h("option", { value: "expertstream-fast" }, "expertstream-fast: quickest"), h("option", { value: "expertstream-coder" }, "expertstream-coder")),
-    ms.length ? h("optgroup", { label: "Models" }, ms.map(m => h("option", { value: m.id }, m.id))) : null);
+    ms.length ? h("optgroup", { label: "Models" }, ms.map(m => h("option", { value: m.id }, m.id))) : null,
+    ...Object.entries(groups).map(([name, list]) => h("optgroup", { label: name }, list.map(m => h("option", { value: m.id }, m.id.split("/").slice(1).join("/") + (m.free ? " (free)" : ""))))));
   sel.value = ids.includes(cur) ? cur : "auto";
 }
 for (const [id, out] of [["#pTemp", "#pTempV"], ["#pMax", "#pMaxV"]]) $(id).addEventListener("input", e => $(out).textContent = e.target.value);
@@ -539,7 +626,7 @@ function renderChat() {
   box.replaceChildren(...CHAT.map(m => {
     const txt = h("div", { class: "txt" + (m.error ? " err" : "") }, m.content);
     if (m.pending) txt.append(h("span", { class: "caret" }));
-    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? "server " + x.node : null, x.model, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
+    const x = m.stats, stats = x ? h("div", { class: "stats" }, [x.node ? (x.provider ? x.node : "server " + x.node) : null, x.model, x.cost_usd != null ? usd(x.cost_usd) : null, x.cache === "hit" ? "from cache in " + x.cache_ms + " ms" : null,
       x.ttft_s != null ? "first word " + x.ttft_s.toFixed(2) + " s" : null, x.tps ? x.tps.toFixed(1) + " tok/s" : null, x.tokens ? x.tokens + " tokens" : null].filter(Boolean).map(t => h("span", { class: "chip" }, t))) : null;
     return h("div", { class: "msg " + m.role }, h("div", { class: "av" }, m.role === "user" ? "You" : icon("spark")), h("div", { class: "body" }, h("div", { class: "who" }, m.role === "user" ? "You" : "ExpertCloud"), txt, stats));
   }));
@@ -651,7 +738,7 @@ async function renderBilling() {
       h("span", { class: "muted", style: "font-size:13px" }, "Your " + PLANSDATA.products[billTab].title + " plan: ", h("b", {}, mine.name), mine.expires ? " · until " + dateOf(mine.expires) : "")),
     h("div", { class: "plans3", style: "margin-bottom:16px" }, planCards(billTab, planButton(billTab))),
     h("p", { class: "note", style: "margin:0 0 16px" }, "Plans last 30 days from payment. Paying again for the same plan adds 30 days; a different plan starts now. Prices include all charges shown at checkout."),
-    billTab === "cloud" ? storageCard() : null,
+    billTab === "cloud" ? storageCard() : "",
     h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Payments")),
       pays.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Date", "Plan", "Amount", "Status", "Payment id"].map(t => h("th", {}, t)))),
         h("tbody", {}, pays.map(x => h("tr", {}, h("td", {}, dateOf(x.created)), h("td", {}, (plansFind(x.plan) || {}).label || x.plan), h("td", {}, inr(x.amount_paise / 100)),
@@ -663,7 +750,7 @@ function storageCard() {
   return h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "hd" }, h("h3", {}, "Database space"), h("span", { class: "sub" }, inr(st.price_inr_per_gb || 30) + " per extra GB a month")),
     h("div", { class: "bd" },
       h("div", { class: "bar" }, h("div", { class: "t" }, h("span", {}, "Used"), h("b", {}, gbs(used) + " of " + gbs(st.quota_bytes || 0))), h("div", { class: "track" }, h("div", { class: "fill" + (pct > 85 ? " hot" : ""), style: "width:" + pct + "%" }))),
-      h("p", { class: "muted", style: "margin:0 0 12px;font-size:13px" }, "Your plan includes " + gbs(st.plan_bytes || 0) + (st.extra_gb ? ", plus " + st.extra_gb + " GB extra" : "") + "."),
+      h("p", { class: "muted", style: "margin:0 0 12px;font-size:13px" }, "Your plan includes " + gbs(st.plan_bytes || 0) + (st.extra_gb ? ", plus " + st.extra_gb + " GB extra" : "") + (st.compute_gb ? ", plus " + st.compute_gb + " GB with your Compute tier" : "") + "."),
       (st.addons || []).length ? h("ul", { class: "list", style: "margin:0 -18px 12px;border-top:1px solid var(--line)" }, st.addons.map(x => h("li", {}, h("span", { class: "nm" }, x.gb + " GB extra"), h("span", { class: "meta" }, "until " + dateOf(x.expires))))) : null,
       h("button", { class: "btn primary", onclick: buyStorage }, "Buy more space")));
 }
