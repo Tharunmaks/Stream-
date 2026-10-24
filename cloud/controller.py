@@ -114,8 +114,8 @@ class Controller:
         key = lambda m: m.get("size_mb") or 0
         return (min(warm, key=key) if model == "expertstream-fast" else max(warm, key=key))["id"]
 
-    def score(self, node, model, ctx_tokens):
-        """Higher is better; None if the node cannot take the request now."""
+    def score(self, node, model, ctx_tokens, fast=False):
+        """Higher is better; None if the node cannot take the request now. fast=True (a compute tier) weighs measured speed more."""
         m = node.models.get(model)
         if not m or node.active >= node.capacity: return None
         free_mb = float(node.load.get("ram_free_mb") or 0)
@@ -124,13 +124,17 @@ class Controller:
         s += 2.0 / (1 + (node.ttft if node.ttft is not None else 2.0))         # 2. rolling time to first token
         s += 1.0 if free_mb >= need_mb else -3.0                               # 3. RAM for the model and the context
         s += 3.0 if m.get("warm") else 0.0                                     # 4. weights already warm on that node
-        s += 0.5 * min((node.tps or 0) / 20, 1)                                # measured speed
+        s += (3.0 if fast else 0.5) * min((node.tps or 0) / 20, 1)             # measured speed
         s -= 1.0 * min(node.failures, 3) / 3                                   # recent failures
         s -= 0.5 * float(node.load.get("cpu_pct") or 0) / 100                  # busy with other work
         return s
 
-    def ranked(self, model, ctx_tokens, exclude=()):
-        c = [(self.score(n, model, ctx_tokens), n) for n in self.online() if n.id not in exclude]
+    @staticmethod
+    def big_enough(node, min_ram_mb):
+        return float((node.caps or {}).get("ram_mb") or 0) >= min_ram_mb
+
+    def ranked(self, model, ctx_tokens, exclude=(), min_ram_mb=0, fast=False):
+        c = [(self.score(n, model, ctx_tokens, fast), n) for n in self.online() if n.id not in exclude and self.big_enough(n, min_ram_mb)]
         return [n for s, n in sorted((x for x in c if x[0] is not None), key=lambda x: -x[0])]
 
     # ---- waiting for a slot (contributors first) ----
@@ -149,16 +153,20 @@ class Controller:
             pass
 
     # ---- running a request ----
-    async def run(self, model, messages, params, priority=1, queue_timeout=120.0):
+    async def run(self, model, messages, params, priority=1, queue_timeout=120.0, min_ram_mb=0, fast=False):
         """Async generator of ("delta", text) and finally ("done", info). Fails over to the next best node if one drops or errors
-        before its first token; raises RuntimeError when no node can serve."""
+        before its first token; raises RuntimeError when no node can serve. min_ram_mb (a compute tier) keeps the request on
+        computers with that much memory while any of them has the model online; otherwise any computer serves it."""
         target = self.resolve(model)
         if not target: raise RuntimeError("no online node has model %r" % model)
+        if min_ram_mb and not any(n.models.get(target) and self.big_enough(n, min_ram_mb) for n in self.online()): min_ram_mb = 0
         ctx = sum(len(m.get("content") or "") for m in messages if isinstance(m.get("content"), str)) // 4 + int(params.get("max_tokens") or 512)
         tried, deadline, last_err = set(), time.time() + queue_timeout, "busy"
         while True:
-            cands = self.ranked(target, ctx, tried)
+            cands = self.ranked(target, ctx, tried, min_ram_mb, fast)
             if not cands:
+                if min_ram_mb and not any(n.models.get(target) and self.big_enough(n, min_ram_mb) for n in self.online() if n.id not in tried):
+                    min_ram_mb = 0; continue   # the big computers dropped out: fall back to any computer
                 if not any(n.models.get(target) for n in self.online() if n.id not in tried): raise RuntimeError("no node left for %s (%s)" % (target, last_err))
                 if time.time() > deadline: raise RuntimeError("all nodes busy for %.0f s" % queue_timeout)
                 await self.wait_slot(priority, max(0.05, deadline - time.time()))
@@ -188,7 +196,8 @@ class Controller:
                         self.store.credit_node(node.id, node.owner_hash, gen)
                         gtps = float(msg.get("tps") or 0)
                         self.tps_window.append((time.time(), gen, gen / gtps if gtps > 0 else time.time() - t0 - (first or 0)))   # generation time
-                        yield ("done", dict(node=node.name, node_id=node.id, model=target, usage=usage, ttft=first, tps=msg.get("tps")))
+                        yield ("done", dict(node=node.name, node_id=node.id, model=target, usage=usage, ttft=first, tps=msg.get("tps"),
+                                            ram_gb=round(float((node.caps or {}).get("ram_mb") or 0) / 1024, 1)))
                         return
                     else:   # error or lost connection
                         node.failures += 1

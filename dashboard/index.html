@@ -133,6 +133,9 @@
       <!-- Billing -->
       <section data-view="billing" hidden><div id="billingView"></div></section>
 
+      <!-- AI providers -->
+      <section data-view="providers" hidden><div id="providersView"></div></section>
+
       <!-- Connect -->
       <section data-view="connect" hidden>
         <div class="banner warn" id="lanWarn" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
@@ -217,11 +220,11 @@ $("#themeBtn").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- navigation
-const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["users", "Users"], ["billing", "Billing"], ["keys", "API keys"], ["connect", "Connect"]];
+const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["users", "Users"], ["billing", "Billing"], ["providers", "AI providers"], ["keys", "API keys"], ["connect", "Connect"]];
 let VIEW = "overview";
 for (const [id, label] of VIEWS) {
   $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id), h("span", {}, label), id === "nodes" ? h("span", { class: "count", id: "navNodes" }, "0") : null));
-  if (id !== "keys" && id !== "connect") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label));
+  if (id !== "keys" && id !== "connect" && id !== "providers") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label));
 }
 document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
 function go(id) {
@@ -233,6 +236,7 @@ function go(id) {
   if (id === "keys") loadKeys();
   if (id === "users") loadUsers();
   if (id === "billing") loadBilling();
+  if (id === "providers") loadProviders();
   if (id === "playground" && matchMedia("(min-width: 761px)").matches) setTimeout(() => $("#prompt").focus(), 30);
   render();
 }
@@ -503,6 +507,41 @@ async function loadBilling() {
         : emptyState("billing", "No payments yet", "Payments made in your users' console show up here.")));
   if (!PLANLIST.cloud) { try { PLANLIST = (await api("/admin/users")).plans; loadBilling(); } catch {} }
 }
+// ---------------------------------------------------------------- AI providers (the owner's keys serve free models to everyone)
+async function loadProviders() {
+  let d; try { d = await api("/admin/providers"); } catch (e) { if (e instanceof AuthError) return showLogin(e.message); return toast(e.message, "bad"); }
+  const mine = Object.fromEntries(d.keys.map(k => [k.provider, k])), usd = v => v == null ? "—" : "$" + (+v).toFixed(v < 0.01 && v > 0 ? 4 : 2);
+  const freeOnes = d.catalog.filter(p => p.free_models);
+  const total = d.usage.reduce((a, x) => a + x.requests, 0);
+  $("#providersView").replaceChildren(
+    h("div", { class: "grid kpis", style: "grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" },
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Providers in the catalog"), h("div", { class: "v" }, fmt(d.catalog.length))),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Offered free to users"), h("div", { class: "v" }, fmt(d.keys.length)), h("div", { class: "s" }, "with your keys")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Provider requests, 31 days"), h("div", { class: "v" }, fmt(total)))),
+    d.keys_ready ? "" : h("div", { class: "banner bad" }, h("span", {}, "Install the cryptography package on this server to save provider keys: pip install cryptography")),
+    h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "hd" }, h("h3", {}, "Free models for every user"), h("span", { class: "sub" }, "your key, only the models marked free")),
+      h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Provider", "Free tier", "Free models", "Your key", ""].map(t => h("th", {}, t)))),
+        h("tbody", {}, freeOnes.map(p => h("tr", {}, h("td", {}, p.name), h("td", { class: "muted" }, p.free_tier), h("td", {}, fmt(p.free_models)),
+          h("td", {}, mine[p.id] ? h("code", {}, mine[p.id].hint) : h("span", { class: "muted" }, "none")),
+          h("td", { class: "r" }, h("button", { class: "btn sm" + (mine[p.id] ? "" : " primary"), onclick: () => ownerKey(p, mine[p.id]) }, mine[p.id] ? "Change" : "Add key"),
+            mine[p.id] ? h("button", { class: "btn sm ghost", onclick: async () => { try { await api("/admin/providers/" + p.id, { method: "DELETE" }); toast("Removed", "ok"); loadProviders(); } catch (e) { toast(e.message, "bad"); } } }, "Remove") : null,
+            p.signup ? h("a", { class: "btn sm ghost", href: p.signup, target: "_blank", rel: "noopener noreferrer" }, "Get a key") : null))))))),
+    h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Usage by provider and model"), h("span", { class: "sub" }, "all users, last 31 days")),
+      d.usage.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Provider", "Model", "Key", "Requests", "Tokens in", "Tokens out", "Est. cost"].map(t => h("th", {}, t)))),
+        h("tbody", {}, d.usage.map(x => h("tr", {}, h("td", {}, x.provider), h("td", {}, h("code", {}, x.model)), h("td", {}, x.via === "own" ? "user's" : "yours (free)"),
+          h("td", {}, fmt(x.requests)), h("td", {}, fmt(x.prompt_tokens)), h("td", {}, fmt(x.completion_tokens)), h("td", {}, usd(x.cost_usd)))))))
+        : emptyState("models", "No provider usage yet", "Requests to provider/model names show up here.")),
+    h("p", { class: "note" }, "Prices and models come from gateway/providers.py; correct or add any of them with a providers.json next to expertcloud.db. Keep EXPERTCLOUD_SECRET the same across restarts, or saved keys cannot be read."));
+}
+function ownerKey(p, k) {
+  const key = h("input", { class: "input", type: "password", placeholder: k ? "saved " + k.hint + " (paste to replace)" : "API key", autocomplete: "off", spellcheck: "false" });
+  const fields = p.fields.map(f => [f, h("input", { class: "input", placeholder: f, value: (k && k.fields[f]) || "" })]);
+  modal(p.name + ": free models for everyone", [key, ...fields.map(([, i]) => i), h("p", { class: "note" }, "Users get only the models marked free on " + p.name + "'s free tier through this key; paid models need their own key.")],
+    close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
+      try { await api("/admin/providers/" + p.id, { method: "PUT", body: JSON.stringify({ key: key.value, check: true, fields: Object.fromEntries(fields.map(([f, i]) => [f, i.value.trim()])) }) }); close(); toast("Saved", "ok"); loadProviders(); }
+      catch (e) { toast(e.message, "bad"); } } }, "Check and save")]);
+}
+
 // ---------------------------------------------------------------- connect
 let connectSig = "";
 function renderConnect(L) {
