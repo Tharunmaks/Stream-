@@ -16,6 +16,10 @@
   the model and context, weights already warm, measured speed); if a node drops or fails before its first token, the next one
   takes the request at once. When every node is busy, requests wait, contributors first.
 * Workers join at /cloud/ws with the join token (dashboard, or GET /admin/join).
+* Model catalog (gateway/catalog.py): 54 open models by short id (llama-3.3-70b, qwen3-8b ...), deployed to computers in one click.
+  Models of 8B and smaller are free within the plan's limits; bigger ones are billed per token from prepaid credits in rupees.
+* Plans Pro, Turbo, Ultra, Max (no free plan): from Turbo on, requests go to computers with enough RAM, fastest first, at the front
+  of the queue. An account without a plan can sign in and buy one, but makes no AI requests.
 
 The admin token and join token are made on first start, stored in expertcloud.db and written to ~/.expertcloud/ (mode 600).
 """
@@ -41,7 +45,7 @@ sys.path.insert(0, ROOT)
 from cloud.controller import ALIASES, Controller, Node  # noqa: E402
 from gateway.compress import compress_messages, est_tokens  # noqa: E402
 from gateway.store import Store, default_db, key_hash  # noqa: E402
-from gateway import billing, plans as plans_mod  # noqa: E402
+from gateway import billing, catalog, plans as plans_mod  # noqa: E402
 from gateway.database import DbError, DocStore  # noqa: E402
 
 OPTS = dict(open_signup=False, similar=0.0, rate_per_min=120, queue_timeout=120.0, host="127.0.0.1", port=8000)
@@ -52,6 +56,8 @@ app = FastAPI(title="ExpertStream OmniRoute Gateway", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["Authorization", "Content-Type", "x-api-key"])
 PLANS = plans_mod.PLANS
 DOCS = None
+CAT = catalog.MODELS   # the model catalog (catalog.json applied in init)
+DEPLOYS = {}           # catalog id -> {node, state, message, started}: deploys started from the dashboard
 STORE = None
 CTRL = None
 ADMIN = None
@@ -129,6 +135,8 @@ def auth(request, count=False):
         request.state.uid, request.state.plan = uid, plan
         # the plan's per-minute limit is for AI requests; database and other API calls share a roomier one
         rate = plan["limits"].get("requests_per_min", rate) if count else max(120, 2 * plan["limits"].get("requests_per_min", 0))
+        if count and plan["id"] == plans_mod.NO_PLAN["id"]:
+            return None, err(402, "pick a plan to make AI requests: Pro, Turbo, Ultra or Max, in the console under Plans & billing", "billing_error")
         if count and STORE.requests_today(uid) >= plan["limits"].get("requests_per_day", 1 << 30):
             return None, err(429, "you used today's %d requests on the %s plan: upgrade for more, or wait until midnight UTC"
                              % (plan["limits"]["requests_per_day"], plan["name"]), "rate_limit_error")
@@ -152,8 +160,19 @@ def admin_only(request):
 async def v1_models(request: Request):
     h, e = auth(request)
     if e: return e
-    data = [dict(id=a, object="model", owned_by="expertcloud", alias_for=CTRL.resolve(a)) for a in sorted(ALIASES)] + CTRL.models()
-    return {"object": "list", "data": data}
+    data = [dict(id=a, object="model", owned_by="expertcloud", alias_for=CTRL.resolve(a)) for a in sorted(ALIASES)]
+    online = {m["id"]: m for m in CTRL.models()}
+    for m in CAT.values():   # catalog models that run now, by their short id
+        if m["served_as"] in online: data.append(catalog_view(m, online))
+    listed = {m["served_as"] for m in CAT.values()}
+    return {"object": "list", "data": data + [m for m in online.values() if m["id"] not in listed]}
+
+
+def catalog_view(m, online):
+    o = online.get(m["served_as"])
+    return dict(id=m["id"], object="model", owned_by="expertcloud", served_as=m["served_as"], name=m["name"], family=m["family"], params=m["params"], context=m["ctx"],
+                tags=m["tags"], free=m["free"], price_in_inr=m["price_in"], price_out_inr=m["price_out"], size_gb=m["size_gb"],
+                min_ram_gb=m["min_ram_gb"], online=bool(o), nodes=o["nodes"] if o else 0, warm=bool(o and o["warm_nodes"]))
 
 
 def admin_use(completion_tokens=0, saved=0, cache_hits=0):
@@ -196,6 +215,17 @@ async def chat(request: Request):
     if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) for m in messages):
         return err(400, "messages must be a non-empty list of {role, content}")
     model = str(body.get("model") or "auto")
+    entry = catalog.lookup(CAT, model)
+    if entry:
+        model = entry["served_as"]   # the name the computers serve it under
+        if not any(m["id"] == model for m in CTRL.models()):
+            return err(503, "%s is in the catalog but no computer runs it right now%s" % (entry["id"], "" if h != "admin" else
+                       ": deploy it from the dashboard (Model catalog)"), "server_error")
+        if not entry["free"] and h != "admin":
+            if not request.state.uid: return err(402, "%s is a paid model: use a key made in a console account with credits" % entry["id"], "insufficient_quota")
+            if STORE.credit_balance(request.state.uid) <= 0:
+                return err(402, "%s costs Rs %g / Rs %g per million tokens (in / out): add credits in Plans & billing"
+                           % (entry["id"], entry["price_in"], entry["price_out"]), "insufficient_quota")
     params = {k: body.get(k) for k in ("max_tokens", "temperature", "top_p", "top_k", "seed", "stop") if body.get(k) is not None}
     if "max_completion_tokens" in body and "max_tokens" not in params: params["max_tokens"] = body["max_completion_tokens"]
     plan = request.state.plan
@@ -240,9 +270,11 @@ async def chat(request: Request):
             return {"id": cid, "object": "chat.completion", "created": created, "model": target, "usage": usage, "x_expertcloud": extra,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": cached["text"]}, "finish_reason": "stop"}]}
 
-    # queue order: 0 first (admin, Max plan, contributors), then Pro, then Free
+    # queue order: 0 first (admin, Turbo, Ultra, Max, contributors), then Pro
     prio = 0 if not acct or STORE.contribution(acct) > 0 else int(plan["limits"].get("priority", 1)) if plan else 1
-    gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"])
+    tier = plan["limits"] if plan else {}   # from Turbo on: only computers this big, fastest first
+    gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"],
+                   min_ram_mb=int(tier.get("min_ram_gb") or 0) * 1024, fast=bool(tier.get("prefer_fast")))
 
     async def finish(text, info):
         usage = dict(info.get("usage") or {})
@@ -253,6 +285,10 @@ async def chat(request: Request):
         else: admin_use(completion_tokens=ct, saved=saved)
         if use_cache and text: STORE.cache_put(ck, info.get("model") or target, prompt_text(messages), dict(text=text, usage=usage))
         extra = dict(cache="miss" if use_cache else "off", tokens_saved=saved, node=info.get("node"), ttft_s=info.get("ttft"), tps=info.get("tps"))
+        if entry and request.state.uid:
+            paise = catalog.cost_paise(entry, pt, ct)
+            STORE.model_use(request.state.uid, entry["id"], pt, ct, paise)
+            extra.update(model_id=entry["id"], cost_inr=paise / 100)
         return usage, extra
 
     if stream:
@@ -422,7 +458,7 @@ async def account(request: Request):
     use = STORE.user_usage(u[0])
     row = STORE.db.execute("SELECT created FROM users WHERE id=?", (u[0],)).fetchone()
     cp = user_plan(u[0])
-    return dict(username=u[1], created=row[0], usage=use, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
+    return dict(username=u[1], created=row[0], usage=use, credits_inr=STORE.credit_balance(u[0]) / 100, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
                 storage=dict(quota_bytes=quota(u[0], cp["limits"]), plan_bytes=int(cp["limits"].get("db_mb", 1024)) << 20, extra_gb=STORE.extra_gb(u[0]),
                              addons=STORE.storage_addons(u[0]), price_inr_per_gb=plans_mod.STORAGE["price_inr_per_gb"]),
                 plan=dict(id=cp["id"], name=cp["name"], expires=cp["expires"], limits=cp["limits"], contributor=use["contributed_tokens"] > 0),
@@ -441,7 +477,7 @@ async def account_new_key(request: Request):
     if not u: return err(401, "sign in first", "authentication_error")
     cap = int(user_plan(u[0])["limits"].get("api_keys", 20))
     if len([k for k in STORE.user_keys(u[0]) if not k["revoked"]]) >= cap:
-        return err(402, "your plan allows %d API key%s: revoke one or upgrade" % (cap, "" if cap == 1 else "s"))
+        return err(402, "pick a plan to make API keys" if cap == 0 else "your plan allows %d API key%s: revoke one or upgrade" % (cap, "" if cap == 1 else "s"))
     b = await body_of(request)
     return {"key": STORE.new_key(str(b.get("label") or "my key")[:64], u[0])}
 
@@ -526,7 +562,7 @@ def apps_view():
 @app.get("/plans")
 async def list_plans():
     """Every plan of both products, in INR a month, and whether online payment is switched on."""
-    return {"currency": "INR", "period_days": plans_mod.PERIOD_DAYS, "products": PLANS, "storage": plans_mod.STORAGE,
+    return {"currency": "INR", "period_days": plans_mod.PERIOD_DAYS, "products": PLANS, "storage": plans_mod.STORAGE, "credits": plans_mod.CREDITS,
             "payments": billing.configured(rzp_keys()), "apps": apps_view()}
 
 
@@ -543,6 +579,10 @@ async def account_plans(request: Request):
 def activate(order_id, payment_id):
     pay = STORE.payment(order_id)
     if not pay or not STORE.mark_paid(order_id, payment_id): return False
+    if pay["plan"].startswith("credits:"):   # prepaid credits for paid models
+        STORE.add_credits(pay["user_id"], int(pay["plan"].split(":", 1)[1]) * 100, "purchase", order_id)
+        print("payment %s: %s for user %d" % (payment_id, pay["plan"], pay["user_id"]), flush=True)
+        return True
     if pay["plan"].startswith("storage:"):   # extra database space for 30 days
         STORE.add_storage(pay["user_id"], int(pay["plan"].split(":", 1)[1]), plans_mod.PERIOD_DAYS, order_id)
         print("payment %s: %s for user %d" % (payment_id, pay["plan"], pay["user_id"]), flush=True)
@@ -565,6 +605,12 @@ async def checkout(request: Request):
         except (TypeError, ValueError): return err(400, "storage_gb must be a whole number")
         if not st["min_gb"] <= gb <= st["max_gb"]: return err(400, "buy between %d and %d GB" % (st["min_gb"], st["max_gb"]))
         item, price, desc = "storage:%d" % gb, gb * st["price_inr_per_gb"], "%d GB extra database space (30 days)" % gb
+    elif b.get("credits_inr") is not None:
+        cr = plans_mod.CREDITS
+        try: inr = int(b["credits_inr"])
+        except (TypeError, ValueError): return err(400, "credits_inr must be a whole number of rupees")
+        if not cr["min_inr"] <= inr <= cr["max_inr"]: return err(400, "buy between Rs %d and Rs %d of credits" % (cr["min_inr"], cr["max_inr"]))
+        item, price, desc = "credits:%d" % inr, inr, "Rs %d of model credits" % inr
     else:
         product, plan = plans_mod.find(PLANS, str(b.get("plan") or ""))
         if not plan or plan["price_inr"] <= 0: return err(400, "pick a paid plan")
@@ -591,6 +637,7 @@ async def verify(request: Request):
     if not billing.payment_signature_ok(rzp_keys(), order_id, payment_id, b.get("signature")): return err(400, "the payment could not be verified")
     activate(order_id, payment_id)   # False when the webhook was first: the plan is already on
     if pay["plan"].startswith("storage:"): return {"ok": True, "extra_gb": STORE.extra_gb(u[0])}
+    if pay["plan"].startswith("credits:"): return {"ok": True, "credits_inr": STORE.credit_balance(u[0]) / 100}
     product, _ = plans_mod.find(PLANS, pay["plan"])
     return {"ok": True, "plan": plan_view(u[0], product)}
 
@@ -662,6 +709,81 @@ async def admin_set_plan(username: str, request: Request):
     if plan["price_inr"] == 0: STORE.end_subscription(uid, product); return {"ok": True}
     days = b.get("days", plans_mod.PERIOD_DAYS)
     return {"ok": True, "expires": STORE.set_subscription(uid, product, plan["id"], None if days is None else float(days), "owner")}
+
+
+# ---------------------------------------------------------------------------------------------------------------- model catalog
+def catalog_list():
+    online = {m["id"]: m for m in CTRL.models()}
+    return [catalog_view(m, online) for m in sorted(CAT.values(), key=lambda m: (m["family"], m["size_gb"]))]
+
+
+@app.get("/catalog")
+async def catalog_public():
+    """Every model of the catalog: price in rupees per million tokens, free or paid, size, and whether a computer runs it now."""
+    ms = catalog_list()
+    return {"currency": "INR", "unit": "per 1M tokens", "models": ms, "count": len(ms), "free": sum(m["free"] for m in ms),
+            "online": sum(m["online"] for m in ms)}
+
+
+@app.get("/account/credits")
+async def account_credits(request: Request):
+    """The caller's credit balance, purchases and gifts, and usage by model over the last 31 days."""
+    u = user_of(request)
+    if not u: return err(401, "sign in first", "authentication_error")
+    return dict(credits_inr=STORE.credit_balance(u[0]) / 100, log=[dict(x, inr=x["paise"] / 100) for x in STORE.credit_log(u[0])],
+                usage=[dict(x, inr=x["paise"] / 100) for x in STORE.model_usage(u[0])], limits=plans_mod.CREDITS)
+
+
+@app.get("/admin/catalog")
+async def admin_catalog(request: Request):
+    """The catalog with where each model runs, deploys in progress, and everyone's usage by model."""
+    e = admin_only(request)
+    if e: return e
+    where = {}
+    for n in CTRL.online():
+        for name in n.models: where.setdefault(name, []).append(n.name)
+    ms = [dict(m, running_on=where.get(CAT[m["id"]]["served_as"], []), deploy=DEPLOYS.get(m["id"])) for m in catalog_list()]
+    return dict(models=ms, usage=[dict(x, inr=x["paise"] / 100) for x in STORE.model_usage()],
+                nodes=[dict(id=n.id, name=n.name, ram_mb=(n.caps or {}).get("ram_mb"), disk_free_mb=(n.caps or {}).get("disk_free_mb")) for n in CTRL.online()])
+
+
+async def deploy_job(m, node):
+    DEPLOYS[m["id"]] = dict(node=node.name, state="downloading", message="", started=time.time())
+    res = await CTRL.deploy(node.id, m["repo"], m["file"])
+    DEPLOYS[m["id"]].update(state="done" if res.get("ok") else "failed", message=str(res.get("message") or "")[:300])
+
+
+@app.post("/admin/catalog/{mid}/deploy")
+async def admin_catalog_deploy(mid: str, request: Request):
+    """Download a catalog model onto a computer: {"node_id": ...}, or no body to pick the computer with enough RAM and disk."""
+    e = admin_only(request)
+    if e: return e
+    m = CAT.get(mid)
+    if not m: return err(404, "no such model in the catalog")
+    if (DEPLOYS.get(mid) or {}).get("state") == "downloading": return err(409, "%s is already being deployed" % mid)
+    b = await body_of(request)
+    if b.get("node_id"):
+        node = CTRL.nodes.get(str(b["node_id"]))
+        if not node: return err(404, "no such computer online")
+    else:
+        node = catalog.pick_node(m, CTRL.online())
+        if not node: return err(409, "no computer online has %.0f GB of RAM and %.0f GB of free disk for %s, or every one already has it"
+                                % (m["min_ram_gb"], m["size_gb"] + 2, mid))
+    asyncio.create_task(deploy_job(m, node))
+    return {"ok": True, "model": mid, "node": node.name, "size_gb": m["size_gb"]}
+
+
+@app.post("/admin/users/{username}/credits")
+async def admin_give_credits(username: str, request: Request):
+    """Give (or, negative, take) credits by hand: {"inr": 500}."""
+    e = admin_only(request)
+    if e: return e
+    uid = STORE.user_id(username)
+    if not uid: return err(404, "no such user")
+    b = await body_of(request)
+    try: inr = float(b.get("inr"))
+    except (TypeError, ValueError): return err(400, "inr must be a number")
+    return {"ok": True, "credits_inr": STORE.add_credits(uid, round(inr * 100), "owner") / 100}
 
 
 # ---------------------------------------------------------------------------------------------------------------- database
@@ -982,11 +1104,12 @@ async def health():
 
 def init(db_path, rotate=False):
     global STORE, CTRL, ADMIN, JOIN
-    global PLANS, DOCS
+    global PLANS, DOCS, CAT
     STORE = Store(db_path)
     CTRL = Controller(STORE)
     base = os.path.dirname(os.path.abspath(db_path))
     PLANS = plans_mod.load(os.environ.get("EXPERTCLOUD_PLANS") or os.path.join(base, "plans.json"))
+    CAT = catalog.load(os.environ.get("EXPERTCLOUD_CATALOG") or os.path.join(base, "catalog.json"))
     DOCS = DocStore(os.environ.get("EXPERTCLOUD_DATA") or os.path.join(base, "clouddata"), legacy=os.path.join(base, "clouddata.db"))
     if rotate:
         STORE.set_setting("admin_token", "adm-" + secrets.token_urlsafe(24))

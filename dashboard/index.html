@@ -133,6 +133,9 @@
       <!-- Billing -->
       <section data-view="billing" hidden><div id="billingView"></div></section>
 
+      <!-- Model catalog -->
+      <section data-view="catalog" hidden><div id="catalogView"></div></section>
+
       <!-- Connect -->
       <section data-view="connect" hidden>
         <div class="banner warn" id="lanWarn" hidden><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
@@ -217,11 +220,11 @@ $("#themeBtn").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------- navigation
-const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["users", "Users"], ["billing", "Billing"], ["keys", "API keys"], ["connect", "Connect"]];
+const VIEWS = [["overview", "Overview"], ["playground", "Playground"], ["nodes", "Nodes"], ["users", "Users"], ["catalog", "Model catalog"], ["billing", "Billing"], ["keys", "API keys"], ["connect", "Connect"]];
 let VIEW = "overview";
 for (const [id, label] of VIEWS) {
   $("#sideNav").append(h("button", { class: "nav", "data-nav": id, onclick: () => go(id) }, icon(id), h("span", {}, label), id === "nodes" ? h("span", { class: "count", id: "navNodes" }, "0") : null));
-  if (id !== "keys" && id !== "connect") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label));
+  if (id !== "keys" && id !== "connect" && id !== "catalog") $("#mobNav").append(h("button", { "data-nav": id, onclick: () => go(id) }, icon(id), label));
 }
 document.addEventListener("click", e => { const g = e.target.closest("[data-go]"); if (g) go(g.dataset.go); });
 function go(id) {
@@ -233,6 +236,7 @@ function go(id) {
   if (id === "keys") loadKeys();
   if (id === "users") loadUsers();
   if (id === "billing") loadBilling();
+  if (id === "catalog") loadCatalog();
   if (id === "playground" && matchMedia("(min-width: 761px)").matches) setTimeout(() => $("#prompt").focus(), 30);
   render();
 }
@@ -452,13 +456,15 @@ function giveSpace(u) {
       catch (e) { toast(e.message, "bad"); } } }, "Give")]);
 }
 function changePlan(u) {
-  const sel = h("select", { class: "input" }, Object.entries(PLANLIST).map(([k, v]) => h("optgroup", { label: v.title }, v.plans.map(p => h("option", { value: p.id }, v.title + " " + p.name + " · " + inr(p.price_inr) + "/month")))));
-  sel.value = u.plans.cloud.id;
+  const sel = h("select", { class: "input" }, Object.entries(PLANLIST).map(([k, v]) => h("optgroup", { label: v.title },
+    v.plans.some(p => !p.price_inr) ? "" : h("option", { value: "none:" + k }, v.title + ": no plan"),
+    v.plans.map(p => h("option", { value: p.id }, v.title + " " + p.name + " · " + inr(p.price_inr) + "/month")))));
+  sel.value = u.plans.cloud.id === "none" ? "none:cloud" : u.plans.cloud.id;
   const days = h("select", { class: "input" }, [["30", "30 days"], ["90", "90 days"], ["365", "1 year"], ["", "No end date"]].map(([v, l]) => h("option", { value: v }, l)));
-  modal("Change plan for " + u.username, [h("p", { class: "muted", style: "margin:0 0 12px" }, "For people who paid another way, friends or tests. Picking a Free plan ends that product's paid plan."),
+  modal("Change plan for " + u.username, [h("p", { class: "muted", style: "margin:0 0 12px" }, "For people who paid another way, friends or tests. Picking a Free plan or \"no plan\" ends that product's paid plan."),
     h("div", { class: "field" }, h("label", { class: "f" }, "Plan"), sel), h("div", { class: "field" }, h("label", { class: "f" }, "For"), days)],
     close => [h("button", { class: "btn", onclick: close }, "Cancel"), h("button", { class: "btn primary", onclick: async () => {
-      try { await api("/admin/users/" + encodeURIComponent(u.username) + "/plan", { method: "POST", body: JSON.stringify({ plan: sel.value, days: days.value ? +days.value : null }) }); close(); toast("Plan changed", "ok"); loadUsers(); }
+      try { await api("/admin/users/" + encodeURIComponent(u.username) + "/plan", { method: "POST", body: JSON.stringify(sel.value.startsWith("none:") ? { plan: null, product: sel.value.slice(5) } : { plan: sel.value, days: days.value ? +days.value : null }) }); close(); toast("Plan changed", "ok"); loadUsers(); }
       catch (e) { toast(e.message, "bad"); } } }, "Save")]);
 }
 
@@ -503,6 +509,35 @@ async function loadBilling() {
         : emptyState("billing", "No payments yet", "Payments made in your users' console show up here.")));
   if (!PLANLIST.cloud) { try { PLANLIST = (await api("/admin/users")).plans; loadBilling(); } catch {} }
 }
+// ---------------------------------------------------------------- model catalog (deploy open models, see what they earn)
+let catTimer = null;
+async function loadCatalog() {
+  clearTimeout(catTimer);
+  let d; try { d = await api("/admin/catalog"); } catch (e) { if (e instanceof AuthError) return showLogin(e.message); return toast(e.message, "bad"); }
+  const rs = v => "₹" + (+v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  const earned = d.usage.reduce((a, x) => a + x.inr, 0), running = d.models.filter(m => m.online).length;
+  const status = m => m.deploy && m.deploy.state === "downloading" ? h("span", { class: "st" }, "Downloading to " + m.deploy.node)
+    : m.online ? h("span", { class: "st on" }, "Running on " + m.running_on.join(", "))
+    : m.deploy && m.deploy.state === "failed" ? h("span", { class: "st off", title: m.deploy.message }, "Failed: " + m.deploy.message.slice(0, 40)) : h("span", { class: "muted" }, "Not running");
+  const deploy = async m => { try { const r = await api("/admin/catalog/" + encodeURIComponent(m.id) + "/deploy", { method: "POST", body: "{}" }); toast("Downloading " + m.id + " (" + m.size_gb + " GB) to " + r.node, "ok"); loadCatalog(); } catch (e) { toast(e.message, "bad"); } };
+  $("#catalogView").replaceChildren(
+    h("div", { class: "grid kpis", style: "grid-template-columns:repeat(auto-fit,minmax(200px,1fr))" },
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Models in the catalog"), h("div", { class: "v" }, fmt(d.models.length)), h("div", { class: "s" }, d.models.filter(m => m.free).length + " free")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Running now"), h("div", { class: "v" }, fmt(running)), h("div", { class: "s" }, "on " + d.nodes.length + " computers")),
+      h("div", { class: "card kpi" }, h("div", { class: "l" }, "Earned from credits, 31 days"), h("div", { class: "v" }, rs(earned)))),
+    h("div", { class: "card", style: "margin-bottom:16px" }, h("div", { class: "hd" }, h("h3", {}, "Models"), h("span", { class: "sub" }, "Deploy downloads the model from Hugging Face to the computer with the most free RAM that fits it")),
+      h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Model", "Id", "Size", "Needs RAM", "Price per 1M (in / out)", "Status", ""].map(t => h("th", {}, t)))),
+        h("tbody", {}, d.models.map(m => h("tr", {}, h("td", {}, m.name), h("td", {}, h("code", {}, m.id)), h("td", {}, m.size_gb + " GB"), h("td", {}, m.min_ram_gb + " GB"),
+          h("td", {}, m.free ? "Free" : rs(m.price_in_inr) + " / " + rs(m.price_out_inr)), h("td", {}, status(m)),
+          h("td", { class: "r" }, h("button", { class: "btn sm" + (m.online ? "" : " primary"), disabled: !d.nodes.length || (m.deploy && m.deploy.state === "downloading"), onclick: () => deploy(m) }, m.online ? "Deploy again" : "Deploy")))))))),
+    h("div", { class: "card" }, h("div", { class: "hd" }, h("h3", {}, "Usage by model"), h("span", { class: "sub" }, "all users, last 31 days")),
+      d.usage.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Model", "Requests", "Tokens in", "Tokens out", "Earned"].map(t => h("th", {}, t)))),
+        h("tbody", {}, d.usage.map(x => h("tr", {}, h("td", {}, h("code", {}, x.model)), h("td", {}, fmt(x.requests)), h("td", {}, fmt(x.prompt_tokens)), h("td", {}, fmt(x.completion_tokens)), h("td", {}, x.inr ? rs(x.inr) : "Free"))))))
+        : emptyState("models", "No usage yet", "Requests to catalog models show up here.")),
+    h("p", { class: "note" }, "Prices and models come from gateway/catalog.py; change prices, add models or hide some with a catalog.json next to expertcloud.db. Give a user credits: POST /admin/users/NAME/credits {\"inr\": 500}."));
+  if (VIEW === "catalog" && d.models.some(m => m.deploy && m.deploy.state === "downloading")) catTimer = setTimeout(loadCatalog, 5000);
+}
+
 // ---------------------------------------------------------------- connect
 let connectSig = "";
 function renderConnect(L) {

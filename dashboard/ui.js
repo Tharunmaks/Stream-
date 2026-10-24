@@ -35,7 +35,7 @@ const ICONS = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>', send: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   spark: '<path d="M12 3l1.9 5.8L20 10l-6.1 1.2L12 17l-1.9-5.8L4 10l6.1-1.2z"/>',
 };
-ICONS.users = ICONS.user; ICONS.billing = ICONS.card;
+ICONS.users = ICONS.user; ICONS.billing = ICONS.card; ICONS.catalog = ICONS.models;
 function icon(name) { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "i"); s.innerHTML = ICONS[name]; return s; }
 const fmt = n => n == null || isNaN(n) ? "—" : Math.abs(n) >= 1e9 ? (n / 1e9).toFixed(1) + "B" : Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(1) + "M" : Math.abs(n) >= 1e4 ? (n / 1e3).toFixed(1) + "k" : Math.round(n).toLocaleString();
 const mb = v => v == null || isNaN(v) ? "—" : v >= 1024 ? (v / 1024).toFixed(v >= 10240 ? 0 : 1) + " GB" : Math.round(v) + " MB";

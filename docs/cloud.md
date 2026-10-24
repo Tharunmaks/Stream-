@@ -76,11 +76,19 @@ and sign-ins to 10 failures per 10 minutes.
 
 **Plans** (monthly, INR; `gateway/plans.py`, override with a `plans.json` next to the database):
 
-| ExpertCloud | Price | Limits |
-|---|---|---|
-| Free | ₹0 | 25 AI requests/day, 5/min, answers ≤256 tokens, 1 API key, **1 GB database** (3 databases, 1 backup each) |
-| Pro | ₹1,700 | 2,000/day, 60/min, ≤4,096 tokens, 10 keys, **50 GB database** (50 databases, 10 backups each), faster queue |
-| Max | ₹4,000 | 10,000/day, 200/min, ≤8,192 tokens, 50 keys, **1 TB database** (500 databases, 50 backups each), front of the queue |
+One ladder and no free plan. A new account can sign in and buy a plan; until then it gets 402 for AI requests, API keys and
+databases. From Turbo on, requests go only to computers with at least that much memory (bigger models and longer contexts fit,
+nothing is swapped), the fastest measured ones first, at the front of the queue.
+
+| ExpertCloud | Price | Limits | Computers |
+|---|---|---|---|
+| Pro | ₹1,700 | 2,000 AI requests/day, 60/min, answers ≤4,096 tokens, 10 API keys, **50 GB database** (50 databases, 10 backups each) | any |
+| Turbo | ₹2,499 | 4,000/day, 100/min, ≤8,192 tokens, 20 keys, **150 GB database** (100 databases, 20 backups each), front of the queue | 16 GB+ RAM, fastest first |
+| Ultra | ₹3,299 | 6,000/day, 150/min, ≤8,192 tokens, 30 keys, **300 GB database** (200 databases, 30 backups each), front of the queue | 32 GB+ RAM, fastest first |
+| Max | ₹4,000 | 10,000/day, 200/min, ≤16,384 tokens, 50 keys, **1 TB database** (500 databases, 50 backups each), front of the queue | 64 GB+ RAM, fastest first |
+
+Honest limits: speed is what the cloud's own computers give (CPU inference: see the README's measurements), not Groq's custom
+chips. A plan can only use computers joined to this cloud; if no computer that big has the model online, any computer serves it.
 
 **Extra database space**: ₹30 per GB a month on top of any plan, bought in the console (Plans & billing, or Database > Buy more
 space) and paid with Razorpay; the owner can also give space by hand (Users > Give space). Price in `plans.json`: `{"storage": {"price_inr_per_gb": 30}}`.
@@ -121,6 +129,41 @@ Space counts document bytes and snapshot files against plan + extra space. Hones
 (`es_free`, `es_plus`, `es_pro`), and can keep their data in `/db/...`. The API allows calls from any website (CORS) since it uses
 bearer tokens. To move the app's current data over, export it as JSON and import it per collection. The console's app switcher
 opens the ExpertStream address set in the owner's Billing page.
+
+## Model catalog: 54 open models, included and paid (like a hosted inference service)
+
+ExpertCloud runs its own models; nothing is sent to another company's API. `gateway/catalog.py` lists 54 open models, each a
+Q4_K_M GGUF on Hugging Face: Llama 3.1/3.2/3.3, Qwen2.5 and Qwen3 (with Coder, Math, QwQ), Gemma 2 and 3, Phi-3.5 and Phi-4,
+Mistral 7B, Ministral 8B, Nemo and Small 24B, DeepSeek R1 distills and Coder V2 Lite, gpt-oss 20B, OLMoE, Granite, Hermes 3,
+Aya Expanse, Falcon3, InternLM2.5, Yi 1.5 and SmolLM2. Call them by short id:
+
+```sh
+curl http://HOST:8000/v1/chat/completions -H "Authorization: Bearer sk-expert-..." \
+     -d '{"model":"llama-3.3-70b","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+* **Deploy**: owner dashboard > Model catalog > Deploy (or `POST /admin/catalog/{id}/deploy`) downloads the model to the online
+  computer with the most free RAM that fits it (or a chosen `node_id`). The table shows the download and where each model runs.
+* **Included models**: the 35 models of 8B parameters and smaller cost nothing beyond the plan; its daily and per-minute limits apply.
+* **Paid models**: bigger ones are billed per million tokens, in rupees, from prepaid **credits** (Plans & billing > Model credits,
+  ₹100 to ₹1,00,000, paid with Razorpay; they do not expire). Starting prices: up to 11 GB (9B to 16B) ₹8 in / ₹16 out; up to 21 GB
+  (20B to 32B) ₹20 / ₹40; 70B and up ₹50 / ₹100. A request with no credits left gets 402; one request can take the balance a few
+  paise below zero. The owner can give credits: `POST /admin/users/NAME/credits {"inr": 500}`.
+* `GET /catalog` lists every model with its price and whether it runs now; `/v1/models` lists the ones that run; users see their
+  usage by model in Plans & billing, the owner sees everyone's usage and earnings in Model catalog.
+* Change prices, add models or hide some with a `catalog.json` next to the database (see `gateway/catalog.py`).
+
+## The console on GitHub Pages
+
+The repository's Pages workflow (`.github/workflows/pages.yml`, on every push to `main` that touches `docs/` or `dashboard/`)
+publishes this website plus a static copy of the ExpertCloud console at `https://tharunmaks.github.io/Stream-/cloud/`.
+Pages serves files only, so the gateway itself still runs on a computer or a Space; the copy talks to it over the API (CORS is open).
+
+* Set the server once for every visitor: repository Settings > Secrets and variables > Actions > Variables > `EXPERTCLOUD_API`
+  = `https://NAME-expertcloud.hf.space`, then run the workflow again (Actions > Deploy website to GitHub Pages > Run workflow).
+* Without it, the page asks each visitor for the address; `.../cloud/?api=https://...` sets it in a link.
+* The server must be `https://` (a Pages site cannot call plain `http://`, except `http://localhost` for testing on your own computer).
+* The owner dashboard stays on the gateway (`/dashboard`): it holds the admin token and is not published.
 
 ## Easiest way: the `cloud` command
 
