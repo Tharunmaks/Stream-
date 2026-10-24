@@ -4,6 +4,9 @@
  *   es_train moe train --experts-file F --layers L --experts E --dim D --ffn F --data FILE
  *                      [--topk 2] [--rank 8] [--steps 20] [--cache-mb 256] [--batch-seqs 4] [--seq 128]
  *                      [--balance 0.01 (router aux loss)] [--random-route] [--ternary (default; experts are always 2-bit ternary)]
+ *   es_train moe --sparse [--p6] --layers L --experts E --dim D --ffn F --experts-file F --data FILE [--batch 8] [--seq 128]
+ *                      [--steps 100] [--eval-every 25] [--save OUT.ckpt] [--threads N]   es-sparse-v1 (moe/es_sparse.c): packed
+ *                      int4 experts mmap'd in place, top-1, LoRA r4 + routers + embedding + head; no BLAS needed
  * Shared: -j threads (finetune), ES_BLAS=/path/libopenblas (both; required for moe), fast mode ES_AMX=1 ES_LORA_BLAS=1 (finetune).
  * Called as "es_lora" (symlink or copy), it behaves exactly like the old es_lora. */
 #define _GNU_SOURCE
@@ -12,6 +15,7 @@
 #include <string.h>
 int es_lora_main(int argc, char **argv);
 int es_moe_main(int argc, char **argv);
+int es_sparse_main(int argc, char **argv);
 
 static const char *opt(int argc, char **argv, const char *n, const char *d) {
     for (int i = 2; i + 1 < argc; i++) if (!strcmp(argv[i], n)) return argv[i + 1];
@@ -30,10 +34,15 @@ static void usage(void) {
         "            es_train moe gen   --experts-file F --layers L --experts E --dim D --ffn F [--seed 1]\n"
         "            es_train moe train --experts-file F --layers L --experts E --dim D --ffn F --data FILE [--topk 2] [--rank 8]\n"
         "                     [--steps 20] [--cache-mb 256] [--batch-seqs 4] [--seq 128] [--balance 0] [--random-route]\n"
+        "            es_train moe --sparse [--p6] --layers L --experts E --dim D --ffn F --experts-file F --data FILE\n"
+        "                     [--batch 8] [--seq 128] [--steps 100] [--eval-every 25] [--save OUT.ckpt] [--threads N]\n"
+        "            sparse: es-sparse-v1, frozen packed int4 experts (file created if missing), top-1, LoRA r4 + routers +\n"
+        "            embedding + head, held-out eval, checkpoint; --p6 = checkpointed + expert-parallel. No ES_BLAS needed.\n"
         "  env: ES_BLAS=libopenblas.so (moe: required; finetune: optional), ES_AMX=1 ES_LORA_BLAS=1 (finetune fast mode, 1 thread),\n"
         "       ES_LORA_RECOMPUTE=1 (finetune low-RAM). Calling the binary as es_lora is the same as es_train finetune.\n");
 }
 static int moe(int argc, char **argv) {
+    if (flag(argc, argv, "--sparse") || flag(argc, argv, "--p6")) return es_sparse_main(argc - 1, argv + 1);
     if (argc < 3 || (strcmp(argv[2], "gen") && strcmp(argv[2], "train"))) { usage(); return 2; }
     const char *f = opt(argc, argv, "--experts-file", NULL), *L = opt(argc, argv, "--layers", NULL), *E = opt(argc, argv, "--experts", NULL),
                *D = opt(argc, argv, "--dim", NULL), *F = opt(argc, argv, "--ffn", NULL);
