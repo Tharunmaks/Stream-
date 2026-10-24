@@ -80,7 +80,7 @@ esd_ktest: moe/esd_ktest.c moe/esd_kern.h
 	$(CC) $(CFLAGS) -o $@ moe/esd_ktest.c
 # esd_bench: decode tok/s for a shape with every expert in RAM (./esd_bench --threads 4 [--bits 2])
 esd_bench: moe/esd_bench.c moe/esd.c moe/esd_kern.h moe/es_sparse.h
-	$(CC) $(CFLAGS) -fopenmp -DESD_BENCH_SPREAD -o $@ moe/esd_bench.c moe/esd.c -lm -lpthread
+	$(CC) $(CFLAGS) -DESD_BENCH_SPREAD -o $@ moe/esd_bench.c moe/esd.c -lm -lpthread
 
 clean:
 	rm -f $(BIN) libesd.so esd_bench esd_ktest *.o

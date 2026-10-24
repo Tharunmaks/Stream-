@@ -10,6 +10,7 @@
  * so the result can be scaled to another device: tok/s there ~ tok/s here * (its GB/s / this GB/s) when bandwidth-bound. */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -29,6 +30,8 @@ static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
 static uint64_t rs = 88172645463325252ULL;
 static uint64_t xr(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
 static float nrm(void) { double u = (xr() >> 11) * (1.0 / 9007199254740992.0) + 1e-12, v = (xr() >> 11) * (1.0 / 9007199254740992.0); return (float)(sqrt(-2 * log(u)) * cos(6.283185307 * v)); }
+typedef struct { const uint64_t *p; size_t n; uint64_t s; } rd_t;
+static void *rd(void *a) { rd_t *r = a; uint64_t s = 0; for (size_t i = 0; i < r->n; i += 4) s += r->p[i] ^ r->p[i + 1] ^ r->p[i + 2] ^ r->p[i + 3]; r->s = s; return NULL; }
 static const char *opt(int argc, char **argv, const char *n, const char *d) { for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], n)) return argv[i + 1]; return d; }
 
 int main(int argc, char **argv) {
@@ -55,10 +58,10 @@ int main(int argc, char **argv) {
     for (int r = 0; r < 3; r++) { const double t0 = now(); uint64_t s = 0; for (size_t i = 0; i < bn / 8; i += 4) s += bb[i] ^ bb[i + 1] ^ bb[i + 2] ^ bb[i + 3]; const double g = bn / (now() - t0) / 1e9; if (g > bw) bw = g; if (s == 42) puts(""); }
     free(bb);
     /* and with 4 threads (phones are quoted at their all-core bandwidth) */
-    double bw4 = 0; { const size_t n4 = (size_t)1 << 30; uint64_t *b4 = malloc(n4); memset(b4, 1, n4); volatile uint64_t sink = 0;
+    double bw4 = 0; { const size_t n4 = (size_t)1 << 30; uint64_t *b4 = malloc(n4); memset(b4, 1, n4); pthread_t th[4]; rd_t ar[4];
         for (int r = 0; r < 2; r++) { const double t0 = now();
-            #pragma omp parallel for reduction(^:sink) num_threads(4)
-            for (long i = 0; i < (long)(n4 / 8); i += 4) sink ^= b4[i] ^ b4[i + 1] ^ b4[i + 2] ^ b4[i + 3];
+            for (int i = 0; i < 4; i++) { ar[i].p = b4 + i * (n4 / 32); ar[i].n = n4 / 32; pthread_create(&th[i], NULL, rd, &ar[i]); }
+            for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
             const double g = n4 / (now() - t0) / 1e9; if (g > bw4) bw4 = g; }
         free(b4); }
 
