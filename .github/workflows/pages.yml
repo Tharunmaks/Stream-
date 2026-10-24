@@ -2,7 +2,7 @@ name: Deploy website to GitHub Pages
 on:
   push:
     branches: [claude/expertstream-moe-android-oegt59, main]
-    paths: ['docs/**', '.github/workflows/pages.yml']
+    paths: ['docs/**', 'dashboard/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,8 +22,26 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/configure-pages@v5
+      # The site is docs/ plus a static copy of the ExpertCloud console at /cloud/. Pages serves files only, so the console
+      # talks to the ExpertCloud server set in the repository variable EXPERTCLOUD_API (Settings > Secrets and variables >
+      # Actions > Variables), or asks the visitor for the address when it is not set.
+      - name: Build the site
+        env:
+          EXPERTCLOUD_API: ${{ vars.EXPERTCLOUD_API }}
+        run: |
+          mkdir -p _site/cloud
+          cp -r docs/. _site/
+          cp dashboard/ui.css dashboard/ui.js _site/cloud/
+          python3 - <<'PY'
+          import json, os
+          s = open("dashboard/console.html").read()
+          old = 'window.EXPERTCLOUD_STATIC = false; window.EXPERTCLOUD_API = "";'
+          assert old in s, "console.html no longer has the Pages settings line"
+          s = s.replace(old, "window.EXPERTCLOUD_STATIC = true; window.EXPERTCLOUD_API = %s;" % json.dumps(os.environ.get("EXPERTCLOUD_API", "").strip()))
+          open("_site/cloud/index.html", "w").write(s)
+          PY
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

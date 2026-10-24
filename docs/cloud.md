@@ -153,6 +153,18 @@ curl http://HOST:8000/v1/chat/completions -H "Authorization: Bearer sk-expert-..
   usage by model in Plans & billing, the owner sees everyone's usage and earnings in Model catalog.
 * Change prices, add models or hide some with a `catalog.json` next to the database (see `gateway/catalog.py`).
 
+## The console on GitHub Pages
+
+The repository's Pages workflow (`.github/workflows/pages.yml`, on every push to `main` that touches `docs/` or `dashboard/`)
+publishes this website plus a static copy of the ExpertCloud console at `https://tharunmaks.github.io/Stream-/cloud/`.
+Pages serves files only, so the gateway itself still runs on a computer or a Space; the copy talks to it over the API (CORS is open).
+
+* Set the server once for every visitor: repository Settings > Secrets and variables > Actions > Variables > `EXPERTCLOUD_API`
+  = `https://NAME-expertcloud.hf.space`, then run the workflow again (Actions > Deploy website to GitHub Pages > Run workflow).
+* Without it, the page asks each visitor for the address; `.../cloud/?api=https://...` sets it in a link.
+* The server must be `https://` (a Pages site cannot call plain `http://`, except `http://localhost` for testing on your own computer).
+* The owner dashboard stays on the gateway (`/dashboard`): it holds the admin token and is not published.
+
 ## Easiest way: the `cloud` command
 
 ```

@@ -8,7 +8,7 @@
 <title>ExpertCloud</title>
 <meta name="description" content="ExpertCloud: AI models, an OpenAI-compatible API, a database and a playground, with plans in rupees.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c6cff'/%3E%3Cpath d='M9 22l7-12 7 12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/ui.css">
+<link rel="stylesheet" href="ui.css">
 <style>
 /* ---------- public landing ---------- */
 #landing { min-height: 100%; background: radial-gradient(1000px 520px at 10% -10%, rgba(124,108,255,.22), transparent 60%), radial-gradient(800px 460px at 110% 20%, rgba(90,200,250,.12), transparent 60%), var(--bg); }
@@ -284,17 +284,28 @@
 </div>
 <div id="toasts"></div>
 
-<script src="/ui.js"></script>
+<script src="ui.js"></script>
+<script>
+// The GitHub Pages build (.github/workflows/pages.yml) sets these: the page is then a static copy that talks to the
+// ExpertCloud server at EXPERTCLOUD_API. Served by the gateway itself, both stay empty and the page talks to its own address.
+window.EXPERTCLOUD_STATIC = false; window.EXPERTCLOUD_API = "";
+</script>
 <script>
 "use strict";
 let TOKEN = "", USER = "", STATS = null, ACCOUNT = null, timer = null, failures = 0;
-const ORIGIN = location.origin;
+const API = (() => {   // ?api=https://your-server sets the server for a static copy and is remembered
+  if (!window.EXPERTCLOUD_STATIC) return "";
+  const q = new URLSearchParams(location.search).get("api");
+  if (q) { store.set("ec_api", q, true); history.replaceState(null, "", location.pathname + location.hash); }
+  return (q || store.get("ec_api") || window.EXPERTCLOUD_API || "").trim().replace(/\/+$/, "");
+})();
+const ORIGIN = API || location.origin;
 document.querySelectorAll("[data-icon]").forEach(e => e.append(icon(e.dataset.icon)));
 document.querySelectorAll("[data-check]").forEach(e => e.prepend(icon("check")));
 
 // ---------------------------------------------------------------- data
 async function call(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", ...(TOKEN ? { "Authorization": "Bearer " + TOKEN } : {}), ...(opts.headers || {}) } });
+  const r = await fetch(API + path, { ...opts, headers: { "Content-Type": "application/json", ...(TOKEN ? { "Authorization": "Bearer " + TOKEN } : {}), ...(opts.headers || {}) } });
   let j = null; try { j = await r.json(); } catch {}
   if (r.status === 401 && TOKEN) { signedOut("Your session ended. Sign in again."); throw new Error("signed out"); }
   if (!r.ok) throw new Error((j && j.error && j.error.message) || "HTTP " + r.status);
@@ -346,7 +357,7 @@ function authModal(mode) {
   form.addEventListener("submit", async e => {
     e.preventDefault(); submit.disabled = true;
     try {
-      const r = await fetch("/auth/" + m, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }) });
+      const r = await fetch(API + "/auth/" + m, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: user.value.trim(), password: pass.value }) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((j.error && j.error.message) || "HTTP " + r.status);
       store.set("ec_session", j.token, true); TOKEN = j.token; USER = j.username; close(); enterConsole(m === "signup");
@@ -368,7 +379,7 @@ function modalEl(head, body) {   // a modal without a footer, closed by the call
 }
 document.querySelectorAll("[data-auth]").forEach(b => b.addEventListener("click", () => authModal(b.dataset.auth)));
 function signedOut(msg) { store.del("ec_session"); TOKEN = ""; USER = ""; ACCOUNT = null; $("#app").hidden = true; $("#landing").hidden = false; if (msg) toast(msg, "bad"); }
-async function signOut() { try { await call("/auth/logout", { method: "POST" }); } catch {} signedOut(""); try { history.replaceState(null, "", "/"); } catch {} }
+async function signOut() { try { await call("/auth/logout", { method: "POST" }); } catch {} signedOut(""); try { history.replaceState(null, "", location.pathname); } catch {} }
 $("#logoutBtn").addEventListener("click", signOut); $("#logoutTop").addEventListener("click", signOut);
 $("#themeBtn").addEventListener("click", () => {
   const cur = document.documentElement.dataset.theme, dark = cur ? cur === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
@@ -583,7 +594,7 @@ async function send() {
   ABORT = new AbortController(); setSending(true);
   const t0 = performance.now(); let first = null;
   try {
-    const r = await fetch("/v1/chat/completions", { method: "POST", signal: ABORT.signal, headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    const r = await fetch(API + "/v1/chat/completions", { method: "POST", signal: ABORT.signal, headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
       body: JSON.stringify({ model: $("#pModel").value || "auto", messages, stream: true, temperature: +$("#pTemp").value, max_tokens: +$("#pMax").value }) });
     if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.json()).error.message; } catch {} if (r.status === 401) signedOut("Your session ended. Sign in again."); throw new Error(m); }
     const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "";
@@ -890,7 +901,7 @@ async function backups(db) {
 }
 async function downloadDb(db) {
   try {
-    const r = await fetch("/db/" + encodeURIComponent(db) + "/_export", { headers: { "Authorization": "Bearer " + TOKEN } });
+    const r = await fetch(API + "/db/" + encodeURIComponent(db) + "/_export", { headers: { "Authorization": "Bearer " + TOKEN } });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const a = h("a", { href: URL.createObjectURL(await r.blob()), download: db + ".sqlite" }); document.body.append(a); a.click(); a.remove();
   } catch (e) { toast("Download failed: " + e.message, "bad"); }
@@ -900,8 +911,17 @@ function confirmDel(title, text, fn, verb) {
     h("button", { class: "btn primary", style: "background:var(--bad);box-shadow:none", onclick: async () => { close(); try { await fn(); if (!verb) toast("Deleted", "ok"); } catch (e) { toast(e.message, "bad"); } } }, verb || "Delete")]);
 }
 // ---------------------------------------------------------------- start
-loadPlans();
-(function boot() {
+function askServer() {   // a static copy (GitHub Pages) with no server set yet
+  const addr = h("input", { class: "input", placeholder: "https://name-expertcloud.hf.space", autocapitalize: "off", spellcheck: "false", value: API });
+  const save = h("button", { class: "btn primary", style: "width:100%;height:44px;margin-top:12px", onclick: () => {
+    const v = addr.value.trim().replace(/\/+$/, ""); if (!/^https?:\/\//.test(v)) return toast("Type the full address, starting with https://", "bad");
+    store.set("ec_api", v, true); location.reload(); } }, "Connect");
+  modalEl(h("h3", { style: "margin:0 0 8px" }, "Connect to your ExpertCloud server"),
+    h("div", {}, h("p", { class: "muted", style: "margin:0 0 12px" }, "This page is a copy of the ExpertCloud console. Type the address of the computer or Space that runs ExpertCloud (the gateway)."), addr, save));
+}
+if (window.EXPERTCLOUD_STATIC && !API) { $("#landing").hidden = false; askServer(); }
+else (function boot() {
+  loadPlans();
   const saved = store.get("ec_session");
   if (saved) { TOKEN = saved; enterConsole(false); }
   else { $("#landing").hidden = false; renderLanding(); refresh(); }
