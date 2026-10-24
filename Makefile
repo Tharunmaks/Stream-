@@ -73,11 +73,17 @@ es_tmpltest: tools/es_tmpltest.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o
 	$(CC) $(CFLAGS) -o $@ tools/es_tmpltest.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 
 # libesd.so: es-sparse-v1 decoder for the Run page (es_common.esmoe.SparseRun); install next to es_train in ES_BIN_DIR
-libesd.so: moe/esd.c moe/es_sparse.h
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ moe/esd.c -lm
+libesd.so: moe/esd.c moe/esd_kern.h moe/es_sparse.h
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ moe/esd.c -lm -lpthread
+# esd_ktest: every SIMD kernel must equal the scalar one exactly
+esd_ktest: moe/esd_ktest.c moe/esd_kern.h
+	$(CC) $(CFLAGS) -o $@ moe/esd_ktest.c
+# esd_bench: decode tok/s for a shape with every expert in RAM (./esd_bench --threads 4 [--bits 2])
+esd_bench: moe/esd_bench.c moe/esd.c moe/esd_kern.h moe/es_sparse.h
+	$(CC) $(CFLAGS) -fopenmp -DESD_BENCH_SPREAD -o $@ moe/esd_bench.c moe/esd.c -lm -lpthread
 
 clean:
-	rm -f $(BIN) libesd.so *.o
+	rm -f $(BIN) libesd.so esd_bench esd_ktest *.o
 
 .PHONY: all clean
 

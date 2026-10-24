@@ -20,3 +20,33 @@ Measured on a 4-core x86 box (gcc -O3), seq 128:
 - small 0.27B (L8 E32 d1024 f512, batch 16): 340 tok/s plain, 645 tok/s --p6 x4, RSS 375 MB.
 - 2B (L16 E32 d2048 f1024, batch 16): 84 tok/s --p6 x4, RSS 1.8 GB, 3.2 GB of experts decoded per step; held-out 5.99 -> 3.66 in 3 steps.
 - plain and --p6 checkpoints are bit-identical; gradcheck passes for every parameter group; libesd.so reproduces the trainer's held-out loss.
+
+## Phone-speed decoding for 70B-total MoE (libesd rewrite, Oct 24 2026)
+Goal: 1000 tok/s generation on a phone CPU for a 70B-total model. Dense 70B cannot do it (35 GB read per token at 4-bit);
+a 70B-total / 67M-active top-1 MoE can in principle: L16 d2048 f1024, 1043 experts per layer, ternary experts.
+- `es_train moe --sparse --bits 2`: ternary experts (17.5 GB for 70B total instead of 35 GB int4). Trains as well as int4 on
+  the tiny preset (held-out 2.674 vs 2.670 after 60 steps).
+- `--router-rank 64`: low-rank router. With 1043 experts a full router reads 34 MB per token (twice the expert); rank 64 reads 3.2 MB.
+- libesd: experts repacked output-major once per cache fill, int8 activations, int8 routers and head, AVX2 / NEON / NEON-SDOT
+  kernels (runtime-picked, bit-identical to scalar: `make esd_ktest`, also run under qemu-aarch64 for both ARM paths), worker
+  pool over output rows (ES_RUN_THREADS, default 4). Still reproduces the trainer's held-out loss (int4 2.8731 = 2.8731,
+  ternary + low-rank router 2.8405 vs 2.8399).
+- `make esd_bench`: decode tok/s with every expert in RAM and a different expert every token (no CPU-cache reuse).
+
+Measured here (4-core Xeon 2.1 GHz, AVX2, ~27 GB/s all-core read), 67M active per token:
+| shape | experts | router | threads | tok/s |
+|---|---|---|---|---|
+| L16 E64 (old libesd: scalar int4, float router, 1 thread) | int4 | full | 1 | 55 |
+| L16 E64 | int4 | full | 4 | ~430 |
+| L16 E64 | ternary | full | 1 | 228 |
+| L16 E64 | ternary | full | 4 | ~520-560 |
+| **L16 E1043 (70.0 B total)** | ternary | full | 4 | 438 (router fits this box's 260 MB L3; a phone would be slower) |
+| **L16 E1043 (70.0 B total)** | ternary | rank 64 | 4 | **~540** |
+The 70B rows keep 64 experts per layer in the file (`--stored 64`; this box has 15 GB of RAM): each token still reads a full
+1 MB expert per layer from RAM, and routers and LoRA are full size.
+
+Phone, by estimate only (not measured): a flagship phone has about 2x this box's memory bandwidth and SDOT int8 cores, and the
+kernel here is compute-bound (12 of 27 GB/s used), so 500-1200 tok/s is the expected range. Measure in Termux with
+`make esd_bench && ./esd_bench --experts 1043 --stored 64 --router-rank 64 --bits 2 --threads 4`.
+Still needed for a real 70B on a phone: 24 GB RAM (17.5 GB experts + 1.6 GB LoRA), a pre-packed expert file that can be mmap'd
+without repacking or a second copy, and trained experts (the frozen random experts only give LoRA-level quality).

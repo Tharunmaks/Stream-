@@ -70,25 +70,25 @@ static float rms(float *o, const float *x, int n) { double s = 0; for (int i = 0
 static void rms_bwd(float *dx, const float *a, float r, const float *da, int n) { double s = 0; for (int i = 0; i < n; i++) s += (double)da[i] * a[i]; const float c = (float)(s / n); for (int i = 0; i < n; i++) dx[i] += r * (da[i] - a[i] * c); }
 
 /* ---- config, params, experts */
-static int L, E, D, F, R = 4, T = 128, B = 8, NT, NTH = 1, P6;
+static int L, E, D, F, R = 4, T = 128, B = 8, NT, NTH = 1, P6, RR; static unsigned BITS = 4; static size_t EBY;
 static float SCALE, LS = 1.0f, AUX = 0.01f, LR = 2e-3f, LRL = 1e-3f;
 static ess_hdr HD; static const uint8_t *XF;
 static float *Pp, *Pg, *Pm, *Pv; static size_t PN, DN, LOE; static ess_view V, G; static uint8_t *touched;
 #define LORA(base, l, e) ((base) + ((size_t)(l) * E + (e)) * LOE)
 
-typedef struct { float *h, *rh, *s, *p, *gate, *u, *zu, *zd, *y; int *sel; } act_t;
-static act_t *ACT; static float **XIN, *DS, *DG, *DZ, *XS;
+typedef struct { float *h, *rh, *s, *t, *p, *gate, *u, *zu, *zd, *y; int *sel; } act_t;
+static act_t *ACT; static float **XIN, *DS, *DG, *DZ, *DT, *XS;
 static int *cnt, *off, *lst;
-typedef struct { float *S, *U, *A, *Y, *dA, *dS, *Zu, *Zd, *Tm, *T2, *W1, *W2; double bytes; } ws_t;
+typedef struct { float *S, *U, *A, *Y, *dA, *dS, *Zu, *Zd, *Tm, *T2, *W1, *W2, *Wt; double bytes; } ws_t;
 static ws_t *WS;
-static double AUXL;
+static double AUXL; static uint64_t RSIG;   /* hash of every routing decision in the last run (gradcheck skips entries that flip a route) */
 
 static void group(const int *sel) {
     memset(cnt, 0, sizeof(int) * E); for (int t = 0; t < NT; t++) cnt[sel[t]]++;
     off[0] = 0; for (int e = 1; e <= E; e++) off[e] = off[e - 1] + cnt[e - 1];
     int *pos = alloca(sizeof(int) * E); memcpy(pos, off, sizeof(int) * E); for (int t = 0; t < NT; t++) lst[pos[sel[t]]++] = t;
 }
-static const uint8_t *expert(int l, int e) { return XF + ((size_t)l * E + e) * (size_t)D * F; }
+static const uint8_t *expert(int l, int e) { return XF + ((size_t)l * E + e) * EBY; }
 static float silu(float u) { return u / (1 + expf(-u)); }
 
 /* parallel over experts: fn(tid, e, ctx) */
@@ -107,7 +107,7 @@ static void par_experts(efn fn, int l, void *ctx) {
 typedef struct { act_t *a; float *xo; } fctx;
 static void fwd_expert(ws_t *w, int l, int e, void *c) {
     act_t *a = ((fctx *)c)->a; float *xo = ((fctx *)c)->xo; const int n = cnt[e], *li = lst + off[e];
-    const uint8_t *q = expert(l, e); ess_decode(q, (size_t)D * F, w->W1, SCALE); ess_decode(q + (size_t)D * F / 2, (size_t)F * D, w->W2, SCALE); w->bytes += (double)D * F;
+    const uint8_t *q = expert(l, e); ess_decode(q, (size_t)D * F, w->W1, SCALE, BITS); ess_decode(q + EBY / 2, (size_t)F * D, w->W2, SCALE, BITS); w->bytes += (double)EBY;
     const float *Au = LORA(V.lo, l, e), *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
     for (int i = 0; i < n; i++) memcpy(w->S + (size_t)i * D, a->s + (size_t)li[i] * D, 4 * (size_t)D);
     mm_nn(n, D, F, 1, w->S, w->W1, w->U, 0);
@@ -126,11 +126,12 @@ static void layer_fwd(int l, const float *xi, float *xo, act_t *a) {
     for (int t = 0; t < NT; t++) a->rh[t] = rms(a->h + (size_t)t * D, xi + (size_t)t * D, D);
     for (int t = 0; t < NT; t++) { float *s = a->s + (size_t)t * D; const float *h = a->h + (size_t)t * D, *m = V.mix[l];
         if (t % T) { const float *hp = h - D; for (int c = 0; c < D; c++) s[c] = h[c] + m[c] * hp[c]; } else memcpy(s, h, 4 * (size_t)D); }
-    mm_nt(NT, D, E, 1, a->s, V.Wr[l], a->p, 0);
+    if (RR) { mm_nt(NT, D, RR, 1, a->s, V.Wp[l], a->t, 0); mm_nt(NT, RR, E, 1, a->t, V.Wr[l], a->p, 0); }
+    else mm_nt(NT, D, E, 1, a->s, V.Wr[l], a->p, 0);
     for (int t = 0; t < NT; t++) {
         float *z = a->p + (size_t)t * E; int k = 0; for (int e = 1; e < E; e++) if (z[e] > z[k]) k = e;
         double sm = 0; const float mx = z[k]; for (int e = 0; e < E; e++) { z[e] = expf(z[e] - mx); sm += z[e]; } for (int e = 0; e < E; e++) z[e] = (float)(z[e] / sm);
-        a->sel[t] = k; a->gate[t] = z[k];
+        a->sel[t] = k; a->gate[t] = z[k]; RSIG = RSIG * 1000003u + (uint64_t)k + 1;
     }
     if (xo != xi) memcpy(xo, xi, 4 * (size_t)NT * D);
     group(a->sel); fctx c = {a, xo}; par_experts(fwd_expert, l, &c);
@@ -140,13 +141,12 @@ static void layer_fwd(int l, const float *xi, float *xo, act_t *a) {
 typedef struct { act_t *a; const float *dx; } bctx;
 static void bwd_expert(ws_t *w, int l, int e, void *c) {
     act_t *a = ((bctx *)c)->a; const float *dx = ((bctx *)c)->dx; const int n = cnt[e], *li = lst + off[e];
-    const uint8_t *q = expert(l, e); w->bytes += (double)D * F;
-    /* transposed decode: W1T (F x D) = W1^T, W2T (D x F) = W2^T, so both products below are nn */
-    for (int i = 0; i < D; i++) for (int j = 0; j < F; j += 2) { const uint8_t b = q[((size_t)i * F + j) / 2];
-        w->W1[(size_t)j * D + i] = ((float)(b & 15) - 7.5f) * SCALE; w->W1[(size_t)(j + 1) * D + i] = ((float)(b >> 4) - 7.5f) * SCALE; }
-    q += (size_t)D * F / 2;
-    for (int j = 0; j < F; j++) for (int i = 0; i < D; i += 2) { const uint8_t b = q[((size_t)j * D + i) / 2];
-        w->W2[(size_t)i * F + j] = ((float)(b & 15) - 7.5f) * SCALE; w->W2[(size_t)(i + 1) * F + j] = ((float)(b >> 4) - 7.5f) * SCALE; }
+    const uint8_t *q = expert(l, e); w->bytes += (double)EBY;
+    /* transposed: W1T (F x D) = W1^T, W2T (D x F) = W2^T, so both products below are nn */
+    ess_decode(q, (size_t)D * F, w->Wt, SCALE, BITS);
+    for (int i = 0; i < D; i++) for (int j = 0; j < F; j++) w->W1[(size_t)j * D + i] = w->Wt[(size_t)i * F + j];
+    ess_decode(q + EBY / 2, (size_t)F * D, w->Wt, SCALE, BITS);
+    for (int j = 0; j < F; j++) for (int i = 0; i < D; i++) w->W2[(size_t)i * F + j] = w->Wt[(size_t)j * D + i];
     const float *Au = LORA(V.lo, l, e), *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
     float *gAu = LORA(G.lo, l, e), *gBu = gAu + (size_t)R * D, *gAd = gBu + (size_t)F * R, *gBd = gAd + (size_t)R * F;
     for (int i = 0; i < n; i++) {
@@ -182,7 +182,8 @@ static void layer_bwd(int l, float *dx, act_t *a) {
     }
     for (int e = 0; e < E; e++) { double pm = 0; for (int t = 0; t < NT; t++) pm += a->p[(size_t)t * E + e]; bal += ((double)cnt[e] / NT) * pm / NT; }
     AUXL += AUX * E * bal;
-    mm_tn(NT, E, D, 1, DZ, a->s, G.Wr[l]); mm_nn(NT, E, D, 1, DZ, V.Wr[l], DS, 1);
+    if (RR) { mm_tn(NT, E, RR, 1, DZ, a->t, G.Wr[l]); mm_nn(NT, E, RR, 1, DZ, V.Wr[l], DT, 0); mm_tn(NT, RR, D, 1, DT, a->s, G.Wp[l]); mm_nn(NT, RR, D, 1, DT, V.Wp[l], DS, 1); }
+    else { mm_tn(NT, E, D, 1, DZ, a->s, G.Wr[l]); mm_nn(NT, E, D, 1, DZ, V.Wr[l], DS, 1); }
     /* token shift s_t = h_t + mix h_(t-1), then rms */
     const float *m = V.mix[l]; float *gm = G.mix[l];
     for (int t = 0; t < NT; t++) {
@@ -197,6 +198,7 @@ static void layer_bwd(int l, float *dx, act_t *a) {
 /* ---- whole model: tok is B x (T+1) bytes; returns mean cross-entropy, and accumulates gradients when train */
 static float *XF_, *RF, *LG, *DX;
 static double run(const uint8_t *tok, int train) {
+    RSIG = 0;
     for (int b = 0; b < B; b++) for (int t = 0; t < T; t++) memcpy(XIN[0] + ((size_t)b * T + t) * D, V.emb + (size_t)tok[b * (T + 1) + t] * D, 4 * (size_t)D);
     for (int l = 0; l < L; l++) layer_fwd(l, XIN[l], XIN[l + 1], train && !P6 ? &ACT[l] : &ACT[0]);
     for (int t = 0; t < NT; t++) RF[t] = rms(XF_ + (size_t)t * D, XIN[L] + (size_t)t * D, D);
@@ -235,7 +237,7 @@ static int save(const char *path, int steps) {
 
 static int gen_experts(const char *path, size_t bytes) {
     char tmp[4096]; snprintf(tmp, sizeof tmp, "%s.tmp.%d", path, (int)getpid());
-    printf("generating frozen experts %s: %.2f GB of seeded random int4\n", path, bytes / 1e9); fflush(stdout);
+    printf("generating frozen experts %s: %.2f GB of seeded random bytes\n", path, bytes / 1e9); fflush(stdout);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) { perror(tmp); return -1; }
     uint64_t s = 0x9E3779B97F4A7C15ULL; const size_t CH = 1 << 20; uint8_t *buf = malloc(CH);
     for (size_t done = 0; done < bytes;) {
@@ -257,11 +259,11 @@ int es_sparse_main(int argc, char **argv) {
     const char *xf = opt(argc, argv, "--experts-file", NULL), *data = opt(argc, argv, "--data", NULL), *ck = opt(argc, argv, "--save", NULL);
     L = atoi(opt(argc, argv, "--layers", "0")); E = atoi(opt(argc, argv, "--experts", "0")); D = atoi(opt(argc, argv, "--dim", "0")); F = atoi(opt(argc, argv, "--ffn", "0"));
     const int gc = flag(argc, argv, "--gradcheck");
-    if (!xf || (!data && !gc) || L < 1 || E < 1 || D < 2 || F < 2 || D % 2 || F % 2) {
+    if (!xf || (!data && !gc) || L < 1 || E < 1 || D < 4 || F < 4 || D % 4 || F % 4) {
         fprintf(stderr, "usage: es_train moe --sparse [--p6] --layers L --experts E --dim D --ffn F --experts-file FILE --data FILE\n"
                         "         [--batch 8] [--seq 128] [--steps 100] [--eval-every 25] [--save OUT.ckpt] [--rank 4] [--lr 2e-3] [--lora-lr 1e-3]\n"
-                        "         [--balance 0.01] [--scale S] [--threads N (default OMP_NUM_THREADS)] [--seed 1] [--gradcheck]\n"
-                        "  D and F must be even. The experts file is created (seeded random int4, L*E*D*F bytes) when it does not exist.\n");
+                        "         [--balance 0.01] [--bits 4|2 (2 = ternary)] [--router-rank 0|RR] [--scale S] [--threads N (default OMP_NUM_THREADS)] [--seed 1] [--gradcheck]\n"
+                        "  D and F must be multiples of 4 (64 to run in libesd). The experts file is created (seeded random bytes, L*E*D*F*bits/4) when it does not exist.\n");
         return 2;
     }
     P6 = flag(argc, argv, "--p6"); B = atoi(opt(argc, argv, "--batch", "8")); T = atoi(opt(argc, argv, "--seq", "128")); R = atoi(opt(argc, argv, "--rank", "4"));
@@ -269,43 +271,46 @@ int es_sparse_main(int argc, char **argv) {
     LR = atof(opt(argc, argv, "--lr", "2e-3")); LRL = atof(opt(argc, argv, "--lora-lr", "1e-3")); AUX = atof(opt(argc, argv, "--balance", "0.01"));
     rs ^= strtoull(opt(argc, argv, "--seed", "1"), 0, 10) * 0x9E3779B97F4A7C15ULL; for (int i = 0; i < 8; i++) xr();
     NTH = atoi(opt(argc, argv, "--threads", getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "1")); if (NTH < 1) NTH = 1; if (NTH > 64) NTH = 64;
-    SCALE = atof(opt(argc, argv, "--scale", "0")); if (SCALE <= 0) SCALE = ess_default_scale(D, F);
+    RR = atoi(opt(argc, argv, "--router-rank", "0")); if (RR < 0) RR = 0;
+    BITS = flag(argc, argv, "--ternary") ? 2 : atoi(opt(argc, argv, "--bits", "4")); if (BITS != 2 && BITS != 4) { fprintf(stderr, "--bits must be 4 (int4) or 2 (ternary)\n"); return 2; }
+    SCALE = atof(opt(argc, argv, "--scale", "0")); if (SCALE <= 0) SCALE = BITS == 2 ? ess_default_scale_t(D, F) : ess_default_scale(D, F);
     if (B < 1 || T < 2 || R < 0 || steps < 0) { fprintf(stderr, "bad --batch/--seq/--rank/--steps\n"); return 2; }
     NT = B * T;
-    memcpy(HD.magic, ESS_MAGIC, 8); HD.version = 1; HD.L = L; HD.E = E; HD.D = D; HD.F = F; HD.R = R; HD.K = 1; HD.T = T; HD.scale = SCALE; HD.lora_scale = LS;
+    memcpy(HD.magic, ESS_MAGIC, 8); HD.version = 1; HD.L = L; HD.E = E; HD.D = D; HD.F = F; HD.R = R; HD.K = 1; HD.T = T; HD.scale = SCALE; HD.lora_scale = LS; HD.reserved[0] = BITS; HD.reserved[1] = RR; EBY = ess_expert_bytes(&HD);
 
     /* experts file: mmap'd in place (the page cache is the expert cache) */
     const size_t need = ess_file_bytes(&HD); struct stat st;
     if (stat(xf, &st) && (errno != ENOENT || gen_experts(xf, need))) { perror(xf); return 1; }
-    if (stat(xf, &st) || (size_t)st.st_size < need) { fprintf(stderr, "%s: %lld bytes, this config needs %zu (L*E*D*F)\n", xf, (long long)st.st_size, need); return 1; }
+    if (stat(xf, &st) || (size_t)st.st_size < need) { fprintf(stderr, "%s: %lld bytes, this config needs %zu (L*E*D*F*bits/4)\n", xf, (long long)st.st_size, need); return 1; }
     int fd = open(xf, O_RDONLY); if (fd < 0) { perror(xf); return 1; }
     XF = mmap(NULL, need, PROT_READ, MAP_SHARED, fd, 0); if (XF == MAP_FAILED) { perror("mmap"); return 1; }
     madvise((void *)XF, need, MADV_RANDOM);
 
     LOE = ess_loe(&HD); DN = ess_dense_n(&HD); PN = ess_params_n(&HD);
     Pp = fa(PN); Pg = fa(PN); Pm = fa(PN); Pv = fa(PN); touched = calloc((size_t)L * E, 1);
-    V.mix = malloc(sizeof(float *) * L); V.Wr = malloc(sizeof(float *) * L); G.mix = malloc(sizeof(float *) * L); G.Wr = malloc(sizeof(float *) * L);
+    V.mix = malloc(sizeof(float *) * L); V.Wr = malloc(sizeof(float *) * L); V.Wp = malloc(sizeof(float *) * L); G.mix = malloc(sizeof(float *) * L); G.Wr = malloc(sizeof(float *) * L); G.Wp = malloc(sizeof(float *) * L);
     ess_bind(&HD, Pp, &V); ess_bind(&HD, Pg, &G);
     for (size_t i = 0; i < 256 * (size_t)D; i++) { V.emb[i] = nrm(); V.head[i] = 0.02f * nrm(); }
-    for (int l = 0; l < L; l++) { for (int c = 0; c < D; c++) V.mix[l][c] = 0.5f; for (size_t i = 0; i < (size_t)E * D; i++) V.Wr[l][i] = nrm() / sqrtf(D); }
+    for (int l = 0; l < L; l++) { for (int c = 0; c < D; c++) V.mix[l][c] = 0.5f; if (RR) { for (size_t i = 0; i < (size_t)RR * D; i++) V.Wp[l][i] = nrm() / sqrtf(D); for (size_t i = 0; i < (size_t)E * RR; i++) V.Wr[l][i] = nrm() / sqrtf(RR); }
+        else for (size_t i = 0; i < (size_t)E * D; i++) V.Wr[l][i] = nrm() / sqrtf(D); }
     for (size_t le = 0; le < (size_t)L * E; le++) { float *a = V.lo + le * LOE, *ad = a + (size_t)R * D + (size_t)F * R;
         for (size_t i = 0; i < (size_t)R * D; i++) a[i] = nrm() / sqrtf(D);
         for (size_t i = 0; i < (size_t)R * F; i++) ad[i] = nrm() / sqrtf(F); }   /* B factors start at 0 */
 
     const size_t TD = (size_t)NT * D; const int na = P6 ? 1 : L; const int R1 = R ? R : 1;
     ACT = calloc(na, sizeof(act_t));
-    for (int i = 0; i < na; i++) { act_t *a = &ACT[i]; a->h = fa(TD); a->rh = fa(NT); a->s = fa(TD); a->p = fa((size_t)NT * E); a->gate = fa(NT);
+    for (int i = 0; i < na; i++) { act_t *a = &ACT[i]; a->h = fa(TD); a->rh = fa(NT); a->s = fa(TD); a->t = fa((size_t)NT * (RR ? RR : 1)); a->p = fa((size_t)NT * E); a->gate = fa(NT);
         a->u = fa((size_t)NT * F); a->zu = fa((size_t)NT * R1); a->zd = fa((size_t)NT * R1); a->y = fa(TD); a->sel = fa(NT); }
     XIN = malloc(sizeof(float *) * (L + 1)); for (int l = 0; l <= L; l++) XIN[l] = fa(TD);
-    DS = fa(TD); DG = fa(NT); DZ = fa((size_t)NT * E); XS = fa(TD); XF_ = fa(TD); RF = fa(NT); LG = fa((size_t)NT * 256); DX = fa(TD);
+    DS = fa(TD); DG = fa(NT); DZ = fa((size_t)NT * E); DT = fa((size_t)NT * (RR ? RR : 1)); XS = fa(TD); XF_ = fa(TD); RF = fa(NT); LG = fa((size_t)NT * 256); DX = fa(TD);
     cnt = fa(E); off = fa(E + 1); lst = fa(NT);
     const int nw = P6 ? NTH : 1; WS = calloc(nw, sizeof(ws_t));
     for (int i = 0; i < nw; i++) { ws_t *w = &WS[i]; w->S = fa(TD); w->U = fa((size_t)NT * F); w->A = fa((size_t)NT * F); w->Y = fa(TD); w->dA = fa((size_t)NT * F); w->dS = fa(TD);
-        w->Zu = fa((size_t)NT * R1); w->Zd = fa((size_t)NT * R1); w->Tm = fa((size_t)NT * R1); w->T2 = fa((size_t)NT * R1); w->W1 = fa((size_t)D * F); w->W2 = fa((size_t)D * F); }
+        w->Zu = fa((size_t)NT * R1); w->Zd = fa((size_t)NT * R1); w->Tm = fa((size_t)NT * R1); w->T2 = fa((size_t)NT * R1); w->W1 = fa((size_t)D * F); w->W2 = fa((size_t)D * F); w->Wt = fa((size_t)D * F); }
 
     const double total = (double)L * E * 2 * D * F, active = (double)L * 2 * D * F;
-    printf("cfg sparse mode=%s L=%d E=%d d=%d f=%d top1 lora_r=%d | frozen %.3f B params (%.2f GB int4, %s) | active/token %.1f M | trainable %.2f M (dense %.2f M + LoRA %.2f M) | batch %dx%d threads %d\n",
-           P6 ? "p6" : "plain", L, E, D, F, R, total / 1e9, need / 1e9, xf, active / 1e6, PN / 1e6, DN / 1e6, (PN - DN) / 1e6, B, T, P6 ? NTH : 1);
+    printf("cfg sparse mode=%s L=%d E=%d d=%d f=%d top1 lora_r=%d router_rank=%d | frozen %.3f B params (%.2f GB %s, %s) | active/token %.1f M | trainable %.2f M (dense %.2f M + LoRA %.2f M) | batch %dx%d threads %d\n",
+           P6 ? "p6" : "plain", L, E, D, F, R, RR, total / 1e9, need / 1e9, BITS == 2 ? "ternary" : "int4", xf, active / 1e6, PN / 1e6, DN / 1e6, (PN - DN) / 1e6, B, T, P6 ? NTH : 1);
     fflush(stdout);
     uint8_t *tok = malloc((size_t)B * (T + 1));
 
@@ -314,18 +319,19 @@ int es_sparse_main(int argc, char **argv) {
         for (size_t le = 0; le < (size_t)L * E; le++) { float *bu = V.lo + le * LOE + (size_t)R * D, *bd = bu + (size_t)F * R + (size_t)R * F;   /* nonzero B so A gets checked too */
             for (size_t i = 0; i < (size_t)F * R; i++) bu[i] = 0.1f * nrm();
             for (size_t i = 0; i < (size_t)D * R; i++) bd[i] = 0.1f * nrm(); }
-        AUX = 0; run(tok, 1); int bad = 0, le = -1; for (int i = 0; i < L * E && le < 0; i++) if (touched[i]) le = i;
-        const size_t lo0 = DN + (size_t)le * LOE, g0[8][2] = {{0, 256 * (size_t)D}, {256 * (size_t)D, 256 * (size_t)D}, {(size_t)(V.mix[0] - Pp), (size_t)D}, {(size_t)(V.Wr[L - 1] - Pp), (size_t)E * D},
-            {lo0, (size_t)R * D}, {lo0 + (size_t)R * D, (size_t)F * R}, {lo0 + (size_t)R * D + (size_t)F * R, (size_t)R * F}, {lo0 + (size_t)R * D + 2 * (size_t)F * R, (size_t)D * R}};
-        const char *nm[8] = {"emb", "head", "mix0", "WrLast", "Au", "Bu", "Ad", "Bd"};
-        for (int g = 0; g < 8; g++) for (int k = 0; k < 4; k++) {
+        AUX = 0; run(tok, 1); run(tok, 0); const uint64_t sig0 = RSIG; int skip = 0; int bad = 0, le = -1; for (int i = 0; i < L * E && le < 0; i++) if (touched[i]) le = i;
+        const size_t lo0 = DN + (size_t)le * LOE, g0[9][2] = {{0, 256 * (size_t)D}, {256 * (size_t)D, 256 * (size_t)D}, {(size_t)(V.mix[0] - Pp), (size_t)D}, {(size_t)(V.Wr[L - 1] - Pp), (size_t)E * (RR ? RR : D)},
+            {lo0, (size_t)R * D}, {lo0 + (size_t)R * D, (size_t)F * R}, {lo0 + (size_t)R * D + (size_t)F * R, (size_t)R * F}, {lo0 + (size_t)R * D + 2 * (size_t)F * R, (size_t)D * R}, {RR ? (size_t)(V.Wp[0] - Pp) : 0, (size_t)RR * D + 1}};
+        const char *nm[9] = {"emb", "head", "mix0", "WrLast", "Au", "Bu", "Ad", "Bd", "Wp0"}; const int ng = RR ? 9 : 8;
+        for (int g = 0; g < ng; g++) for (int k = 0; k < 4; k++) {
             size_t i = g0[g][0] + xr() % g0[g][1]; if (g == 0) i = (size_t)tok[xr() % (T)] * D + xr() % D;
-            const float a = Pg[i], o = Pp[i], e = 1e-2f; Pp[i] = o + e; const double lp = run(tok, 0); Pp[i] = o - e; const double lm = run(tok, 0); Pp[i] = o;
+            const float a = Pg[i], o = Pp[i], e = 1e-2f; Pp[i] = o + e; const double lp = run(tok, 0); const uint64_t sp = RSIG; Pp[i] = o - e; const double lm = run(tok, 0); Pp[i] = o;
+            if (sp != sig0 || RSIG != sig0) { skip++; printf("gc %-6s [%zu] skipped: the perturbation changes a top-1 route (loss is not differentiable there)\n", nm[g], i); continue; }
             const double num = (lp - lm) / (2 * e), err = fabs(num - a) / fmax(fabs(num) + fabs(a), 1e-4);
             if (err > 0.05) bad++;
             printf("gc %-6s [%zu] analytic %+.6e numeric %+.6e rel %.3g\n", nm[g], i, a, num, err);
         }
-        printf("gradcheck %s (%d of 32 above 5%%)\n", bad <= 2 ? "PASS" : "FAIL", bad); return bad <= 2 ? 0 : 1;
+        const int ok = bad <= 2 && skip < 2 * ng; printf("gradcheck %s (%d of %d above 5%%, %d skipped for route flips)\n", ok ? "PASS" : "FAIL", bad, 4 * ng - skip, skip); return ok ? 0 : 1;
     }
 
     FILE *df = fopen(data, "rb"); if (!df) { perror(data); return 1; }

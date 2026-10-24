@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Checks for es_train moe --sparse (moe/es_sparse.c) and libesd.so (moe/esd.c), the Trainer's Train MoE engine.
 
-    make es_train libesd.so && python3 scripts/test_sparse.py [--data TEXT] [--work DIR]
+    make es_train libesd.so esd_ktest && python3 scripts/test_sparse.py [--data TEXT] [--work DIR]
 
 1. gradcheck, plain and --p6 (finite differences on every parameter group)
 2. tiny preset (the Trainer's: L2 E4 d512 f256 batch 8): held-out loss drops; plain and --p6 (4 threads) write identical checkpoints
 3. the Trainer's log contract: "step N train_ce X ... train_tok/s Y", "heldout_loss X", RESULT keys
 4. libesd.so reproduces the trainer's final held-out loss token by token, and es_common SparseRun generates through it
 5. SIGTERM stops after the current step, saves the checkpoint and prints RESULT
+6. ternary experts + low-rank router (the 70B phone format): gradcheck, training, libesd matches the trainer
+7. esd_ktest: every SIMD kernel equals the scalar one bit for bit
 """
 import argparse, ctypes, math, os, re, signal, subprocess, sys, tempfile, time
 
@@ -37,10 +39,10 @@ def run(args, env=None):
     r = subprocess.run([TRAIN, "moe", "--sparse"] + args, capture_output=True, text=True, env=dict(os.environ, **(env or {})))
     return r.returncode, r.stdout + r.stderr
 
-for mode in ([], ["--p6", "--threads", "3"]):
+for mode in ([], ["--p6", "--threads", "3"], ["--bits", "2", "--router-rank", "8"]):
     rc, out = run(["--layers", "2", "--experts", "4", "--dim", "64", "--ffn", "32", "--batch", "2", "--seq", "16",
                    "--experts-file", os.path.join(a.work, "gc.bin"), "--gradcheck"] + mode)
-    check(rc == 0 and "gradcheck PASS" in out, "gradcheck " + (mode[0] if mode else "plain"))
+    check(rc == 0 and "gradcheck PASS" in out, "gradcheck " + (" ".join(mode) if mode else "plain"))
 
 common = TINY + ["--steps", "40", "--eval-every", "20", "--data", data]
 ck1, ck2 = os.path.join(a.work, "plain.ckpt"), os.path.join(a.work, "p6.ckpt")
@@ -70,10 +72,30 @@ for i in range(n):
     for t in range(T):
         L.esd_step(h, seq[t], lg); z = list(lg); m = max(z)
         tot += math.log(sum(math.exp(v - m) for v in z)) + m - z[seq[t + 1]]
+def esd_heldout(ck, xf):
+    h = L.esd_open(ck.encode(), xf.encode(), 1 << 22); tot = 0.0
+    for i in range(n):
+        o = split + int(i * (hn - T - 1) / (n - 1)); seq = buf[o:o + T + 1]; L.esd_reset(h)
+        for t in range(T):
+            L.esd_step(h, seq[t], lg); z = list(lg); m = max(z)
+            tot += math.log(sum(math.exp(v - m) for v in z)) + m - z[seq[t + 1]]
+    return h, tot / (n * T)
 mine, theirs = tot / (n * T), float(res["heldout_after"])
 check(abs(mine - theirs) < 2e-3, f"libesd held-out {mine:.4f} = trainer {theirs:.4f}")
 st = (ctypes.c_long * 3)(); L.esd_stats(h, st); check(st[0] + st[1] == 2 * n * T, f"one expert per layer per token ({st[0]} hits, {st[1]} reads)")
 L.esd_close(h)
+XT, ckt = os.path.join(a.work, "tiny-tern.bin"), os.path.join(a.work, "tern.ckpt")
+rc, ot = run(["--layers", "2", "--experts", "4", "--dim", "512", "--ffn", "256", "--batch", "8", "--seq", "128", "--experts-file", XT,
+              "--bits", "2", "--router-rank", "32", "--steps", "40", "--eval-every", "20", "--data", data, "--save", ckt])
+rt = dict(kv.split("=", 1) for kv in [l for l in ot.splitlines() if l.startswith("RESULT")][0].split()[1:]) if rc == 0 else {}
+check(rc == 0 and float(rt["heldout_after"]) < float(rt["heldout_before"]) - 1.0, f"ternary + low-rank router trains: {rt.get('heldout_before')} -> {rt.get('heldout_after')}")
+if rc == 0:
+    h, mine = esd_heldout(ckt, XT); L.esd_close(h)
+    check(abs(mine - float(rt["heldout_after"])) < 5e-3, f"libesd ternary held-out {mine:.4f} = trainer {rt['heldout_after']}")
+kt = os.path.join(a.bin, "esd_ktest")
+if os.path.exists(kt):
+    r = subprocess.run([kt], capture_output=True, text=True); print(r.stdout.rstrip()); check(r.returncode == 0, "esd_ktest: SIMD kernels = scalar")
+else: print("skip esd_ktest (make esd_ktest)")
 
 sys.path.insert(0, os.path.join(ROOT, "es-common"))
 try:

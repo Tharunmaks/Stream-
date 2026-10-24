@@ -42,3 +42,4 @@ es_train
 es_lora_u.o
 es_moe_u.o
 libesd.so
+esd_bench
