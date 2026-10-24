@@ -18,7 +18,8 @@
 * Workers join at /cloud/ws with the join token (dashboard, or GET /admin/join).
 * Model catalog (gateway/catalog.py): 54 open models by short id (llama-3.3-70b, qwen3-8b ...), deployed to computers in one click.
   Models of 8B and smaller are free within the plan's limits; bigger ones are billed per token from prepaid credits in rupees.
-* Compute tiers (plans "compute"): requests of a paying user go to computers with enough RAM, fastest first, at the front of the queue.
+* Plans Pro, Turbo, Ultra, Max (no free plan): from Turbo on, requests go to computers with enough RAM, fastest first, at the front
+  of the queue. An account without a plan can sign in and buy one, but makes no AI requests.
 
 The admin token and join token are made on first start, stored in expertcloud.db and written to ~/.expertcloud/ (mode 600).
 """
@@ -134,6 +135,8 @@ def auth(request, count=False):
         request.state.uid, request.state.plan = uid, plan
         # the plan's per-minute limit is for AI requests; database and other API calls share a roomier one
         rate = plan["limits"].get("requests_per_min", rate) if count else max(120, 2 * plan["limits"].get("requests_per_min", 0))
+        if count and plan["id"] == plans_mod.NO_PLAN["id"]:
+            return None, err(402, "pick a plan to make AI requests: Pro, Turbo, Ultra or Max, in the console under Plans & billing", "billing_error")
         if count and STORE.requests_today(uid) >= plan["limits"].get("requests_per_day", 1 << 30):
             return None, err(429, "you used today's %d requests on the %s plan: upgrade for more, or wait until midnight UTC"
                              % (plan["limits"]["requests_per_day"], plan["name"]), "rate_limit_error")
@@ -267,10 +270,9 @@ async def chat(request: Request):
             return {"id": cid, "object": "chat.completion", "created": created, "model": target, "usage": usage, "x_expertcloud": extra,
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": cached["text"]}, "finish_reason": "stop"}]}
 
-    # queue order: 0 first (admin, Max plan, compute tiers, contributors), then Pro, then Free
+    # queue order: 0 first (admin, Turbo, Ultra, Max, contributors), then Pro
     prio = 0 if not acct or STORE.contribution(acct) > 0 else int(plan["limits"].get("priority", 1)) if plan else 1
-    tier = user_plan(request.state.uid, "compute")["limits"] if request.state.uid else {}
-    if "priority" in tier: prio = min(prio, int(tier["priority"]))
+    tier = plan["limits"] if plan else {}   # from Turbo on: only computers this big, fastest first
     gen = CTRL.run(model, messages, params, priority=prio, queue_timeout=OPTS["queue_timeout"],
                    min_ram_mb=int(tier.get("min_ram_gb") or 0) * 1024, fast=bool(tier.get("prefer_fast")))
 
@@ -458,7 +460,6 @@ async def account(request: Request):
     cp = user_plan(u[0])
     return dict(username=u[1], created=row[0], usage=use, credits_inr=STORE.credit_balance(u[0]) / 100, today=STORE.requests_today(u[0]), db_bytes=DOCS.used_bytes(u[0]),
                 storage=dict(quota_bytes=quota(u[0], cp["limits"]), plan_bytes=int(cp["limits"].get("db_mb", 1024)) << 20, extra_gb=STORE.extra_gb(u[0]),
-                             compute_gb=int(user_plan(u[0], "compute")["limits"].get("extra_storage_gb") or 0),
                              addons=STORE.storage_addons(u[0]), price_inr_per_gb=plans_mod.STORAGE["price_inr_per_gb"]),
                 plan=dict(id=cp["id"], name=cp["name"], expires=cp["expires"], limits=cp["limits"], contributor=use["contributed_tokens"] > 0),
                 plans={p: plan_view(u[0], p) for p in PLANS})
@@ -476,7 +477,7 @@ async def account_new_key(request: Request):
     if not u: return err(401, "sign in first", "authentication_error")
     cap = int(user_plan(u[0])["limits"].get("api_keys", 20))
     if len([k for k in STORE.user_keys(u[0]) if not k["revoked"]]) >= cap:
-        return err(402, "your plan allows %d API key%s: revoke one or upgrade" % (cap, "" if cap == 1 else "s"))
+        return err(402, "pick a plan to make API keys" if cap == 0 else "your plan allows %d API key%s: revoke one or upgrade" % (cap, "" if cap == 1 else "s"))
     b = await body_of(request)
     return {"key": STORE.new_key(str(b.get("label") or "my key")[:64], u[0])}
 
@@ -788,8 +789,7 @@ async def admin_give_credits(username: str, request: Request):
 # ---------------------------------------------------------------------------------------------------------------- database
 def quota(uid, limits):
     """Database space of a user: the plan's, plus extra space bought, in bytes."""
-    tier = int(user_plan(uid, "compute")["limits"].get("extra_storage_gb") or 0)
-    return (int(limits.get("db_mb", 1024)) << 20) + ((int(STORE.extra_gb(uid)) + tier) << 30)
+    return (int(limits.get("db_mb", 1024)) << 20) + (int(STORE.extra_gb(uid)) << 30)
 
 
 def db_user(request):

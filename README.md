@@ -80,8 +80,9 @@ keys: `gateway/omni_router.py` (OpenAI API with streaming, prompt compression, r
 `cloud/worker_agent.py` (one command per machine, works behind home routers), an MCP server (`mcp/expertstream_mcp.py`) and a
 dashboard. Every node runs the native engine. Details and limits: [`docs/cloud.md`](docs/cloud.md); test: `python3 scripts/test_cloud.py MODEL.gguf`.
 A catalog of 54 open models (Llama, Qwen, Gemma, DeepSeek, Mistral, Phi ...) is deployed to the cloud's computers in one click and
-called by short id (`llama-3.3-70b`): 35 small models are free, bigger ones are billed per token from prepaid rupee credits, and
-Compute tiers buy 16/32/64 GB RAM computers; test: `python3 scripts/test_catalog.py`.
+called by short id (`llama-3.3-70b`): 35 small models are included in every plan, bigger ones are billed per token from prepaid
+rupee credits. Plans are Pro, Turbo, Ultra and Max (no free plan); Turbo, Ultra and Max use 16/32/64 GB RAM computers, fastest
+first; test: `python3 scripts/test_catalog.py`.
 
 **Faster on PCs; streaming tuned for phones.** On a 4-core x86 PC without a GPU, Qwen3-30B-A3B (30B parameters, Q2_K) generates
 8.0 words/s from RAM (it was 3.65; llama.cpp: 7.6), after new AVX2 kernels for the formats big models use (Q2_K, Q3_K, TQ1_0/TQ2_0, all

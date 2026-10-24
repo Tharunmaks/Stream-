@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The model catalog, credits and compute tiers without a real computer: stand-in nodes answer over the same messages a worker sends
+"""The model catalog, credits and the big-computer plans without a real computer: stand-in nodes answer over the same messages a worker sends
 (chunk, done, deploy_result), so the gateway's routing, billing and deploy code run end to end.
 
     python3 scripts/test_catalog.py
@@ -60,13 +60,14 @@ def node(name, ram_gb, models, tps=None):
     gw.CTRL.add(n); return n
 
 
-def user(name):
+def user(name, plan="cloud_pro"):
     r = c.post("/auth/signup", json={"username": name, "password": "password123"}).json()
+    if plan: c.post("/admin/users/%s/plan" % name, headers=A, json={"plan": plan, "days": 30})
     return {"Authorization": "Bearer " + r["token"]}
 
 
 def chat(headers, model, **extra):
-    gw.RATE.clear()   # the Free plan's 5 a minute is not what these checks test
+    gw.RATE.clear()   # the plan's per-minute limit is not what these checks test
     return c.post("/v1/chat/completions", headers=headers, json=dict(model=model, messages=[{"role": "user", "content": "hi"}], **extra))
 
 
@@ -98,12 +99,12 @@ listed = {m["id"]: m for m in c.get("/v1/models", headers=A).json()["data"]}
 check("5 /v1/models lists running catalog models by short id, with prices", listed.get("llama-3.3-70b", {}).get("online") and "qwen3-8b" in listed
       and listed["llama-3.3-70b"]["price_out_inr"] == 100 and "qwen2.5-72b" not in listed)
 
-# ---- free models: no credits needed
+# ---- models included in the plan: no credits needed
 U = user("asha")
 key = c.post("/account/keys", headers=U, json={"label": "app"}).json()["key"]
 K = {"Authorization": "Bearer " + key}
 r = chat(K, "qwen3-8b").json()
-check("6 a free model answers with an API key, costs nothing", r["choices"][0]["message"]["content"] == "Hello from phone" and r["x_expertcloud"]["cost_inr"] == 0)
+check("6 an included model answers with an API key, costs nothing", r["choices"][0]["message"]["content"] == "Hello from phone" and r["x_expertcloud"]["cost_inr"] == 0)
 
 # ---- paid models: credits
 r = chat(K, "llama-3.3-70b")
@@ -135,23 +136,30 @@ r = chat(K, "Llama-3.3-70B-Instruct-Q4_K_M").json()
 check("10b the file name also works and is billed the same", abs(r["x_expertcloud"]["cost_inr"] - want) < 1e-9)
 c.post("/admin/users/asha/credits", headers=A, json={"inr": -499.20})   # leaves exactly Rs 0
 r = chat(K, "llama-3.3-70b")
-check("11 an empty balance stops paid models; free ones still answer", r.status_code == 402 and chat(K, "qwen3-8b").status_code == 200)
+check("11 an empty balance stops paid models; included ones still answer", r.status_code == 402 and chat(K, "qwen3-8b").status_code == 200)
 r = chat({"Authorization": "Bearer " + c.post("/admin/keys", headers=A, json={}).json()["key"]}, "llama-3.3-70b")
 check("12 a key without an account cannot use paid models", r.status_code == 402)
 check("13 cost rounding: a tiny paid request still costs at least a paisa", catalog.cost_paise(gw.CAT["phi-4"], 1, 1) == 1 and catalog.cost_paise(gw.CAT["qwen3-8b"], 10**6, 10**6) == 0)
 adm = c.get("/admin/catalog", headers=A).json()
 check("14 the owner sees usage and earnings by model", {x["model"]: x["inr"] for x in adm["usage"]}.get("llama-3.3-70b") == round(2 * want, 2))
 
-# ---- compute tiers
-V = user("ravi")
-co = c.post("/billing/checkout", headers=V, json={"plan": "compute_ultra"}).json()
+# ---- Turbo, Ultra and Max: bigger, faster computers
+V = user("ravi", plan=None)
+check("14b an account without a plan cannot call even an included model", chat(V, "qwen3-8b").status_code == 402)
+co = c.post("/billing/checkout", headers=V, json={"plan": "cloud_ultra"}).json()
 c.post("/billing/verify", headers=V, json={"order_id": co["order_id"], "payment_id": "pay_c1", "signature": hmac.new(b"sekret", ("%s|pay_c1" % co["order_id"]).encode(), hashlib.sha256).hexdigest()})
 acc = c.get("/account", headers=V).json()
-check("15 Compute Ultra (Rs 2,499): +200 GB storage", acc["plans"]["compute"]["id"] == "compute_ultra" and acc["storage"]["quota_bytes"] == (1024 << 20) + (200 << 30))
+check("15 Ultra (Rs 3,299): 300 GB storage, 32 GB+ computers", co["amount"] == 329900 and acc["plan"]["id"] == "cloud_ultra"
+      and acc["storage"]["quota_bytes"] == 307200 << 20 and acc["plan"]["limits"]["min_ram_gb"] == 32)
+fallback = chat(V, "qwen3-8b").json()["choices"][0]["message"]["content"]
+c.post("/admin/catalog/qwen3-8b/deploy", headers=A, json={"node_id": "server"}); time.sleep(0.3)
+served = [chat(V, "qwen3-8b").json()["choices"][0]["message"]["content"] for _ in range(3)]
+check("15b Ultra skips the 8 GB phone once the 64 GB server has the model (before that, any computer)", fallback == "Hello from phone"
+      and served == ["Hello from server"] * 3, "%s, then %s" % (fallback, served[0]))
 ctl = Controller(gw.STORE)
 for n in (node("a-phone", 8, ["m"], 30), node("b-pc", 32, ["m"], 10), node("c-server", 64, ["m"], 18)): ctl.nodes[n.id] = n
 plain = [n.name for n in ctl.ranked("m", 500)]
 ultra = [n.name for n in ctl.ranked("m", 500, min_ram_mb=32 * 1024, fast=True)]
-check("16 a compute tier uses only 32 GB+ computers, fastest first", plain[0] == "a-phone" and ultra == ["c-server", "b-pc"], "any: %s, Ultra: %s" % (plain, ultra))
+check("16 Ultra uses only 32 GB+ computers, fastest first", plain[0] == "a-phone" and ultra == ["c-server", "b-pc"], "any: %s, Ultra: %s" % (plain, ultra))
 print("ALL PASSED" if not bad else "%d FAILED" % bad)
 sys.exit(1 if bad else 0)
