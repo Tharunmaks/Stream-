@@ -24,7 +24,7 @@
 void *esd_open(const char *ckpt, const char *experts, long cache_bytes);
 int esd_step(void *h, int token, float *logits);
 void esd_reset(void *h); void esd_set(void *h, int prefetch_k, float sticky); void esd_close(void *h);
-void esd_stats(void *h, long *o); int esd_threads(void *h, int n); const char *esd_kernel(void *h);
+void esd_stats(void *h, long *o); int esd_threads(void *h, int n); const char *esd_kernel(void *h); long esd_expert_bytes(void *h);
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static uint64_t rs = 88172645463325252ULL;
@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
     const double t0 = now();
     for (int t = 0; t < ntok; t++) { esd_step(d, tok, lg); int b = 0; for (int c = 1; c < 256; c++) if (lg[c] > lg[b]) b = c; tok = b; }
     const double dt = now() - t0; long s1[3]; esd_stats(d, s1);
-    const double ex = (double)h.L * ess_expert_bytes(&h), rt = (double)ess_router_bytes(&h), lo = (double)h.L * ess_loe(&h) * 4, hb = 256.0 * h.D;
+    const double ex = (double)h.L * esd_expert_bytes(d), rt = (double)ess_router_bytes(&h), lo = (double)h.L * ess_loe(&h) * 2, hb = 256.0 * h.D;
     printf("shape L=%u E=%u d=%u f=%u (%.1f B total), %u-bit experts, router rank %u, active/token %.1f M, threads %d, kernel %s, stored experts/layer %d\n", h.L, h.E, h.D, h.F,
            (double)h.L * h.E * 2 * h.D * h.F / 1e9, ess_bits(&h), h.reserved[1], (double)h.L * 2 * h.D * h.F / 1e6, got, esd_kernel(d), st_e);
     printf("decode %.1f tok/s (%.3f ms/token) | per token: experts %.1f MB + router %.1f MB + LoRA %.1f MB + head %.1f MB | cache reads during timing %ld\n",

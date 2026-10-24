@@ -92,6 +92,8 @@ check(rc == 0 and float(rt["heldout_after"]) < float(rt["heldout_before"]) - 1.0
 if rc == 0:
     h, mine = esd_heldout(ckt, XT); L.esd_close(h)
     check(abs(mine - float(rt["heldout_after"])) < 5e-3, f"libesd ternary held-out {mine:.4f} = trainer {rt['heldout_after']}")
+    os.environ["ES_RUN_PACK"] = "tq1"; h, m2 = esd_heldout(ckt, XT); L.esd_close(h); del os.environ["ES_RUN_PACK"]
+    check(abs(m2 - mine) < 1e-6, f"libesd 1.625-bit packing gives the same held-out {m2:.4f}")
 kt = os.path.join(a.bin, "esd_ktest")
 if os.path.exists(kt):
     r = subprocess.run([kt], capture_output=True, text=True); print(r.stdout.rstrip()); check(r.returncode == 0, "esd_ktest: SIMD kernels = scalar")

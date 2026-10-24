@@ -13,7 +13,8 @@
  *   int   esd_step(void *h, int token, float *logits256)                              <0 on read error
  *   void  esd_reset(void *h)  esd_set(void *h, int prefetch_k, float sticky)  int esd_slots(void *h)  int esd_threads(void *h, int n)
  *   void  esd_stats(void *h, long out[3] = hits, misses, bytes read)  esd_pfstats(void *h, long out[3] = checks, recalled, issued)
- *   void  esd_close(void *h)   const char *esd_kernel(void *h) ("avx2", "neon-sdot", "neon" or "scalar"; ES_RUN_SCALAR=1 forces scalar)
+ *   void  esd_close(void *h)   const char *esd_kernel(void *h) (e.g. "neon-sdot tq1"; ES_RUN_SCALAR=1 forces scalar)   long esd_expert_bytes(void *h)
+ * ES_RUN_PACK=tq1 keeps ternary experts in RAM at 1.625 bits (5 weights per byte; dim and ffn multiples of 256), default 2 bits. LoRA is kept as bfloat16 (half the bytes of float, 8 mantissa bits per weight).
  * D and F must be multiples of 64. */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -45,7 +46,7 @@ typedef struct esd esd;
 typedef struct { esd *d; int i; } warg;
 typedef void (*job_fn)(esd *d, int lo, int hi);
 struct esd {
-    ess_hdr h; float *P; ess_view V; size_t loe, eb; int fd; unsigned bits; esd_kern k4, k2, k8; const char *kname; int8_t *wr8, *wp8, *hd8; float *wrs, *wps, *hds, *t; int rr, ex;
+    ess_hdr h; float *P; ess_view V; size_t loe, eb; int fd; unsigned bits; esd_kern k4, k2, k8, k1; const char *kname; int pk; size_t sb, w2o; uint16_t *lo16; char kdesc[48]; int8_t *wr8, *wp8, *hd8; float *wrs, *wps, *hds, *t; int rr, ex;
     slot *sl; int nsl, *where; uint64_t tick; long hits, miss, bytes; uint8_t *raw; int8_t *tmp;
     float *x, *hh, *s, *z, *u, *a, *y, *hprev, *lg; int8_t *xq; float xs; int xsum;
     int *prev, *pred, have; int pfk; float sticky; long pfc, pfr, pfi, ntok;
@@ -107,13 +108,15 @@ static void quant(esd *d, const float *x, int n) {
     d->xs = s; d->xsum = sum;
 }
 /* job: jout[j] = scale * W[j] . jin for packed output-major rows of jk weights (jin already quantized in xq) */
+static size_t rowb(const esd *d, int k) { return d->pk == 1 ? (size_t)k / 256 * 52 : (size_t)k * d->pk / 8; }   /* packed bytes per row */
 static void job_mv(esd *d, int lo, int hi) {
-    const size_t rb = (size_t)d->jk * d->bits / 8; const float sc = d->h.scale * d->xs, bias = (d->bits == 2 ? 1.0f : 7.5f) * (float)d->xsum;
-    int32_t acc[64]; const esd_kern kern = d->bits == 2 ? d->k2 : d->k4;
+    const size_t rb = rowb(d, d->jk); const float sc = d->h.scale * d->xs, bias = (d->pk == 4 ? 7.5f : 1.0f) * (float)d->xsum;
+    int32_t acc[64]; const esd_kern kern = d->pk == 1 ? d->k1 : d->pk == 2 ? d->k2 : d->k4;
     for (int j = lo; j < hi; j += 64) { const int n = hi - j < 64 ? hi - j : 64; kern(d->jw + j * rb, rb, d->xq, d->jk, n, acc);
         for (int t = 0; t < n; t++) d->jout[j + t] = sc * ((float)acc[t] - bias); }
 }
-TC static float dotf(const float *a, const float *b, int n) { float s[8] = {0}; int i = 0; for (; i + 8 <= n; i += 8) for (int q = 0; q < 8; q++) s[q] += a[i + q] * b[i + q]; float r = 0; for (; i < n; i++) r += a[i] * b[i]; for (int q = 0; q < 8; q++) r += s[q]; return r; }
+static inline float bf(uint16_t v) { const uint32_t u = (uint32_t)v << 16; float f; memcpy(&f, &u, 4); return f; }
+TC static float dotbf(const uint16_t *a, const float *b, int n) { float s[8] = {0}; int i = 0; for (; i + 8 <= n; i += 8) for (int q = 0; q < 8; q++) s[q] += bf(a[i + q]) * b[i + q]; float r = 0; for (; i < n; i++) r += bf(a[i]) * b[i]; for (int q = 0; q < 8; q++) r += s[q]; return r; }
 /* job: jout[j] = rowscale[j] * W8[j] . x for int8 rows of jk weights (routers, head; x quantized in xq) */
 static void job_mv8(esd *d, int lo, int hi) {
     int32_t acc[64]; const int K = d->jk;
@@ -127,9 +130,13 @@ static void q8rows(const float *w, int rows, int k, int8_t *o, float *sc) {   /*
 
 /* ---- expert cache: file layout -> output-major packed blocks */
 static void pack(esd *d, const int8_t *t, int rows, int k, uint8_t *o) {   /* t: k x rows (row-major, file order); o: rows x k packed */
-    const size_t rb = (size_t)k * d->bits / 8;
+    const size_t rb = rowb(d, k);
+#define TW(i) (t[(size_t)(i) * rows + j] + 1)   /* ternary weight -> base-3 digit */
     for (int j = 0; j < rows; j++) { uint8_t *r = o + j * rb;
-        if (d->bits == 2) for (int b = 0; b < k / 64; b++) for (int q = 0; q < 16; q++) { uint8_t v = 0;
+        if (d->pk == 1) for (int b = 0; b < k / 256; b++) { uint8_t *q = r + 52 * b; const int w0 = 256 * b;
+            for (int i = 0; i < 48; i++) { int v = 0; for (int dg = 0; dg < 5; dg++) v = v * 3 + TW(w0 + 48 * dg + i); q[i] = (uint8_t)((v * 256 + 242) / 243); }
+            for (int i = 0; i < 4; i++) { int v = 0; for (int dg = 0; dg < 4; dg++) v = v * 3 + TW(w0 + 240 + 4 * dg + i); q[48 + i] = (uint8_t)((v * 256 + 80) / 81); } }
+        else if (d->pk == 2) for (int b = 0; b < k / 64; b++) for (int q = 0; q < 16; q++) { uint8_t v = 0;
             for (int p = 0; p < 4; p++) { const int w = t[(size_t)(64 * b + 16 * p + q) * rows + j]; v |= (uint8_t)((w > 0 ? 1 : w < 0 ? 2 : 0) << (2 * p)); } r[16 * b + q] = v; }
         else for (int b = 0; b < k / 32; b++) for (int q = 0; q < 16; q++)
             r[16 * b + q] = (uint8_t)((t[(size_t)(32 * b + q) * rows + j] + 8) | ((t[(size_t)(32 * b + 16 + q) * rows + j] + 8) << 4)); }
@@ -146,8 +153,8 @@ static const uint8_t *get(esd *d, int l, int e) {
     d->sl[v].key = -1; const off_t off = (off_t)key * d->eb; size_t got = 0;
     while (got < d->eb) { ssize_t n = pread(d->fd, d->raw + got, d->eb - got, off + got); if (n <= 0) return NULL; got += n; }
     const size_t half = d->eb / 2, n = (size_t)h->D * h->F;
-    unpack_file(d, d->raw, n, d->tmp); pack(d, d->tmp, h->F, h->D, d->sl[v].p);          /* W1 (D x F) -> F rows of D */
-    unpack_file(d, d->raw + half, n, d->tmp); pack(d, d->tmp, h->D, h->F, d->sl[v].p + half);   /* W2 (F x D) -> D rows of F */
+    unpack_file(d, d->raw, n, d->tmp); pack(d, d->tmp, h->F, h->D, d->sl[v].p);              /* W1 (D x F) -> F rows of D */
+    unpack_file(d, d->raw + half, n, d->tmp); pack(d, d->tmp, h->D, h->F, d->sl[v].p + d->w2o);   /* W2 (F x D) -> D rows of F */
     d->miss++; d->bytes += d->eb; d->sl[v].key = key; d->sl[v].used = d->tick; d->where[key] = v; return d->sl[v].p;
 }
 
@@ -166,7 +173,8 @@ static void router(esd *d, int l, const float *x, float *hh, float *s, float *z)
 void esd_reset(void *hd) { esd *d = hd; d->have = 0; for (uint32_t l = 0; l < d->h.L; l++) { d->prev[l] = -1; d->pred[l * 64] = 0; } }
 void esd_set(void *hd, int pfk, float sticky) { esd *d = hd; for (uint32_t l = 0; l < d->h.L; l++) d->pred[l * 64] = 0; d->pfk = pfk < 0 ? 0 : pfk > 63 ? 63 : pfk; d->sticky = sticky; }
 int esd_slots(void *hd) { return ((esd *)hd)->nsl; }
-const char *esd_kernel(void *hd) { return ((esd *)hd)->kname; }
+const char *esd_kernel(void *hd) { return ((esd *)hd)->kdesc; }
+long esd_expert_bytes(void *hd) { return (long)((esd *)hd)->sb; }   /* RAM bytes one expert occupies and each token reads per layer */
 void esd_stats(void *hd, long *o) { esd *d = hd; o[0] = d->hits; o[1] = d->miss; o[2] = d->bytes; }
 void esd_pfstats(void *hd, long *o) { esd *d = hd; o[0] = d->pfc; o[1] = d->pfr; o[2] = d->pfi; }
 
@@ -174,7 +182,7 @@ void esd_close(void *hd) {
     esd *d = hd; if (!d) return;
     pool_stop(d); if (d->fd >= 0) close(d->fd);
     if (d->sl) for (int i = 0; i < d->nsl; i++) free(d->sl[i].p);
-    free(d->sl); free(d->where); free(d->P); free(d->V.mix); free(d->V.Wr); free(d->V.Wp); free(d->wp8); free(d->wps); free(d->t); free(d->x); free(d->xq); free(d->raw); free(d->tmp); free(d->prev); free(d->pred); free(d->wr8); free(d->wrs); free(d->hd8); free(d->hds);
+    free(d->sl); free(d->where); free(d->P); free(d->V.mix); free(d->V.Wr); free(d->V.Wp); free(d->wp8); free(d->wps); free(d->t); free(d->lo16); free(d->x); free(d->xq); free(d->raw); free(d->tmp); free(d->prev); free(d->pred); free(d->wr8); free(d->wrs); free(d->hd8); free(d->hds);
     pthread_mutex_destroy(&d->mu); pthread_cond_destroy(&d->cv); free(d);
 }
 
@@ -197,12 +205,17 @@ void *esd_open(const char *ckpt, const char *experts, long cache_bytes) {
     if (getenv("ESD_BENCH_ALIAS") && atoi(getenv("ESD_BENCH_ALIAS")) > 0 && atoi(getenv("ESD_BENCH_ALIAS")) < E) d->ex = atoi(getenv("ESD_BENCH_ALIAS"));   /* esd_bench: E routers, fewer stored experts */
 #endif
     if (d->fd < 0 || lseek(d->fd, 0, SEEK_END) < (off_t)((size_t)L * d->ex * d->eb)) { fprintf(stderr, "esd: %s missing or smaller than the checkpoint's experts\n", experts); esd_close(d); return NULL; }
-    long ns = cache_bytes / (long)d->eb; if (ns < 1) ns = 1; if (ns > (long)L * d->ex) ns = (long)L * d->ex;
+    /* RAM layout: ternary experts at 2 bits, or 1.625 bits (tq1) with ES_RUN_PACK=tq1 when dim and ffn are multiples of 256:
+       19% fewer bytes per token but more work per weight, so it wins only where memory, not compute, is the limit */
+    const char *pe = getenv("ES_RUN_PACK");
+    d->pk = d->bits == 4 ? 4 : (pe && !strcmp(pe, "tq1") && D % 256 == 0 && F % 256 == 0) ? 1 : 2;
+    d->w2o = (size_t)F * rowb(d, D); d->sb = d->w2o + (size_t)D * rowb(d, F);
+    long ns = cache_bytes / (long)d->sb; if (ns < 1) ns = 1; if (ns > (long)L * d->ex) ns = (long)L * d->ex;
     d->nsl = (int)ns; d->sl = calloc(d->nsl, sizeof(slot)); d->where = malloc(sizeof(int) * L * d->ex);
     d->raw = malloc(d->eb); d->tmp = malloc((size_t)D * F);
     if (!d->sl || !d->where || !d->raw || !d->tmp) { esd_close(d); return NULL; }
     for (int i = 0; i < L * d->ex; i++) d->where[i] = -1;
-    for (int i = 0; i < d->nsl; i++) { d->sl[i].key = -1; if (!(d->sl[i].p = malloc(d->eb))) { esd_close(d); return NULL; } }
+    for (int i = 0; i < d->nsl; i++) { d->sl[i].key = -1; if (!(d->sl[i].p = malloc(d->sb))) { esd_close(d); return NULL; } }
     const int M = D > F ? D : F, MX = M > E ? M : E;
     d->x = calloc((size_t)D * 4 + (size_t)MX * 3 + (size_t)L * D + 256, 4); d->xq = malloc(M);
     d->hh = d->x + D; d->s = d->hh + D; d->y = d->s + D; d->z = d->y + D; d->u = d->z + MX; d->a = d->u + MX; d->hprev = d->a + MX; d->lg = d->hprev + (size_t)L * D;
@@ -214,7 +227,12 @@ void *esd_open(const char *ckpt, const char *experts, long cache_bytes) {
     for (int l = 0; l < L; l++) { q8rows(d->V.Wr[l], E, rk, d->wr8 + (size_t)l * E * rk, d->wrs + (size_t)l * E);
         if (rr) q8rows(d->V.Wp[l], rr, D, d->wp8 + (size_t)l * rr * D, d->wps + (size_t)l * rr); }
     q8rows(d->V.head, 256, D, d->hd8, d->hds);
-    esd_pick(&d->k4, &d->k2, &d->k8, &d->kname); esd_set(d, 2, 0); esd_reset(d);
+    esd_pick(&d->k4, &d->k2, &d->k8, &d->k1, &d->kname);
+    snprintf(d->kdesc, sizeof d->kdesc, "%s %s", d->kname, d->pk == 1 ? "tq1" : d->pk == 2 ? "ternary" : "int4");
+    /* LoRA -> bfloat16 (round to nearest even), then drop the float copy: P keeps only the dense prefix */
+    const size_t nl = (size_t)L * E * d->loe; d->lo16 = malloc(2 * nl + 2); if (!d->lo16) { esd_close(d); return NULL; }
+    for (size_t i = 0; i < nl; i++) { uint32_t u; memcpy(&u, d->P + ess_dense_n(h) + i, 4); d->lo16[i] = (uint16_t)((u + 0x7FFF + ((u >> 16) & 1)) >> 16); }
+    { float *np = realloc(d->P, 4 * ess_dense_n(h)); if (np) { d->P = np; ess_bind(h, d->P, &d->V); } } esd_set(d, 2, 0); esd_reset(d);
     const char *t = getenv("ES_RUN_THREADS"); esd_threads(d, t ? atoi(t) : 4);
     return d;
 }
@@ -241,14 +259,14 @@ int esd_step(void *hd, int tok, float *logits) {
             for (int i = 1; i <= kk; i++) { const int key = (l + 1) * d->ex + pr[i] % d->ex; if (d->where[key] < 0) { posix_fadvise(d->fd, (off_t)key * d->eb, d->eb, POSIX_FADV_WILLNEED); d->pfi++; } }
         }
         const uint8_t *q = get(d, l, k); if (!q) return -1;
-        const float *Au = d->P + ess_dense_n(h) + ((size_t)l * E + k) * d->loe, *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
+        const uint16_t *Au = d->lo16 + ((size_t)l * E + k) * d->loe, *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
         float *u = d->u, *a = d->a, *y = d->y, zz[64]; const float *s = d->s;
         quant(d, s, D); d->jw = q; d->jk = D; d->jout = u; run(d, job_mv, F, D);
-        for (int r = 0; r < R; r++) zz[r] = ls * dotf(Au + (size_t)r * D, s, D);
-        for (int j = 0; j < F; j++) { float v = u[j]; for (int r = 0; r < R; r++) v += Bu[(size_t)j * R + r] * zz[r]; a[j] = v / (1 + expf(-v)); }
-        quant(d, a, F); d->jw = q + d->eb / 2; d->jk = F; d->jout = y; run(d, job_mv, D, F);
-        for (int r = 0; r < R; r++) zz[r] = ls * dotf(Ad + (size_t)r * F, a, F);
-        for (int c = 0; c < D; c++) { float v = y[c]; for (int r = 0; r < R; r++) v += Bd[(size_t)c * R + r] * zz[r]; x[c] += g * v; }
+        for (int r = 0; r < R; r++) zz[r] = ls * dotbf(Au + (size_t)r * D, s, D);
+        for (int j = 0; j < F; j++) { float v = u[j]; for (int r = 0; r < R; r++) v += bf(Bu[(size_t)j * R + r]) * zz[r]; a[j] = v / (1 + expf(-v)); }
+        quant(d, a, F); d->jw = q + d->w2o; d->jk = F; d->jout = y; run(d, job_mv, D, F);
+        for (int r = 0; r < R; r++) zz[r] = ls * dotbf(Ad + (size_t)r * F, a, F);
+        for (int c = 0; c < D; c++) { float v = y[c]; for (int r = 0; r < R; r++) v += bf(Bd[(size_t)c * R + r]) * zz[r]; x[c] += g * v; }
         d->prev[l] = k;
     }
     rmsn(d->hh, x, D); quant(d, d->hh, D); d->jw8 = d->hd8; d->jsc = d->hds; d->jk = D; d->jout = logits; run(d, job_mv8, 256, D);
