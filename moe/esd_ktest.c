@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esd_kern.h"
+#include "es_i8.h"
 
 static unsigned long long rs = 88172645463325252ULL;
 static unsigned xr(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return (unsigned)(rs >> 11); }
@@ -26,6 +27,22 @@ static int check(const char *name, esd_kern k, esd_kern ref, int bits) {
     return bad;
 }
 
+/* es_i8.h (the trainer's int8 GEMM): exact integer products, n x k by k x m in VNNI layout, B in [-8, 8] */
+static int check_i8(const char *name, i8_gemm_fn g) {
+    int bad = 0;
+    for (int trial = 0; trial < 40; trial++) {
+        const int n = 1 + xr() % 23, k = 4 * (1 + xr() % 96), m = 16 * (1 + xr() % 12);
+        int8_t *A = malloc((size_t)n * k), *B = malloc((size_t)k * m); int32_t *cs = calloc(m, 4), *c1 = malloc(4 * (size_t)n * m), *c2 = malloc(4 * (size_t)n * m);
+        for (int i = 0; i < n * k; i++) A[i] = (int8_t)(trial % 3 == 0 ? (xr() & 1 ? 127 : -127) : (int)(xr() % 255) - 127);
+        for (int i = 0; i < k * m; i++) { B[i] = (int8_t)(trial % 5 == 0 ? (xr() & 1 ? 8 : -8) : (int)(xr() % 17) - 8); cs[(i / 4) % m] += B[i]; }
+        g(n, m, k, A, B, cs, c1); i8_gemm_scalar(n, m, k, A, B, cs, c2);
+        if (memcmp(c1, c2, 4 * (size_t)n * m)) bad++;
+        free(A); free(B); free(cs); free(c1); free(c2);
+    }
+    printf("%s %-12s %s\n", bad ? "FAIL" : "PASS", name, bad ? "differs from scalar" : "= scalar (40 random shapes)");
+    return bad;
+}
+
 int main(void) {
     esd_kern k4, k2, k8, k1; const char *name; esd_pick(&k4, &k2, &k8, &k1, &name);
     char n[64]; int bad = 0, enc = 0;
@@ -36,6 +53,10 @@ int main(void) {
     snprintf(n, sizeof n, "%s ternary", name); bad += check(n, k2, k2_scalar, 2);
     snprintf(n, sizeof n, "%s int8", name); bad += check(n, k8, k8_scalar, 8);
     snprintf(n, sizeof n, "%s tq1", name); bad += check(n, k1, k1_scalar, 1);
+    const char *gn; i8_gemm_fn g = i8_pick(&gn); snprintf(n, sizeof n, "train %s", gn); bad += check_i8(n, g);
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (__builtin_cpu_supports("avx2")) bad += check_i8("train avx2", i8_gemm_avx2);
+#endif
 #if defined(__aarch64__)
     bad += check("neon tq1", k1_neon, k1_scalar, 1); bad += check("neon int4", k4_neon, k4_scalar, 4); bad += check("neon ternary", k2_neon, k2_scalar, 2); bad += check("neon int8", k8_neon, k8_scalar, 8);
 #endif

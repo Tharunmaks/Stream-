@@ -61,7 +61,7 @@ es_toktest: tools/es_toktest.c src/es_gguf.c src/es_tok.c src/es_regex.c $(HDRS)
 es_lora: tools/es_lora.c tools/es_data.h tools/es_json.h src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -o $@ tools/es_lora.c src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(LDFLAGS) $(LDLIBS)
 # es_train: one trainer, modes finetune (es_lora) and moe (moe/es_moe.c); es_lora stays as its own binary too
-es_train: tools/es_train.c tools/es_lora.c moe/es_moe.c moe/es_sparse.c moe/es_sparse.h tools/es_data.h tools/es_json.h src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
+es_train: tools/es_train.c tools/es_lora.c moe/es_moe.c moe/es_sparse.c moe/es_sparse.h moe/es_i8.h tools/es_data.h tools/es_json.h src/es_train.c src/es_amx.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o $(HDRS)
 	$(CC) $(CFLAGS) -c -o es_lora_u.o -DES_TRAIN_UNIFIED tools/es_lora.c
 	$(CC) $(CFLAGS) -c -o es_moe_u.o -DES_TRAIN_UNIFIED moe/es_moe.c
 	$(CC) $(CFLAGS) -c -o es_sparse.o moe/es_sparse.c
@@ -76,7 +76,7 @@ es_tmpltest: tools/es_tmpltest.c $(CORE) $(ENGINE) es_q2k_neon.o es_quant_neon.o
 libesd.so: moe/esd.c moe/esd_kern.h moe/es_sparse.h
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ moe/esd.c -lm -lpthread
 # esd_ktest: every SIMD kernel must equal the scalar one exactly
-esd_ktest: moe/esd_ktest.c moe/esd_kern.h
+esd_ktest: moe/esd_ktest.c moe/esd_kern.h moe/es_i8.h
 	$(CC) $(CFLAGS) -o $@ moe/esd_ktest.c
 # esd_bench: decode tok/s for a shape with every expert in RAM (./esd_bench --threads 4 [--bits 2])
 esd_bench: moe/esd_bench.c moe/esd.c moe/esd_kern.h moe/es_sparse.h
