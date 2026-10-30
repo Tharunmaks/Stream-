@@ -62,14 +62,18 @@ TC static float dot(const float *a, const float *b, int k) {
     float r = 0; for (; i < k; i++) r += a[i] * b[i]; for (int q = 0; q < 8; q++) r += s[q]; return r;
 }
 static void mm_nt(int n, int k, int m, float al, const float *A, const float *B, float *C, int acc) {
+    if (k <= 8 && (size_t)k * m <= 32768) {   /* LoRA up-projections (k = rank): transpose B and go through mm_nn */
+        float *bt = alloca(4 * (size_t)k * m); for (int j = 0; j < m; j++) for (int r = 0; r < k; r++) bt[(size_t)r * m + j] = B[(size_t)j * k + r];
+        mm_nn(n, k, m, al, A, bt, C, acc); return; }
     for (int j0 = 0; j0 < m; j0 += 32) { const int j1 = j0 + 32 < m ? j0 + 32 : m;
         for (int i = 0; i < n; i++) { const float *a = A + (size_t)i * k; float *c = C + (size_t)i * m;
             for (int j = j0; j < j1; j++) { const float v = al * dot(a, B + (size_t)j * k, k); c[j] = acc ? c[j] + v : v; } } }
 }
-TC static void mm_tn(int n, int a, int b, float al, const float *A, const float *B, float *C) {
+TC static void mm_tn_p(int n, int a, int b, int p0, int p1, float al, const float *A, const float *B, float *C) {   /* rows p0..p1 of C */
     for (int i = 0; i < n; i++) { const float *x = A + (size_t)i * a, *y = B + (size_t)i * b;
-        for (int p = 0; p < a; p++) { const float v = al * x[p]; if (v == 0) continue; float *c = C + (size_t)p * b; for (int q = 0; q < b; q++) c[q] += v * y[q]; } }
+        for (int p = p0; p < p1; p++) { const float v = al * x[p]; if (v == 0) continue; float *c = C + (size_t)p * b; for (int q = 0; q < b; q++) c[q] += v * y[q]; } }
 }
+static void mm_tn(int n, int a, int b, float al, const float *A, const float *B, float *C) { mm_tn_p(n, a, b, 0, a, al, A, B, C); }
 static float rms(float *o, const float *x, int n) { double s = 0; for (int i = 0; i < n; i++) s += (double)x[i] * x[i]; const float r = (float)(1 / sqrt(s / n + 1e-6)); for (int i = 0; i < n; i++) o[i] = x[i] * r; return r; }
 static void rms_bwd(float *dx, const float *a, float r, const float *da, int n) { double s = 0; for (int i = 0; i < n; i++) s += (double)da[i] * a[i]; const float c = (float)(s / n); for (int i = 0; i < n; i++) dx[i] += r * (da[i] - a[i] * c); }
 
@@ -87,6 +91,28 @@ typedef struct { float *S, *U, *A, *Y, *dA, *dS, *Zu, *Zd, *Tm, *T2, *W1, *W2, *
 static ws_t *WS;
 static double AUXL; static uint64_t RSIG;   /* hash of every routing decision in the last run (gradcheck skips entries that flip a route) */
 
+/* parallel over an index range (token rows, or output rows of a weight gradient): fn(i0, i1, ctx) on --threads slices
+ * with --p6. Every element is computed by the same code in the same order whatever the split, so results do not
+ * depend on the thread count. */
+typedef void (*rfn)(int, int, void *);
+typedef struct { rfn fn; void *ctx; int i0, i1; } rarg;
+static void *rworker(void *a) { rarg *r = a; r->fn(r->i0, r->i1, r->ctx); return NULL; }
+static void par_range(rfn fn, int n, void *ctx) {
+    const int nt = P6 && n >= 2 * NTH ? NTH : 1;
+    if (nt == 1) { fn(0, n, ctx); return; }
+    pthread_t th[64]; rarg a[64];
+    for (int i = 0; i < nt; i++) { a[i] = (rarg){fn, ctx, (int)((long)n * i / nt), (int)((long)n * (i + 1) / nt)}; if (i) pthread_create(&th[i], NULL, rworker, &a[i]); }
+    rworker(&a[0]); for (int i = 1; i < nt; i++) pthread_join(th[i], NULL);
+}
+typedef struct { int kind, n, k, m; float al; const float *A, *B; float *C; int acc; } mmc;
+static void mm_part(int i0, int i1, void *c) { const mmc *x = c;
+    if (x->kind == 2) { mm_tn_p(x->n, x->k, x->m, i0, i1, x->al, x->A, x->B, x->C); return; }
+    (x->kind ? mm_nt : mm_nn)(i1 - i0, x->k, x->m, x->al, x->A + (size_t)i0 * x->k, x->B, x->C + (size_t)i0 * x->m, x->acc);
+}
+static void pmm_nn(int n, int k, int m, float al, const float *A, const float *B, float *C, int acc) { mmc x = {0, n, k, m, al, A, B, C, acc}; par_range(mm_part, n, &x); }
+static void pmm_tn(int n, int a, int b, float al, const float *A, const float *B, float *C) { mmc x = {2, n, a, b, al, A, B, C, 0}; par_range(mm_part, a, &x); }
+typedef struct { int l; act_t *a; const float *x; float *y; } tctx;
+
 static void group(const int *sel) {
     memset(cnt, 0, sizeof(int) * E); for (int t = 0; t < NT; t++) cnt[sel[t]]++;
     off[0] = 0; for (int e = 1; e <= E; e++) off[e] = off[e - 1] + cnt[e - 1];
@@ -97,28 +123,38 @@ static float silu(float u) { return u / (1 + expf(-u)); }
 
 /* ---- int8 products through a frozen expert: weights are the exact int8 values (int4: nib - 8, the +0.5 folded in
  * through the row sums of the activations; ternary: -1, 0, 1), times SCALE */
-static int FAST; static i8_gemm_fn I8; static const char *I8N = "float";
+static int FAST, I8CS; static i8_gemm_fn I8; static const char *I8N = "float";
 static uint16_t LUT4[256]; static uint32_t LUT2[256];   /* packed byte -> its 2 (int4) or 4 (ternary) int8 weights */
 static void i8_tables(void) {
     for (int b = 0; b < 256; b++) { int8_t v[4]; v[0] = (int8_t)((b & 15) - 8); v[1] = (int8_t)((b >> 4) - 8); memcpy(&LUT4[b], v, 2);
         for (int k = 0; k < 4; k++) { const int c = (b >> (2 * k)) & 3; v[k] = (int8_t)((c & 1) - (c >> 1)); } memcpy(&LUT2[b], v, 4); }
 }
-static void unpack8(const uint8_t *q, size_t n, int8_t *o) {
-    if (BITS == 2) for (size_t i = 0; i < n / 4; i++) memcpy(o + 4 * i, &LUT2[q[i]], 4);
-    else for (size_t i = 0; i < n / 2; i++) memcpy(o + 2 * i, &LUT4[q[i]], 2);
+/* the kernel's B is [k/4][m][4]: one 32-bit word per (k-quad, output). Both decoders write it straight from the packed
+ * matrix, 16 outputs at a time so the writes are contiguous. */
+/* B for X W, W packed k x m row-major: word (iq, j) = W[4 iq + 0..3][j] */
+static void vnni_nn(const uint8_t *q, int k, int m, uint32_t *Bo) {
+    if (BITS == 2) { const int rb = m / 4;
+        for (int iq = 0; iq < k / 4; iq++) { const uint8_t *r = q + (size_t)4 * iq * rb; uint32_t *o = Bo + (size_t)iq * m;
+            for (int c = 0; c < rb; c++) { const uint32_t a = LUT2[r[c]], b = LUT2[r[rb + c]], d = LUT2[r[2 * rb + c]], e = LUT2[r[3 * rb + c]];
+                for (int x = 0; x < 4; x++) o[4 * c + x] = ((a >> 8 * x) & 255) | ((b >> 8 * x) & 255) << 8 | ((d >> 8 * x) & 255) << 16 | ((e >> 8 * x) & 255) << 24; } }
+        return; }
+    const int rb = m / 2;
+    for (int iq = 0; iq < k / 4; iq++) { const uint8_t *r = q + (size_t)4 * iq * rb; uint32_t *o = Bo + (size_t)iq * m;
+        for (int c = 0; c < rb; c++) { const uint32_t a = LUT4[r[c]], b = LUT4[r[rb + c]], d = LUT4[r[2 * rb + c]], e = LUT4[r[3 * rb + c]];
+            o[2 * c] = (a & 255) | (b & 255) << 8 | (d & 255) << 16 | (e & 255) << 24; o[2 * c + 1] = a >> 8 | (b >> 8) << 8 | (d >> 8) << 16 | (e >> 8) << 24; } }
 }
-/* W (k x m, row-major) -> the kernel's B for X W: B[(iq m + j) 4 + r] = W[4 iq + r][j]; cs[j] = column sums */
-static void vnni_nn(const int8_t *W, int k, int m, int8_t *Bo, int32_t *cs) {
+/* B for X W^T, W packed m x k row-major: word (iq, j) = W[j][4 iq + 0..3] */
+static void vnni_nt(const uint8_t *q, int m, int k, uint32_t *Bo) {
+    const size_t rb = (size_t)k * BITS / 8;
+    for (int j0 = 0; j0 < m; j0 += 16) for (int iq = 0; iq < k / 4; iq++) { uint32_t *o = Bo + (size_t)iq * m + j0; const uint8_t *r = q + (size_t)j0 * rb;
+        if (BITS == 2) for (int j = 0; j < 16; j++) o[j] = LUT2[r[j * rb + iq]];
+        else for (int j = 0; j < 16; j++) o[j] = LUT4[r[j * rb + 2 * iq]] | (uint32_t)LUT4[r[j * rb + 2 * iq + 1]] << 16; }
+}
+static void colsums(const uint32_t *Bo, int k, int m, int32_t *cs) {   /* only the AVX-VNNI / AVX2 kernels need these */
     memset(cs, 0, 4 * (size_t)m);
-    for (int iq = 0; iq < k / 4; iq++) { const int8_t *w = W + (size_t)4 * iq * m; int8_t *b = Bo + (size_t)iq * m * 4;
-        for (int j = 0; j < m; j++) { const int8_t a0 = w[j], a1 = w[m + j], a2 = w[2 * m + j], a3 = w[3 * m + j];
-            b[4 * j] = a0; b[4 * j + 1] = a1; b[4 * j + 2] = a2; b[4 * j + 3] = a3; cs[j] += a0 + a1 + a2 + a3; } }
+    for (int iq = 0; iq < k / 4; iq++) for (int j = 0; j < m; j++) { const uint32_t v = Bo[(size_t)iq * m + j]; cs[j] += (int8_t)v + (int8_t)(v >> 8) + (int8_t)(v >> 16) + (int8_t)(v >> 24); }
 }
-/* W (m x k, row-major) -> B for X W^T: B[(iq m + j) 4 + r] = W[j][4 iq + r] */
-static void vnni_nt(const int8_t *W, int m, int k, int8_t *Bo, int32_t *cs) {
-    for (int j = 0; j < m; j++) { const int8_t *w = W + (size_t)j * k; int32_t s = 0; for (int i = 0; i < k; i++) s += w[i]; cs[j] = s;
-        for (int iq = 0; iq < k / 4; iq++) memcpy(Bo + ((size_t)iq * m + j) * 4, w + 4 * iq, 4); }
-}
+#define VNNI(how, q, a, b) do { vnni_##how(q, a, b, (uint32_t *)w->Bq); if (I8CS) colsums((uint32_t *)w->Bq, #how[1] == 'n' ? a : b, #how[1] == 'n' ? b : a, w->cs); } while (0)
 /* out (n x m) = X (n x k) . (the matrix in w->Bq) */
 static void i8mm(ws_t *w, int n, int k, int m, const float *X, float *out) {
     i8_quant_rows(X, n, k, w->Aq, w->as, w->ar); I8(n, m, k, w->Aq, w->Bq, w->cs, w->Ci);
@@ -143,15 +179,15 @@ static void par_experts(efn fn, int l, void *ctx) {
 typedef struct { act_t *a; float *xo; } fctx;
 static void fwd_expert(ws_t *w, int l, int e, void *c) {
     act_t *a = ((fctx *)c)->a; float *xo = ((fctx *)c)->xo; const int n = cnt[e], *li = lst + off[e];
-    const uint8_t *q = expert(l, e); w->bytes += (double)EBY; int8_t *w8 = (int8_t *)w->Wt;
+    const uint8_t *q = expert(l, e); w->bytes += (double)EBY;
     if (!FAST) { ess_decode(q, (size_t)D * F, w->W1, SCALE, BITS); ess_decode(q + EBY / 2, (size_t)F * D, w->W2, SCALE, BITS); }
     const float *Au = LORA(V.lo, l, e), *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
     for (int i = 0; i < n; i++) memcpy(w->S + (size_t)i * D, a->s + (size_t)li[i] * D, 4 * (size_t)D);
-    if (FAST) { unpack8(q, (size_t)D * F, w8); vnni_nn(w8, D, F, w->Bq, w->cs); i8mm(w, n, D, F, w->S, w->U); }
+    if (FAST) { VNNI(nn, q, D, F); i8mm(w, n, D, F, w->S, w->U); }
     else mm_nn(n, D, F, 1, w->S, w->W1, w->U, 0);
     if (R) { mm_nt(n, D, R, 1, w->S, Au, w->Zu, 0); mm_nt(n, R, F, LS, w->Zu, Bu, w->U, 1); }
     for (size_t i = 0; i < (size_t)n * F; i++) w->A[i] = silu(w->U[i]);
-    if (FAST) { unpack8(q + EBY / 2, (size_t)F * D, w8); vnni_nn(w8, F, D, w->Bq, w->cs); i8mm(w, n, F, D, w->A, w->Y); }
+    if (FAST) { VNNI(nn, q + EBY / 2, F, D); i8mm(w, n, F, D, w->A, w->Y); }
     else mm_nn(n, F, D, 1, w->A, w->W2, w->Y, 0);
     if (R) { mm_nt(n, F, R, 1, w->A, Ad, w->Zd, 0); mm_nt(n, R, D, LS, w->Zd, Bd, w->Y, 1); }
     for (int i = 0; i < n; i++) {
@@ -161,17 +197,23 @@ static void fwd_expert(ws_t *w, int l, int e, void *c) {
         for (int c = 0; c < D; c++) x[c] += g * y[c];
     }
 }
-static void layer_fwd(int l, const float *xi, float *xo, act_t *a) {
-    for (int t = 0; t < NT; t++) a->rh[t] = rms(a->h + (size_t)t * D, xi + (size_t)t * D, D);
-    for (int t = 0; t < NT; t++) { float *s = a->s + (size_t)t * D; const float *h = a->h + (size_t)t * D, *m = V.mix[l];
+static void lf_rms(int t0, int t1, void *c) { const tctx *x = c; for (int t = t0; t < t1; t++) x->a->rh[t] = rms(x->a->h + (size_t)t * D, x->x + (size_t)t * D, D); }
+static void lf_route(int t0, int t1, void *c) {   /* token shift, router, softmax for tokens t0..t1 (needs every h) */
+    const int l = ((tctx *)c)->l, n = t1 - t0; act_t *a = ((tctx *)c)->a;
+    for (int t = t0; t < t1; t++) { float *s = a->s + (size_t)t * D; const float *h = a->h + (size_t)t * D, *m = V.mix[l];
         if (t % T) { const float *hp = h - D; for (int c = 0; c < D; c++) s[c] = h[c] + m[c] * hp[c]; } else memcpy(s, h, 4 * (size_t)D); }
-    if (RR) { mm_nt(NT, D, RR, 1, a->s, V.Wp[l], a->t, 0); mm_nt(NT, RR, E, 1, a->t, V.Wr[l], a->p, 0); }
-    else mm_nt(NT, D, E, 1, a->s, V.Wr[l], a->p, 0);
-    for (int t = 0; t < NT; t++) {
+    float *s = a->s + (size_t)t0 * D, *p = a->p + (size_t)t0 * E;
+    if (RR) { mm_nt(n, D, RR, 1, s, V.Wp[l], a->t + (size_t)t0 * RR, 0); mm_nt(n, RR, E, 1, a->t + (size_t)t0 * RR, V.Wr[l], p, 0); }
+    else mm_nt(n, D, E, 1, s, V.Wr[l], p, 0);
+    for (int t = t0; t < t1; t++) {
         float *z = a->p + (size_t)t * E; int k = 0; for (int e = 1; e < E; e++) if (z[e] > z[k]) k = e;
         double sm = 0; const float mx = z[k]; for (int e = 0; e < E; e++) { z[e] = expf(z[e] - mx); sm += z[e]; } for (int e = 0; e < E; e++) z[e] = (float)(z[e] / sm);
-        a->sel[t] = k; a->gate[t] = z[k]; RSIG = RSIG * 1000003u + (uint64_t)k + 1;
+        a->sel[t] = k; a->gate[t] = z[k];
     }
+}
+static void layer_fwd(int l, const float *xi, float *xo, act_t *a) {
+    tctx c0 = {l, a, xi, NULL}; par_range(lf_rms, NT, &c0); par_range(lf_route, NT, &c0);
+    for (int t = 0; t < NT; t++) RSIG = RSIG * 1000003u + (uint64_t)a->sel[t] + 1;
     if (xo != xi) memcpy(xo, xi, 4 * (size_t)NT * D);
     group(a->sel); fctx c = {a, xo}; par_experts(fwd_expert, l, &c);
 }
@@ -186,7 +228,6 @@ static void bwd_expert(ws_t *w, int l, int e, void *c) {
         for (int i = 0; i < D; i++) for (int j = 0; j < F; j++) w->W1[(size_t)j * D + i] = w->Wt[(size_t)i * F + j];
         ess_decode(q + EBY / 2, (size_t)F * D, w->Wt, SCALE, BITS);
         for (int j = 0; j < F; j++) for (int i = 0; i < D; i++) w->W2[(size_t)i * F + j] = w->Wt[(size_t)j * D + i]; }
-    int8_t *w8 = (int8_t *)w->Wt;
     const float *Au = LORA(V.lo, l, e), *Bu = Au + (size_t)R * D, *Ad = Bu + (size_t)F * R, *Bd = Ad + (size_t)R * F;
     float *gAu = LORA(G.lo, l, e), *gBu = gAu + (size_t)R * D, *gAd = gBu + (size_t)F * R, *gBd = gAd + (size_t)R * F;
     for (int i = 0; i < n; i++) {
@@ -197,17 +238,38 @@ static void bwd_expert(ws_t *w, int l, int e, void *c) {
         if (R) { memcpy(w->Zu + (size_t)i * R, a->zu + (size_t)t * R, 4 * R); memcpy(w->Zd + (size_t)i * R, a->zd + (size_t)t * R, 4 * R); }
     }
     for (size_t i = 0; i < (size_t)n * F; i++) w->A[i] = silu(w->U[i]);
-    if (FAST) { unpack8(q + EBY / 2, (size_t)F * D, w8); vnni_nt(w8, F, D, w->Bq, w->cs); i8mm(w, n, D, F, w->Y, w->dA); }
+    if (FAST) { VNNI(nt, q + EBY / 2, F, D); i8mm(w, n, D, F, w->Y, w->dA); }
     else mm_nn(n, D, F, 1, w->Y, w->W2, w->dA, 0);
     if (R) { mm_nn(n, D, R, 1, w->Y, Bd, w->Tm, 0); mm_nn(n, R, F, LS, w->Tm, Ad, w->dA, 1);
              mm_tn(n, D, R, LS, w->Y, w->Zd, gBd); mm_tn(n, R, F, LS, w->Tm, w->A, gAd); }
     for (size_t i = 0; i < (size_t)n * F; i++) { const float u = w->U[i], s = 1 / (1 + expf(-u)); w->dA[i] *= s * (1 + u * (1 - s)); }
-    if (FAST) { unpack8(q, (size_t)D * F, w8); vnni_nt(w8, D, F, w->Bq, w->cs); i8mm(w, n, F, D, w->dA, w->dS); }
+    if (FAST) { VNNI(nt, q, D, F); i8mm(w, n, F, D, w->dA, w->dS); }
     else mm_nn(n, F, D, 1, w->dA, w->W1, w->dS, 0);
     if (R) { mm_nn(n, F, R, 1, w->dA, Bu, w->T2, 0); mm_nn(n, R, D, LS, w->T2, Au, w->dS, 1);
              mm_tn(n, F, R, LS, w->dA, w->Zu, gBu); mm_tn(n, R, D, LS, w->T2, w->S, gAu); }
     for (int i = 0; i < n; i++) memcpy(DS + (size_t)li[i] * D, w->dS + (size_t)i * D, 4 * (size_t)D);
     touched[l * E + e] = 1;
+}
+static void lb_dz(int t0, int t1, void *c) {   /* router logits gradient for tokens t0..t1; x = per-expert balance coefficients */
+    const act_t *a = ((tctx *)c)->a; const float *ce = ((tctx *)c)->x;
+    for (int t = t0; t < t1; t++) {
+        const float *p = a->p + (size_t)t * E; float *z = DZ + (size_t)t * E; const int k = a->sel[t]; const float gk = DG[t] * p[k];
+        double m = 0; for (int e = 0; e < E; e++) m += p[e] * ce[e];
+        for (int e = 0; e < E; e++) z[e] = gk * ((e == k) - p[e]) + p[e] * (ce[e] - (float)m);
+    }
+}
+static void lb_mix(int c0, int c1, void *c) {   /* mix gradient, channels c0..c1 */
+    const act_t *a = ((tctx *)c)->a; float *gm = G.mix[((tctx *)c)->l];
+    for (int t = 0; t < NT; t++) if (t % T) { const float *ds = DS + (size_t)t * D, *hp = a->h + (size_t)(t - 1) * D; for (int i = c0; i < c1; i++) gm[i] += ds[i] * hp[i]; }
+}
+static void lb_shift(int t0, int t1, void *c) {   /* d h (into s, no longer needed), then through rms into dx */
+    act_t *a = ((tctx *)c)->a; float *dx = ((tctx *)c)->y; const float *m = V.mix[((tctx *)c)->l];
+    for (int t = t0; t < t1; t++) {
+        const float *ds = DS + (size_t)t * D; float *dh = a->s + (size_t)t * D;
+        for (int i = 0; i < D; i++) dh[i] = ds[i];
+        if (t % T != T - 1) { const float *dn = DS + (size_t)(t + 1) * D; for (int i = 0; i < D; i++) dh[i] += m[i] * dn[i]; }
+        rms_bwd(dx + (size_t)t * D, a->h + (size_t)t * D, a->rh[t], dh, D);
+    }
 }
 static void layer_bwd(int l, float *dx, act_t *a) {
     if (P6) layer_fwd(l, XIN[l], XS, a);   /* checkpointed: recompute this layer from its saved input */
@@ -217,47 +279,43 @@ static void layer_bwd(int l, float *dx, act_t *a) {
     /* router: gate = softmax(z)[sel]; Switch balance loss AUX * E * sum_e f_e * mean_t p_te (f_e constant) */
     float *ce = alloca(4 * (size_t)E); double bal = 0;
     for (int e = 0; e < E; e++) ce[e] = AUX * E * ((float)cnt[e] / NT) / NT;
-    for (int t = 0; t < NT; t++) {
-        const float *p = a->p + (size_t)t * E; float *z = DZ + (size_t)t * E; const int k = a->sel[t]; const float gk = DG[t] * p[k];
-        double m = 0; for (int e = 0; e < E; e++) m += p[e] * ce[e];
-        for (int e = 0; e < E; e++) z[e] = gk * ((e == k) - p[e]) + p[e] * (ce[e] - (float)m);
-    }
+    tctx c1 = {l, a, ce, dx}; par_range(lb_dz, NT, &c1);
     for (int e = 0; e < E; e++) { double pm = 0; for (int t = 0; t < NT; t++) pm += a->p[(size_t)t * E + e]; bal += ((double)cnt[e] / NT) * pm / NT; }
     AUXL += AUX * E * bal;
-    if (RR) { mm_tn(NT, E, RR, 1, DZ, a->t, G.Wr[l]); mm_nn(NT, E, RR, 1, DZ, V.Wr[l], DT, 0); mm_tn(NT, RR, D, 1, DT, a->s, G.Wp[l]); mm_nn(NT, RR, D, 1, DT, V.Wp[l], DS, 1); }
-    else { mm_tn(NT, E, D, 1, DZ, a->s, G.Wr[l]); mm_nn(NT, E, D, 1, DZ, V.Wr[l], DS, 1); }
+    if (RR) { pmm_tn(NT, E, RR, 1, DZ, a->t, G.Wr[l]); pmm_nn(NT, E, RR, 1, DZ, V.Wr[l], DT, 0); pmm_tn(NT, RR, D, 1, DT, a->s, G.Wp[l]); pmm_nn(NT, RR, D, 1, DT, V.Wp[l], DS, 1); }
+    else { pmm_tn(NT, E, D, 1, DZ, a->s, G.Wr[l]); pmm_nn(NT, E, D, 1, DZ, V.Wr[l], DS, 1); }
     /* token shift s_t = h_t + mix h_(t-1), then rms */
-    const float *m = V.mix[l]; float *gm = G.mix[l];
-    for (int t = 0; t < NT; t++) {
-        const float *ds = DS + (size_t)t * D; float *dh = a->s + (size_t)t * D;   /* s is no longer needed: reuse it for dh */
-        if (t % T) { const float *hp = a->h + (size_t)(t - 1) * D; for (int c = 0; c < D; c++) gm[c] += ds[c] * hp[c]; }
-        for (int c = 0; c < D; c++) dh[c] = ds[c];
-        if (t % T != T - 1) { const float *dn = DS + (size_t)(t + 1) * D; for (int c = 0; c < D; c++) dh[c] += m[c] * dn[c]; }
-    }
-    for (int t = 0; t < NT; t++) rms_bwd(dx + (size_t)t * D, a->h + (size_t)t * D, a->rh[t], a->s + (size_t)t * D, D);
+    par_range(lb_mix, D, &c1); par_range(lb_shift, NT, &c1);
 }
 
 /* ---- whole model: tok is B x (T+1) bytes; returns mean cross-entropy, and accumulates gradients when train */
-static float *XF_, *RF, *LG, *DX;
+static float *XF_, *RF, *LG, *DX; static double *RL; static const uint8_t *TOK;
+static void head_fwd(int t0, int t1, void *c) {   /* final rms, logits, per-token loss and d logits for tokens t0..t1 */
+    (void)c; const int n = t1 - t0;
+    for (int t = t0; t < t1; t++) RF[t] = rms(XF_ + (size_t)t * D, XIN[L] + (size_t)t * D, D);
+    mm_nt(n, D, 256, 1, XF_ + (size_t)t0 * D, V.head, LG + (size_t)t0 * 256, 0);
+    for (int i = t0; i < t1; i++) {
+        float *z = LG + (size_t)i * 256, mx = -INFINITY; double sum = 0; const int y = TOK[(i / T) * (T + 1) + i % T + 1];
+        for (int c = 0; c < 256; c++) if (z[c] > mx) mx = z[c];
+        for (int c = 0; c < 256; c++) sum += exp((double)z[c] - mx);
+        RL[i] = log(sum) + mx - z[y];
+        for (int c = 0; c < 256; c++) z[c] = (float)(exp((double)z[c] - mx) / sum / NT);
+        z[y] -= 1.0f / NT;
+    }
+}
+static void head_bwd(int t0, int t1, void *c) {
+    (void)c; float *dxf = XS + (size_t)t0 * D; mm_nn(t1 - t0, 256, D, 1, LG + (size_t)t0 * 256, V.head, dxf, 0); memset(DX + (size_t)t0 * D, 0, 4 * (size_t)(t1 - t0) * D);
+    for (int t = t0; t < t1; t++) rms_bwd(DX + (size_t)t * D, XF_ + (size_t)t * D, RF[t], XS + (size_t)t * D, D);
+}
 static double run(const uint8_t *tok, int train) {
     RSIG = 0;
     for (int b = 0; b < B; b++) for (int t = 0; t < T; t++) memcpy(XIN[0] + ((size_t)b * T + t) * D, V.emb + (size_t)tok[b * (T + 1) + t] * D, 4 * (size_t)D);
     for (int l = 0; l < L; l++) layer_fwd(l, XIN[l], XIN[l + 1], train && !P6 ? &ACT[l] : &ACT[0]);
-    for (int t = 0; t < NT; t++) RF[t] = rms(XF_ + (size_t)t * D, XIN[L] + (size_t)t * D, D);
-    mm_nt(NT, D, 256, 1, XF_, V.head, LG, 0);
-    double loss = 0;
-    for (int b = 0; b < B; b++) for (int t = 0; t < T; t++) {
-        float *z = LG + ((size_t)b * T + t) * 256, mx = -INFINITY; double sum = 0; const int y = tok[b * (T + 1) + t + 1];
-        for (int c = 0; c < 256; c++) if (z[c] > mx) mx = z[c];
-        for (int c = 0; c < 256; c++) sum += exp((double)z[c] - mx);
-        loss += log(sum) + mx - z[y];
-        for (int c = 0; c < 256; c++) z[c] = (float)(exp((double)z[c] - mx) / sum / NT);
-        z[y] -= 1.0f / NT;
-    }
+    TOK = tok; par_range(head_fwd, NT, NULL);
+    double loss = 0; for (int t = 0; t < NT; t++) loss += RL[t];
     if (!train) return loss / NT;
-    mm_tn(NT, 256, D, 1, LG, XF_, G.head);
-    float *dxf = XS; mm_nn(NT, 256, D, 1, LG, V.head, dxf, 0); memset(DX, 0, 4 * (size_t)NT * D);
-    for (int t = 0; t < NT; t++) rms_bwd(DX + (size_t)t * D, XF_ + (size_t)t * D, RF[t], dxf + (size_t)t * D, D);
+    pmm_tn(NT, 256, D, 1, LG, XF_, G.head);
+    par_range(head_bwd, NT, NULL);
     for (int l = L - 1; l >= 0; l--) layer_bwd(l, DX, P6 ? &ACT[0] : &ACT[l]);
     for (int b = 0; b < B; b++) for (int t = 0; t < T; t++) { float *g = G.emb + (size_t)tok[b * (T + 1) + t] * D; const float *d = DX + ((size_t)b * T + t) * D; for (int c = 0; c < D; c++) g[c] += d[c]; }
     return loss / NT;
@@ -318,7 +376,7 @@ int es_sparse_main(int argc, char **argv) {
     SCALE = atof(opt(argc, argv, "--scale", "0")); if (SCALE <= 0) SCALE = BITS == 2 ? ess_default_scale_t(D, F) : ess_default_scale(D, F);
     if (B < 1 || T < 2 || R < 0 || steps < 0) { fprintf(stderr, "bad --batch/--seq/--rank/--steps\n"); return 2; }
     NT = B * T;
-    FAST = !flag(argc, argv, "--exact") && D % 16 == 0 && F % 16 == 0; if (FAST) { I8 = i8_pick(&I8N); i8_tables(); }
+    FAST = !flag(argc, argv, "--exact") && D % 16 == 0 && F % 16 == 0; if (FAST) { I8 = i8_pick(&I8N); i8_tables(); I8CS = !strcmp(I8N, "avx-vnni") || !strcmp(I8N, "avx2") || (!strcmp(I8N, "amx") && (D % 64 || F % 64)); }
     memcpy(HD.magic, ESS_MAGIC, 8); HD.version = 1; HD.L = L; HD.E = E; HD.D = D; HD.F = F; HD.R = R; HD.K = 1; HD.T = T; HD.scale = SCALE; HD.lora_scale = LS; HD.reserved[0] = BITS; HD.reserved[1] = RR; EBY = ess_expert_bytes(&HD);
 
     /* experts file: mmap'd in place (the page cache is the expert cache) */
@@ -345,7 +403,7 @@ int es_sparse_main(int argc, char **argv) {
     for (int i = 0; i < na; i++) { act_t *a = &ACT[i]; a->h = fa(TD); a->rh = fa(NT); a->s = fa(TD); a->t = fa((size_t)NT * (RR ? RR : 1)); a->p = fa((size_t)NT * E); a->gate = fa(NT);
         a->u = fa((size_t)NT * F); a->zu = fa((size_t)NT * R1); a->zd = fa((size_t)NT * R1); a->y = fa(TD); a->sel = fa(NT); }
     XIN = malloc(sizeof(float *) * (L + 1)); for (int l = 0; l <= L; l++) XIN[l] = fa(TD);
-    DS = fa(TD); DG = fa(NT); DZ = fa((size_t)NT * E); DT = fa((size_t)NT * (RR ? RR : 1)); XS = fa(TD); XF_ = fa(TD); RF = fa(NT); LG = fa((size_t)NT * 256); DX = fa(TD);
+    DS = fa(TD); DG = fa(NT); DZ = fa((size_t)NT * E); DT = fa((size_t)NT * (RR ? RR : 1)); XS = fa(TD); XF_ = fa(TD); RF = fa(NT); RL = calloc(NT, sizeof(double)); LG = fa((size_t)NT * 256); DX = fa(TD);
     cnt = fa(E); off = fa(E + 1); lst = fa(NT);
     const int nw = P6 ? NTH : 1; WS = calloc(nw, sizeof(ws_t));
     for (int i = 0; i < nw; i++) { ws_t *w = &WS[i]; w->S = fa(TD); w->U = fa((size_t)NT * F); w->A = fa((size_t)NT * F); w->Y = fa(TD); w->dA = fa((size_t)NT * F); w->dS = fa(TD);

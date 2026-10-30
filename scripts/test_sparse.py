@@ -3,13 +3,13 @@
 
     make es_train libesd.so esd_ktest && python3 scripts/test_sparse.py [--data TEXT] [--work DIR]
 
-1. gradcheck, plain and --p6 (finite differences on every parameter group)
+1. gradcheck, plain and --p6 (finite differences on every parameter group; the int8 expert path's gradient must match the float one)
 2. tiny preset (the Trainer's: L2 E4 d512 f256 batch 8): held-out loss drops; plain and --p6 (4 threads) write identical checkpoints
 3. the Trainer's log contract: "step N train_ce X ... train_tok/s Y", "heldout_loss X", RESULT keys
 4. libesd.so reproduces the trainer's final held-out loss token by token, and es_common SparseRun generates through it
 5. SIGTERM stops after the current step, saves the checkpoint and prints RESULT
 6. ternary experts + low-rank router (the 70B phone format): gradcheck, training, libesd matches the trainer
-7. esd_ktest: every SIMD kernel equals the scalar one bit for bit
+7. esd_ktest: every SIMD kernel (libesd's and the trainer's int8 GEMM and quantizer) equals the scalar one bit for bit
 """
 import argparse, ctypes, math, os, re, signal, subprocess, sys, tempfile, time
 

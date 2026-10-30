@@ -15,10 +15,15 @@ The Trainer (Tharunmaks/Expert-Stream-Trainer, Train MoE page) runs `es_train mo
 with the Run decoder for its checkpoints in `moe/esd.c` (`make es_train libesd.so`, install both into the same `ES_BIN_DIR`; the
 checkpoint format is new, so do not mix this es_train with an older private libesd.so). Model and file formats: `moe/es_sparse.h`.
 No ES_BLAS needed. Missing preset expert files are generated (seeded). Test: `python3 scripts/test_sparse.py`.
-Measured on a 4-core x86 box (gcc -O3), seq 128:
-- tiny (L2 E4 d512 f256, batch 8): ~5,000 tok/s plain, ~6,500 tok/s --p6 x4; held-out 5.65 -> 2.67 in 60 steps on this repo's .md text.
-- small 0.27B (L8 E32 d1024 f512, batch 16): 340 tok/s plain, 645 tok/s --p6 x4, RSS 375 MB.
-- 2B (L16 E32 d2048 f1024, batch 16): 84 tok/s --p6 x4, RSS 1.8 GB, 3.2 GB of experts decoded per step; held-out 5.99 -> 3.66 in 3 steps.
+Expert matmuls run in int8 (Oct 30 2026, `moe/es_i8.h`): activations are quantized per row (as libesd does) and multiplied by the
+experts' exact int4/ternary values on AMX, AVX-VNNI, AVX2 or NEON SDOT (runtime-picked, all checked equal to scalar by `esd_ktest`).
+Experts are decoded straight from the file into the kernel layout. The router, head, norm and token-shift work is spread over the
+--p6 threads too. `--exact` keeps the old float path; gradcheck checks the float gradient by finite differences and requires the
+int8 gradient to agree with it (cosine 0.99999). Cost: tiny held-out after 60 steps 2.683 vs 2.670 float.
+Measured on a 4-core x86 box with AMX (gcc -O3), seq 128, old float build -> int8:
+- tiny (L2 E4 d512 f256, batch 8): 4,517 -> 11,368 tok/s plain, 6,168 -> 20,093 tok/s --p6 x4.
+- small 0.27B (L8 E32 d1024 f512, batch 16): 283 -> 1,714 tok/s plain, 575 -> 3,838 tok/s --p6 x4, RSS 375 MB.
+- 2B (L16 E32 d2048 f1024, batch 16): 72 -> 751 tok/s --p6 x4 (10.4x), RSS 1.9 GB, 3.2 GB of experts decoded per step.
 - plain and --p6 checkpoints are bit-identical; gradcheck passes for every parameter group; libesd.so reproduces the trainer's held-out loss.
 
 ## Phone-speed decoding for 70B-total MoE (libesd rewrite, Oct 24 2026)

@@ -30,8 +30,8 @@ static int check(const char *name, esd_kern k, esd_kern ref, int bits) {
 /* es_i8.h (the trainer's int8 GEMM): exact integer products, n x k by k x m in VNNI layout, B in [-8, 8] */
 static int check_i8(const char *name, i8_gemm_fn g) {
     int bad = 0;
-    for (int trial = 0; trial < 40; trial++) {
-        const int n = 1 + xr() % 23, k = 4 * (1 + xr() % 96), m = 16 * (1 + xr() % 12);
+    for (int trial = 0; trial < 40; trial++) {   /* odd trials: the AMX shapes (k % 64, m % 32), with full and partial 32-token blocks */
+        const int n = trial & 1 ? 1 + xr() % 70 : 1 + xr() % 23, k = trial & 1 ? 64 * (1 + xr() % 12) : 4 * (1 + xr() % 96), m = trial & 1 ? 32 * (1 + xr() % 6) : 16 * (1 + xr() % 12);
         int8_t *A = malloc((size_t)n * k), *B = malloc((size_t)k * m); int32_t *cs = calloc(m, 4), *c1 = malloc(4 * (size_t)n * m), *c2 = malloc(4 * (size_t)n * m);
         for (int i = 0; i < n * k; i++) A[i] = (int8_t)(trial % 3 == 0 ? (xr() & 1 ? 127 : -127) : (int)(xr() % 255) - 127);
         for (int i = 0; i < k * m; i++) { B[i] = (int8_t)(trial % 5 == 0 ? (xr() & 1 ? 8 : -8) : (int)(xr() % 17) - 8); cs[(i / 4) % m] += B[i]; }
@@ -41,6 +41,20 @@ static int check_i8(const char *name, i8_gemm_fn g) {
     }
     printf("%s %-12s %s\n", bad ? "FAIL" : "PASS", name, bad ? "differs from scalar" : "= scalar (40 random shapes)");
     return bad;
+}
+
+/* the activation quantizer: SIMD rows = the portable row, ties included */
+static int check_quant(void) {
+    int bad = 0;
+    for (int trial = 0; trial < 40; trial++) {
+        const int k = 32 * (1 + xr() % 64); float *x = malloc(4 * (size_t)k); int8_t *a = malloc(k), *b = malloc(k); float sa, sb; int32_t ra, rb;
+        for (int i = 0; i < k; i++) x[i] = trial % 2 ? ((int)(xr() % 255) - 127) * 0.5f : ((int)(xr() % 20001) - 10000) * 1e-3f;   /* odd trials: exact .5 ties */
+        if (trial % 2) x[0] = 63.5f, x[1] = -127.0f;
+        i8_quant_rows(x, 1, k, a, &sa, &ra); i8_quant_row_c(x, k, b, &sb, &rb);
+        if (memcmp(a, b, k) || sa != sb || ra != rb) bad++;
+        free(x); free(a); free(b);
+    }
+    printf("%s train quantizer = portable (40 rows, with ties)\n", bad ? "FAIL" : "PASS"); return bad;
 }
 
 int main(void) {
@@ -53,9 +67,11 @@ int main(void) {
     snprintf(n, sizeof n, "%s ternary", name); bad += check(n, k2, k2_scalar, 2);
     snprintf(n, sizeof n, "%s int8", name); bad += check(n, k8, k8_scalar, 8);
     snprintf(n, sizeof n, "%s tq1", name); bad += check(n, k1, k1_scalar, 1);
+    bad += check_quant();
     const char *gn; i8_gemm_fn g = i8_pick(&gn); snprintf(n, sizeof n, "train %s", gn); bad += check_i8(n, g);
 #if defined(__x86_64__) && defined(__GNUC__)
     if (__builtin_cpu_supports("avx2")) bad += check_i8("train avx2", i8_gemm_avx2);
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("avxvnni")) bad += check_i8("train vnni", i8_gemm_vnni);
 #endif
 #if defined(__aarch64__)
     bad += check("neon tq1", k1_neon, k1_scalar, 1); bad += check("neon int4", k4_neon, k4_scalar, 4); bad += check("neon ternary", k2_neon, k2_scalar, 2); bad += check("neon int8", k8_neon, k8_scalar, 8);
